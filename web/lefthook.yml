@@ -1,0 +1,8 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: unit-test
+      run: pnpm vitest run tests/unit
+
+    - name: build
+      run: pnpm build

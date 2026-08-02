@@ -1,0 +1,290 @@
+{
+  "super_admin_role_code": "super_admin",
+  "company_admin_role_code": "company_admin",
+  "legacy_role_aliases": {
+    "__admin__": "super_admin",
+    "公司管理员": "company_admin",
+    "项目经理": "project_manager",
+    "投资专员": "investment_specialist",
+    "法务专员": "legal_specialist",
+    "财审专员": "finance_specialist",
+    "尽调专员": "due_diligence_specialist",
+    "律所律师": "lawyer",
+    "项目助理": "project_assistant",
+    "法辅专员": "legal_assistant"
+  },
+  "companies": [
+    {
+      "company_id": "co_f1824b82e2116701",
+      "company_name": "国金中恒企业管理(海南)有限公司",
+      "company_type": "owner",
+      "status": "active",
+      "notes": "私有化模式默认公司/机构，由初始化种子确认。"
+    }
+  ],
+  "report_sections": [
+    {
+      "section_code": "data_gap_audit",
+      "section_id": "1",
+      "title": "数据洗脱与缺失核查",
+      "audience": "field",
+      "sort_order": 1,
+      "status": "active",
+      "description": "数据完整性、债务人、财务快照、差异核查"
+    },
+    {
+      "section_code": "asset_revaluation",
+      "section_id": "2",
+      "title": "资产清单与去毒重估",
+      "audience": "field",
+      "sort_order": 2,
+      "status": "active",
+      "description": "房产、矿产、债权、估值重估"
+    },
+    {
+      "section_code": "fund_flow_whiteglove",
+      "section_id": "3",
+      "title": "黑盒穿透：资金流向拓扑图（含白手套线索识别）",
+      "audience": "expert",
+      "sort_order": 3,
+      "status": "active",
+      "description": "资金流、行为线索、白手套识别"
+    },
+    {
+      "section_code": "legal_limitation_board",
+      "section_id": "4",
+      "title": "司法时效预警看板",
+      "audience": "field",
+      "sort_order": 4,
+      "status": "active",
+      "description": "诉讼、执行、时效风险与期限提醒"
+    },
+    {
+      "section_code": "restructuring_feasibility",
+      "section_id": "5",
+      "title": "重整盘活可行性评估",
+      "audience": "expert",
+      "sort_order": 5,
+      "status": "active",
+      "description": "重整、盘活、清偿路径与可行性"
+    },
+    {
+      "section_code": "hunter_action_strategy",
+      "section_id": "6",
+      "title": "猎人行动令：多维博弈与社会工程学策略",
+      "audience": "management",
+      "sort_order": 6,
+      "status": "active",
+      "description": "博弈策略、施压路径、敏感行动建议"
+    },
+    {
+      "section_code": "execution_task_board",
+      "section_id": "7",
+      "title": "督办看板：标准化执行任务",
+      "audience": "management",
+      "sort_order": 7,
+      "status": "active",
+      "description": "执行任务、责任人、期限、督办动作"
+    },
+    {
+      "section_code": "recovery_reconciliation_index",
+      "section_id": "8",
+      "title": "审计对账：增量回款贡献 + 下钻行动索引",
+      "audience": "management",
+      "sort_order": 8,
+      "status": "active",
+      "description": "回款贡献、对账、下钻入口、行动索引"
+    }
+  ],
+  "roles": [
+    {
+      "role_code": "super_admin",
+      "role_name": "全局超级管理员",
+      "tier": "management",
+      "modules": ["*"],
+      "visible_report_sections": ["*"],
+      "description": "内部超级管理员；可跨公司，仅用于运维/初始化，必须审计"
+    },
+    {
+      "role_code": "company_admin",
+      "role_name": "公司管理员",
+      "tier": "management",
+      "modules": ["*"],
+      "visible_report_sections": ["*"],
+      "description": "私有化/多租户公司管理员；仅限本公司全权，不能跨公司"
+    },
+    {
+      "role_code": "project_manager",
+      "role_name": "项目经理",
+      "tier": "management",
+      "modules": ["*"],
+      "visible_report_sections": ["*"],
+      "description": "项目负责人，全模块+管理"
+    },
+    {
+      "role_code": "investment_specialist",
+      "role_name": "投资专员",
+      "tier": "management",
+      "modules": ["report", "drilldown", "review", "progress", "deadline", "graph"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "fund_flow_whiteglove",
+        "restructuring_feasibility",
+        "hunter_action_strategy",
+        "execution_task_board",
+        "recovery_reconciliation_index"
+      ],
+      "description": "投资决策"
+    },
+    {
+      "role_code": "legal_specialist",
+      "role_name": "法务专员",
+      "tier": "expert",
+      "modules": ["report", "drilldown", "review", "corrections", "deadline", "graph"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "fund_flow_whiteglove",
+        "legal_limitation_board",
+        "restructuring_feasibility",
+        "hunter_action_strategy",
+        "execution_task_board"
+      ],
+      "description": "法务"
+    },
+    {
+      "role_code": "finance_specialist",
+      "role_name": "财审专员",
+      "tier": "expert",
+      "modules": ["report", "drilldown", "review", "progress", "corrections", "graph"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "restructuring_feasibility",
+        "recovery_reconciliation_index"
+      ],
+      "description": "财务审计"
+    },
+    {
+      "role_code": "due_diligence_specialist",
+      "role_name": "尽调专员",
+      "tier": "expert",
+      "modules": ["report", "drilldown", "deadline", "graph"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "fund_flow_whiteglove",
+        "legal_limitation_board",
+        "restructuring_feasibility"
+      ],
+      "description": "尽职调查"
+    },
+    {
+      "role_code": "lawyer",
+      "role_name": "律所律师",
+      "tier": "expert",
+      "modules": ["report", "drilldown", "review", "corrections", "deadline", "graph"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "fund_flow_whiteglove",
+        "legal_limitation_board",
+        "restructuring_feasibility",
+        "execution_task_board"
+      ],
+      "description": "外部律师"
+    },
+    {
+      "role_code": "project_assistant",
+      "role_name": "项目助理",
+      "tier": "field",
+      "modules": ["report", "progress", "deadline"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "legal_limitation_board",
+        "execution_task_board"
+      ],
+      "description": "项目助理"
+    },
+    {
+      "role_code": "legal_assistant",
+      "role_name": "法辅专员",
+      "tier": "field",
+      "modules": ["report", "drilldown", "deadline"],
+      "visible_report_sections": [
+        "data_gap_audit",
+        "asset_revaluation",
+        "legal_limitation_board",
+        "execution_task_board"
+      ],
+      "description": "法务辅助"
+    }
+  ],
+  "tag_catalog": [
+    {"dimension": "project_role", "tag_value": "项目经理", "tag_group": "", "sort_order": 1},
+    {"dimension": "project_role", "tag_value": "投资专员", "tag_group": "", "sort_order": 2},
+    {"dimension": "project_role", "tag_value": "法务专员", "tag_group": "", "sort_order": 3},
+    {"dimension": "project_role", "tag_value": "财审专员", "tag_group": "", "sort_order": 4},
+    {"dimension": "project_role", "tag_value": "项目助理", "tag_group": "", "sort_order": 5},
+    {"dimension": "project_role", "tag_value": "律所律师", "tag_group": "", "sort_order": 6},
+    {"dimension": "project_role", "tag_value": "尽调专员", "tag_group": "", "sort_order": 7},
+    {"dimension": "project_role", "tag_value": "法辅专员", "tag_group": "", "sort_order": 8},
+    {"dimension": "title", "tag_value": "律师", "tag_group": "", "sort_order": 1},
+    {"dimension": "title", "tag_value": "会计师", "tag_group": "", "sort_order": 2},
+    {"dimension": "title", "tag_value": "审计师", "tag_group": "", "sort_order": 3},
+    {"dimension": "title", "tag_value": "税务师", "tag_group": "", "sort_order": 4},
+    {"dimension": "title", "tag_value": "金融分析师", "tag_group": "", "sort_order": 5},
+    {"dimension": "title", "tag_value": "不动产评估师", "tag_group": "", "sort_order": 6},
+    {"dimension": "title", "tag_value": "矿产评估师", "tag_group": "", "sort_order": 7},
+    {"dimension": "title", "tag_value": "拍卖师", "tag_group": "", "sort_order": 8},
+    {"dimension": "title", "tag_value": "破产管理人", "tag_group": "", "sort_order": 9},
+    {"dimension": "title", "tag_value": "不良资产经营师", "tag_group": "", "sort_order": 10},
+    {"dimension": "expertise", "tag_value": "政策研究", "tag_group": "通用综合", "sort_order": 1},
+    {"dimension": "expertise", "tag_value": "行业分析", "tag_group": "通用综合", "sort_order": 2},
+    {"dimension": "expertise", "tag_value": "产业研判", "tag_group": "通用综合", "sort_order": 3},
+    {"dimension": "expertise", "tag_value": "宏观经济", "tag_group": "通用综合", "sort_order": 4},
+    {"dimension": "expertise", "tag_value": "AMC全业务运营", "tag_group": "通用综合", "sort_order": 5},
+    {"dimension": "expertise", "tag_value": "重组重整", "tag_group": "通用综合", "sort_order": 6},
+    {"dimension": "expertise", "tag_value": "经济庭实务", "tag_group": "法律司法", "sort_order": 7},
+    {"dimension": "expertise", "tag_value": "破产重整/清算", "tag_group": "法律司法", "sort_order": 8},
+    {"dimension": "expertise", "tag_value": "债权纠纷", "tag_group": "法律司法", "sort_order": 9},
+    {"dimension": "expertise", "tag_value": "强制执行", "tag_group": "法律司法", "sort_order": 10},
+    {"dimension": "expertise", "tag_value": "资产查封", "tag_group": "法律司法", "sort_order": 11},
+    {"dimension": "expertise", "tag_value": "案外异议处理", "tag_group": "法律司法", "sort_order": 12},
+    {"dimension": "expertise", "tag_value": "刑事线索梳理", "tag_group": "法律司法", "sort_order": 13},
+    {"dimension": "expertise", "tag_value": "全面风控", "tag_group": "风控侦查", "sort_order": 14},
+    {"dimension": "expertise", "tag_value": "经济侦查", "tag_group": "风控侦查", "sort_order": 15},
+    {"dimension": "expertise", "tag_value": "反贪稽查", "tag_group": "风控侦查", "sort_order": 16},
+    {"dimension": "expertise", "tag_value": "资产转移识别", "tag_group": "风控侦查", "sort_order": 17},
+    {"dimension": "expertise", "tag_value": "白手套排查", "tag_group": "风控侦查", "sort_order": 18},
+    {"dimension": "expertise", "tag_value": "税务稽查", "tag_group": "风控侦查", "sort_order": 19}
+  ],
+  "bootstrap_users": [
+    {
+      "user_id": "local_super_admin",
+      "login_identifier": "superadmin",
+      "username": "系统超级管理员",
+      "company_id": "",
+      "auth_source": "local",
+      "status": "active",
+      "is_super_admin": true,
+      "roles": ["super_admin"],
+      "password_env": "INIT_SUPER_ADMIN_PASSWORD",
+      "note": "私有化模式全局超级管理员；不归属任何单一公司。"
+    },
+    {
+      "user_id": "default_company_admin",
+      "login_identifier": "admin",
+      "username": "默认公司管理员",
+      "company_id": "co_f1824b82e2116701",
+      "auth_source": "local",
+      "status": "active",
+      "is_super_admin": false,
+      "roles": ["company_admin"],
+      "password_env": "INIT_COMPANY_ADMIN_PASSWORD",
+      "note": "私有化模式默认公司管理员。"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+.env_back
+
+# Logs & runtime
+logs/
+tmp/
+
+# Test / tooling caches
+.pytest_cache/
+
+# OS junk
+.DS_Store
+
+# Loose scratch scripts in repo root (not the tests/ suite)
+/test_*.py
