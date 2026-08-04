@@ -3,15 +3,7 @@
 import { useState, useEffect } from "react";
 import { useCases, type Case } from "@/lib/hooks/use-cases";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Scale, Search, Loader2, RefreshCw, SlidersHorizontal, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { RISK_BADGE_CLASS, scoreToRiskLevel } from "@/lib/utils/risk-style";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuCheckboxItem,
-} from "@/components/ui/dropdown-menu";
+import { ClipboardCheck, Search, Loader2, RefreshCw, Plus } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import Link from "next/link";
@@ -37,93 +29,19 @@ function exactTime(iso: string | null | undefined): string {
   }
 }
 
-function fmt(score: number | null | undefined): string {
-  if (score == null) return "—";
-  return Number.isInteger(score) ? String(score) : score.toFixed(1);
-}
-
-function scoreColor(score: number | null | undefined): string {
-  if (score == null) return "text-muted-foreground/30";
-  if (score >= 75) return "text-destructive";
-  if (score >= 50) return "text-amber-500";
-  return "text-emerald-500";
-}
-
-function CompositeBadge({ score }: { score?: number | null }) {
-  if (score == null) {
-    return <span className="inline-flex items-center rounded-md bg-muted/60 px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground/40">—</span>;
-  }
-  const cls = RISK_BADGE_CLASS[scoreToRiskLevel(score)];
-  return (
-    <span className={cn("inline-flex items-center rounded-md px-2 py-0.5 text-sm font-semibold tabular-nums", cls)}>
-      {fmt(score)}
-    </span>
-  );
-}
-
-function MiniScore({ score }: { score?: number | null }) {
-  return (
-    <span className={cn("tabular-nums text-xs font-medium", scoreColor(score))}>
-      {fmt(score)}
-    </span>
-  );
-}
-
 function StatusBadge({ status }: { status: string }) {
+  const labels: Record<string, string> = {
+    planning: "计划阶段",
+    fieldwork: "现场执行",
+    review: "复核中",
+    reporting: "报告中",
+    completed: "已完成",
+    archived: "已归档",
+  };
   return (
     <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground/70 whitespace-nowrap">
-      {status}
+      {labels[status] ?? status}
     </span>
-  );
-}
-
-const ENGINE_COLS: { key: keyof Case; label: string }[] = [
-  { key: "delta_score",      label: "轧差审计" },
-  { key: "valuation_score",  label: "瑕疵挤水" },
-  { key: "deadline_score",   label: "时效预警" },
-  { key: "behavioral_score", label: "行为扫描" },
-];
-
-const OPTIONAL_COLS: { key: string; label: string }[] = [
-  { key: "created_at", label: "创建时间" },
-  { key: "updated_at", label: "更新时间" },
-];
-
-function ColumnPicker({
-  visible,
-  onToggle,
-}: {
-  visible: Set<string>;
-  onToggle: (key: string) => void;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "flex items-center gap-1.5 rounded-md border border-border/50 px-2.5 py-1.5 text-xs transition-colors",
-            "text-muted-foreground hover:border-border hover:bg-accent hover:text-foreground",
-            "data-[state=open]:border-border data-[state=open]:bg-accent data-[state=open]:text-foreground"
-          )}
-        >
-          <SlidersHorizontal className="size-3" />
-          列显示
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-36">
-        {OPTIONAL_COLS.map(({ key, label }) => (
-          <DropdownMenuCheckboxItem
-            key={key}
-            checked={visible.has(key)}
-            onCheckedChange={() => onToggle(key)}
-            onSelect={(e) => e.preventDefault()}
-          >
-            {label}
-          </DropdownMenuCheckboxItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -131,7 +49,6 @@ export default function CasesPage() {
   const { cases, isLoading, error, total, page, setPage, keyword, setKeyword, retry, refresh } = useCases();
   const [inputValue, setInputValue] = useState("");
   const [materialCase, setMaterialCase] = useState<Case | null>(null);
-  const [visibleCols, setVisibleCols] = useState<Set<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(false);
 
   useEffect(() => {
@@ -139,20 +56,13 @@ export default function CasesPage() {
     return () => clearTimeout(t);
   }, [inputValue, setKeyword]);
 
-  const toggleCol = (key: string) =>
-    setVisibleCols((prev) => {
-      const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
-      return next;
-    });
-
   const hasMore = cases.length < total;
 
   return (
     <div className="flex h-full flex-col">
       <header className="flex h-14 shrink-0 items-center gap-2 px-4">
         <SidebarTrigger className="size-9 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground" />
-        <span className="text-sm text-foreground/70">案件列表</span>
+        <span className="text-sm text-foreground/70">年度审计项目</span>
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-scroll p-5">
@@ -164,18 +74,17 @@ export default function CasesPage() {
               <input
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                placeholder="搜索案件名称或债务人…"
+                placeholder="搜索项目名称、被审计单位或项目编号…"
                 className="w-full rounded-lg border border-border/50 bg-background pl-9 pr-4 py-2 text-sm placeholder:text-muted-foreground/40 outline-none focus:border-border"
               />
             </div>
-            <ColumnPicker visible={visibleCols} onToggle={toggleCol} />
             <button
               type="button"
               onClick={() => setCreateOpen(true)}
               className="flex items-center gap-1.5 rounded-md border border-border/50 bg-foreground/5 px-2.5 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:border-border hover:bg-accent hover:text-foreground"
             >
               <Plus className="size-3" />
-              创建案件
+              创建年审项目
             </button>
           </div>
 
@@ -201,10 +110,10 @@ export default function CasesPage() {
           {!isLoading && !error && cases.length === 0 && (
             <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
               <div className="flex size-12 items-center justify-center rounded-xl border border-border/40 bg-muted/40">
-                <Scale className="size-5 text-muted-foreground/40" />
+                <ClipboardCheck className="size-5 text-muted-foreground/40" />
               </div>
               <p className="text-sm text-muted-foreground/60">
-                {keyword ? "未找到匹配案件" : "暂无案件"}
+                {keyword ? "未找到匹配年审项目" : "暂无年审项目"}
               </p>
             </div>
           )}
@@ -215,22 +124,13 @@ export default function CasesPage() {
                 <thead>
                   <tr className="border-b border-border/40">
                     <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">ID</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">案件名称</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">债务人</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-muted-foreground/60 whitespace-nowrap">综合风险</th>
-                    {ENGINE_COLS.map(({ key, label }) => (
-                      <th key={key} className="px-4 py-3 text-center text-xs font-medium text-muted-foreground/60 whitespace-nowrap">
-                        {label}
-                      </th>
-                    ))}
+                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">项目名称</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">被审计单位</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-muted-foreground/60 whitespace-nowrap">审计年度</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-muted-foreground/60 whitespace-nowrap">待办 / 总任务</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">状态</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">卷宗上传</th>
-                    {visibleCols.has("created_at") && (
-                      <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">创建时间</th>
-                    )}
-                    {visibleCols.has("updated_at") && (
-                      <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">更新时间</th>
-                    )}
+                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">资料完整性</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">更新时间</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground/60 whitespace-nowrap">操作</th>
                   </tr>
                 </thead>
@@ -248,7 +148,7 @@ export default function CasesPage() {
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2.5">
                           <div className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/30 bg-muted/50">
-                            <Scale className="size-3.5 text-muted-foreground/50" />
+                            <ClipboardCheck className="size-3.5 text-muted-foreground/50" />
                           </div>
                           <div className="min-w-0">
                             <p className="max-w-[220px] truncate text-xs font-medium text-foreground/90">
@@ -259,36 +159,25 @@ export default function CasesPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground/70">
-                        <span className="block max-w-[160px] truncate">{c.debtor_names ?? "—"}</span>
+                        <span className="block max-w-[160px] truncate">{c.entity_name || "—"}</span>
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        <CompositeBadge score={c.composite_score} />
+                      <td className="px-4 py-3 text-center text-xs tabular-nums text-foreground/80">
+                        {c.fiscal_year ?? "—"}
                       </td>
-                      {ENGINE_COLS.map(({ key }) => (
-                        <td key={key} className="px-4 py-3 text-center">
-                          <MiniScore score={c[key] as number | null | undefined} />
-                        </td>
-                      ))}
+                      <td className="px-4 py-3 text-center text-xs tabular-nums text-muted-foreground/70">
+                        {c.pending_task_count ?? 0} / {c.task_count ?? 0}
+                      </td>
                       <td className="px-4 py-3">
                         <StatusBadge status={c.status} />
                       </td>
                       <td className="px-4 py-3">
                         <CaseUploadStatus caseId={c.case_id} />
                       </td>
-                      {visibleCols.has("created_at") && (
-                        <td className="px-4 py-3" title={exactTime(c.created_at)}>
-                          <span className="text-xs text-muted-foreground/50 whitespace-nowrap">
-                            {relativeTime(c.created_at)}
-                          </span>
-                        </td>
-                      )}
-                      {visibleCols.has("updated_at") && (
-                        <td className="px-4 py-3" title={exactTime(c.updated_at)}>
-                          <span className="text-xs text-muted-foreground/50 whitespace-nowrap">
-                            {relativeTime(c.updated_at)}
-                          </span>
-                        </td>
-                      )}
+                      <td className="px-4 py-3" title={exactTime(c.updated_at)}>
+                        <span className="text-xs text-muted-foreground/50 whitespace-nowrap">
+                          {relativeTime(c.updated_at)}
+                        </span>
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <button
@@ -299,10 +188,16 @@ export default function CasesPage() {
                             添加材料
                           </button>
                           <Link
+                            href={`/chat?caseId=${c.case_id}`}
+                            className="text-xs font-medium text-primary hover:text-primary/80 transition-colors whitespace-nowrap"
+                          >
+                            AI 审计 →
+                          </Link>
+                          <Link
                             href={`/cases/${c.case_id}`}
                             className="text-xs text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
                           >
-                            治理 →
+                            项目工作台 →
                           </Link>
                         </div>
                       </td>
@@ -329,7 +224,7 @@ export default function CasesPage() {
 
           {total > 0 && (
             <p className="text-center text-xs text-muted-foreground/40">
-              共 {total} 个案件，已显示 {cases.length} 个
+              共 {total} 个年审项目，已显示 {cases.length} 个
             </p>
           )}
 

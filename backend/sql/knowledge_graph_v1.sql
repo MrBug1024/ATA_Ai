@@ -14,7 +14,7 @@ COMMENT ON EXTENSION vector IS 'pgvector 扩展，用于保存 source_chunk.embe
 CREATE TABLE IF NOT EXISTS public.source_file (
     id BIGSERIAL PRIMARY KEY,
     case_id BIGINT NOT NULL,
-    debtor_id BIGINT NOT NULL DEFAULT 0,
+    entity_id BIGINT NOT NULL DEFAULT 0,
     file_name TEXT NOT NULL,
     file_type TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT '',
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS public.source_file (
 COMMENT ON TABLE public.source_file IS '原始材料文件主表；一条记录代表某案件中的一个源文件，是页表、chunk表和后续证据回源的最上游锚点。';
 COMMENT ON COLUMN public.source_file.id IS '文件主键 ID；供 source_page、source_chunk、kg_evidence_link 等下游表作为外键引用。';
 COMMENT ON COLUMN public.source_file.case_id IS '案件 ID；用于把文件归属到具体案件，并支持案件级检索和隔离。';
-COMMENT ON COLUMN public.source_file.debtor_id IS '债务人 ID；若上传时已识别出债务人，可写入该字段，未知时保留 0。';
+COMMENT ON COLUMN public.source_file.entity_id IS '被审计单位实体 ID；由年度审计项目主数据确定，未知时保留 0。';
 COMMENT ON COLUMN public.source_file.file_name IS '原始文件名；用于前端展示、人工核查和证据面板回显。';
 COMMENT ON COLUMN public.source_file.file_type IS '文件业务类型；如 document、image、text，用于区分 OCR/直读策略。';
 COMMENT ON COLUMN public.source_file.content_type IS '上传时的 MIME 类型；用于保留前端上传的原始文件类型信息。';
@@ -208,7 +208,7 @@ COMMENT ON COLUMN public.kg_relation.to_entity_id IS '关系终点实体 ID；�
 COMMENT ON COLUMN public.kg_relation.relation_type IS '关系类型编码；如 guarantee、shareholding、bank_flow、litigation。';
 COMMENT ON COLUMN public.kg_relation.relation_label IS '关系显示标签；供前端图谱边文案或报告表述直接使用。';
 COMMENT ON COLUMN public.kg_relation.direction IS '关系方向；directed 表示有向边，undirected 表示无向边。';
-COMMENT ON COLUMN public.kg_relation.amount IS '与该关系直接相关的金额；如担保金额、转账金额、债权金额。';
+COMMENT ON COLUMN public.kg_relation.amount IS '与该关系直接相关的金额；如交易金额、凭证金额或账户余额。';
 COMMENT ON COLUMN public.kg_relation.amount_currency IS '金额币种；默认 CNY，可扩展其他币种。';
 COMMENT ON COLUMN public.kg_relation.event_date IS '关系发生或生效日期；如转账日期、查封日期、合同签署日期。';
 COMMENT ON COLUMN public.kg_relation.attributes IS '关系扩展属性；保存合同编号、比例、期限、法院案号等非固定字段。';

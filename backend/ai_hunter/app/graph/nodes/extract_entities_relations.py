@@ -28,7 +28,7 @@ from ..state import AuditGraphState
 
 MAX_EXTRACTION_CHUNKS = 24
 MAX_CHUNK_TEXT_CHARS = 1200
-PROMPT_VERSION = "kg-extraction-v1"
+PROMPT_VERSION = "annual-audit-kg-extraction-v1"
 
 
 def extract_entities_relations(state: AuditGraphState) -> AuditGraphState:
@@ -48,13 +48,13 @@ def extract_entities_relations(state: AuditGraphState) -> AuditGraphState:
     llm_config = settings.get_llm_config("agent")
     run_id = _create_extraction_run(case_id=case_id, source_file_ids=source_file_ids, chunk_count=len(chunk_ids))
     if llm_config["api_key"]:
-        prompt = load_prompt("extract_entities_relations.txt")
+        prompt = load_prompt("annual_audit_extract_entities_relations.txt")
         messages = [
             SystemMessage(content=prompt),
             HumanMessage(
                 content=(
-                    f"案件ID: {case_id}\n"
-                    f"债务人名称: {state.get('current_debtor_name', '') or '未知'}\n"
+                    f"年审项目编号: {case_id}\n"
+                    f"被审计单位: {state.get('current_entity_name', '') or '未知'}\n"
                     f"可用 chunk_id 列表: {', '.join(chunk_ids)}\n\n"
                     f"材料片段:\n{extraction_input}"
                 )
@@ -220,7 +220,7 @@ def _normalize_claim_type(raw_claim_type: Any, *, claim_text: str, relation_temp
     family = _claim_semantic_family(claim_text)
     if relation_temp_id:
         return "relation_fact"
-    if family in {"insolvency", "restructuring_possibility"}:
+    if family in {"risk", "exception"}:
         return "risk_signal"
     if normalized in {"entity_fact", "relation_fact", "risk_signal"}:
         return normalized
@@ -231,20 +231,24 @@ def _claim_semantic_family(claim_text: str) -> str:
     normalized = _normalize_claim_text(claim_text)
     if not normalized:
         return "generic"
-    if "债权人会议" in normalized:
-        if "重整" in normalized or "和解" in normalized:
-            return "restructuring_possibility"
-        return "creditors_meeting"
-    if "资不抵债" in normalized or "清算净值" in normalized or "资产评估总价值" in normalized:
-        return "insolvency"
-    if "管理人" in normalized and ("指定" in normalized or "担任" in normalized):
-        return "administrator_appointment"
-    if "申请" in normalized and "破产" in normalized:
-        return "bankruptcy_application"
-    if "受理" in normalized and "破产" in normalized:
-        return "bankruptcy_acceptance"
-    if "宣告破产" in normalized or ("裁定" in normalized and "破产" in normalized):
-        return "bankruptcy_declaration"
+    if any(marker in normalized for marker in ("营业收入", "收入确认", "截止性", "截止测试", "跨期")):
+        return "revenue_recognition"
+    if any(marker in normalized for marker in ("应收账款", "账龄", "坏账准备", "函证", "总账")):
+        return "receivable_aging"
+    if any(marker in normalized for marker in ("银行流水", "银行账户", "对账单", "未达账项")):
+        return "bank_transaction"
+    if any(marker in normalized for marker in ("关联方", "控制", "股东")):
+        return "related_party"
+    if any(marker in normalized for marker in ("开户行", "账号")):
+        return "bank_account"
+    if any(marker in normalized for marker in ("凭证", "分录", "科目")):
+        return "journal_entry"
+    if "发票" in normalized:
+        return "invoice"
+    if "合同" in normalized:
+        return "contract"
+    if any(marker in normalized for marker in ("异常", "错报", "差异", "不一致")):
+        return "exception"
     return "generic"
 
 
@@ -724,20 +728,20 @@ def _coerce_optional_str(value: Any) -> str | None:
 
 
 def _build_fallback_bundle(state: AuditGraphState, chunk_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-    debtor_name = state.get("current_debtor_name", "")
-    entity_temp_id = "entity_debtor_1"
+    entity_name = state.get("current_entity_name", "")
+    entity_temp_id = "entity_audited_1"
     relation_temp_id = "relation_placeholder_1"
     first_chunk_id = chunk_ids[0]
     case_id = int(state.get("current_case_id", 0) or 0)
-    canonical_name = debtor_name or "未知主体"
+    canonical_name = entity_name or "未知被审计单位"
     normalized_name = normalize_entity_name(canonical_name)
     entity_key = build_entity_key(case_id=case_id, entity_type="company", normalized_name=normalized_name)
     relation_key = build_relation_key(
         case_id=case_id,
-        relation_type="bankruptcy_participant",
+        relation_type="audited_entity",
         from_entity_key=entity_key,
         to_entity_key=entity_key,
-        relation_label="案件主体",
+        relation_label="被审计单位",
     )
     return {
         "entities": [
@@ -764,8 +768,8 @@ def _build_fallback_bundle(state: AuditGraphState, chunk_ids: list[str]) -> dict
                 "relation_key": relation_key,
                 "from_entity_temp_id": entity_temp_id,
                 "to_entity_temp_id": entity_temp_id,
-                "relation_type": "bankruptcy_participant",
-                "relation_label": "案件主体",
+                "relation_type": "audited_entity",
+                "relation_label": "被审计单位",
                 "direction": "directed",
                 "amount": None,
                 "amount_currency": "CNY",
@@ -781,7 +785,7 @@ def _build_fallback_bundle(state: AuditGraphState, chunk_ids: list[str]) -> dict
         "claims": [
             {
                 "claim_type": "entity_fact",
-                "claim_text": f"当前材料识别到案件主体：{debtor_name or '未知主体'}",
+                "claim_text": f"当前资料对应被审计单位：{entity_name or '未知被审计单位'}",
                 "entity_temp_id": entity_temp_id,
                 "relation_temp_id": relation_temp_id,
                 "claim_value": {},

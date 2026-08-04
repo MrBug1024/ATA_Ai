@@ -48,14 +48,14 @@ import {
 const PICKER_MAX = 8;
 
 const COMMANDS: readonly SlashCommandDef[] = [
-  { key: "case", label: "/case", description: "选择要分析的案件" },
+  { key: "case", label: "/case", description: "选择要执行的年审项目" },
 ];
 
 interface SelectedCase {
   case_id: number;
   case_name?: string;
   case_type?: string;
-  debtor_names?: string;
+  entity_name?: string;
 }
 
 type PickerMode =
@@ -100,7 +100,7 @@ function ChatPageClient() {
         case_id: found.case_id,
         case_name: found.case_name,
         case_type: found.case_type,
-        debtor_names: found.debtor_names,
+        entity_name: found.entity_name,
       });
     }
   }, [cases, selectedCase]);
@@ -142,7 +142,7 @@ function ChatPageClient() {
       case_id: c.case_id,
       case_name: c.case_name,
       case_type: c.case_type,
-      debtor_names: c.debtor_names,
+      entity_name: c.entity_name,
     });
     setQuery((prev) => stripSlashLine(prev));
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -244,7 +244,7 @@ function ChatPageClient() {
           有什么可以帮助您？
         </h1>
         <p className="animate-in fade-in slide-in-from-bottom-1 fill-mode-both mt-2 text-center text-muted-foreground text-xl delay-75 duration-200">
-          上传文档或直接提问，AI 将为您分析
+          上传账套与审计资料，AI 将执行年审分析、证据追溯、图谱构建与报告生成
         </p>
         <div className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1">
           {COMMANDS.map((cmd) => (
@@ -295,7 +295,7 @@ function ChatPageClient() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={selectedCase ? "向案件提问…" : "发送消息，或输入 / 调用指令"}
+              placeholder={selectedCase ? "向年审项目提问或要求执行审计程序…" : "发送消息，或输入 / 选择年审项目"}
               rows={1}
               className="max-h-32 min-h-10 w-full resize-none bg-transparent px-2 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60"
             />
@@ -361,7 +361,7 @@ function AttachmentButton({
       </button>
     );
   }
-  const reason = "需要选择案件才能上传附件";
+  const reason = "需要选择年审项目才能上传附件";
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
@@ -475,14 +475,14 @@ function SelectedCaseChip({
     <div className="flex items-center gap-2 self-start rounded-full border border-border/60 bg-muted/50 py-1 pl-2.5 pr-1 text-xs">
       <Scale className="size-3 text-muted-foreground/60" />
       <span className="max-w-[220px] truncate text-foreground/85">
-        {selected.case_name ?? `案件 #${selected.case_id}`}
+        {selected.case_name ?? `年审项目 #${selected.case_id}`}
       </span>
       <span className="font-mono text-[10px] text-muted-foreground/50">#{selected.case_id}</span>
       <button
         type="button"
         onClick={onClear}
         className="ml-0.5 flex size-4 items-center justify-center rounded-full text-muted-foreground/60 hover:bg-accent hover:text-foreground"
-        aria-label="移除已选案件"
+        aria-label="移除已选年审项目"
       >
         <X className="size-2.5" />
       </button>

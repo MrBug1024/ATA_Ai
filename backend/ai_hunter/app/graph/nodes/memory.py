@@ -89,7 +89,7 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     existing_messages = list(state.get("messages") or [])
     existing_summary = (state.get("memory_summary") or "").strip()
     current_case_id = state.get("current_case_id", 0)
-    current_debtor_name = state.get("current_debtor_name", "")
+    current_entity_name = state.get("current_entity_name", "")
     parse_summary = (state.get("parse_summary") or "").strip()
     final_report = resolve_final_report(state).strip()
     agent_output = (state.get("agent_output") or "").strip()
@@ -99,8 +99,8 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         f"intent={intent}",
         f"case_id={current_case_id}",
     ]
-    if current_debtor_name:
-        assistant_summary_parts.append(f"debtor_name={current_debtor_name}")
+    if current_entity_name:
+        assistant_summary_parts.append(f"entity_name={current_entity_name}")
     if parse_summary:
         assistant_summary_parts.append(f"ingest={parse_summary[:160]}")
     elif final_report:

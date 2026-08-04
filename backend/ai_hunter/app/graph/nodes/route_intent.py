@@ -1,7 +1,7 @@
 import logging
 
 from ..routers import resolve_route_decision
-from ..route_shadow import build_route_shadow
+from ..execution_route import build_execution_route
 from ..state import AuditGraphState
 
 
@@ -23,29 +23,16 @@ def classify_intent(state: AuditGraphState) -> AuditGraphState:
     return {
         "intent": decision.intent,
         "route_decision": decision.model_dump(),
-        "route_shadow": build_route_shadow(decision),
+        "execution_route": build_execution_route(decision),
     }
 
 
-def intent_edge(state: AuditGraphState) -> str:
-    decision = state.get("route_decision") or {}
-    if isinstance(decision, dict) and decision.get("needs_clarification"):
-        return "clarify"
-    return state.get("intent", "drilldown")
-
-
 def execution_route_edge(state: AuditGraphState) -> str:
-    """Route migrated capabilities while keeping legacy ingestion single-pass."""
+    """Route every request through the annual-audit business-line graph."""
     decision = state.get("route_decision") or {}
     if isinstance(decision, dict) and decision.get("needs_clarification"):
         return "clarify"
-    shadow = state.get("route_shadow") or {}
-    if isinstance(shadow, dict) and shadow.get("active_mode") == "business_line":
-        return str(shadow.get("business_line_target") or "drilldown")
-    if (
-        isinstance(decision, dict)
-        and decision.get("capability") == "material.upload"
-        and state.get("uploaded_files")
-    ):
-        return "finalize"
-    return state.get("intent", "drilldown")
+    route = state.get("execution_route") or {}
+    if isinstance(route, dict):
+        return str(route.get("target") or "clarify_route")
+    return "clarify_route"

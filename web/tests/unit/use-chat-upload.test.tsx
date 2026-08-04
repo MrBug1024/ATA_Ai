@@ -20,9 +20,9 @@ describe("useChatUpload", () => {
       jsonRes({
         upload_batch_id: "b1",
         case_id: 42,
-        debtor_id: 0,
-        debtor_name: "",
-        effective_debtor_name: "",
+        entity_id: 0,
+        entity_name: "",
+        effective_entity_name: "",
         file_count: 1,
         duplicate_files: [],
         files: [
@@ -60,12 +60,12 @@ describe("useChatUpload", () => {
     expect(resp.files[0].file_hash).toBe("h1");
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("http://10.0.10.2:8081/chat/upload-files");
+    expect(url).toBe("http://localhost:8080/chat/upload-files");
     expect((init as RequestInit).method).toBe("POST");
     const form = (init as RequestInit).body as FormData;
     expect(form.get("current_case_id")).toBe("42");
-    expect(form.get("current_debtor_id")).toBe("0");
-    expect(form.get("current_debtor_name")).toBe("");
+    expect(form.get("current_entity_id")).toBe("0");
+    expect(form.get("current_entity_name")).toBe("");
     const files = form.getAll("files");
     expect(files).toHaveLength(1);
   });
@@ -96,16 +96,16 @@ describe("useChatUpload", () => {
     ).rejects.toThrow("文件上传失败 (500)");
   });
 
-  it("可选字段 debtorId/debtorName/docCategory/batchName 等会写入 FormData", async () => {
+  it("可选字段 entityId/entityName/docCategory/batchName 等会写入 FormData", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonRes({ upload_batch_id: "b1", case_id: 1, debtor_id: 0, debtor_name: "", effective_debtor_name: "", file_count: 0, duplicate_files: [], files: [] })
+      jsonRes({ upload_batch_id: "b1", case_id: 1, entity_id: 0, entity_name: "", effective_entity_name: "", file_count: 0, duplicate_files: [], files: [] })
     );
     const { result } = renderHook(() => useChatUpload());
     await result.current.upload(
       {
         caseId: 1,
-        debtorId: 7,
-        debtorName: "张三",
+        entityId: 7,
+        entityName: "张三",
         docCategory: "合同",
         batchName: "批次A",
         uploadBatchId: "b1",
@@ -115,8 +115,8 @@ describe("useChatUpload", () => {
       []
     );
     const form = fetchMock.mock.calls[0][1]!.body as FormData;
-    expect(form.get("current_debtor_id")).toBe("7");
-    expect(form.get("current_debtor_name")).toBe("张三");
+    expect(form.get("current_entity_id")).toBe("7");
+    expect(form.get("current_entity_name")).toBe("张三");
     expect(form.get("doc_category")).toBe("合同");
     expect(form.get("batch_name")).toBe("批次A");
     expect(form.get("upload_batch_id")).toBe("b1");

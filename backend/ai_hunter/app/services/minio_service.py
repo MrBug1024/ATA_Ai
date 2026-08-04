@@ -49,11 +49,11 @@ class MinioService:
         self,
         *,
         case_id: int,
-        debtor_id: int,
+        entity_id: int,
         file_name: str,
         content_type: str,
         file_bytes: bytes,
-        debtor_name: str = "",
+        entity_name: str = "",
     ) -> MinioUploadResult:
         """Upload one raw case file to the configured raw bucket."""
         if not self.enabled:
@@ -63,9 +63,9 @@ class MinioService:
 
         object_key = build_raw_object_key(
             case_id=case_id,
-            debtor_id=debtor_id,
+            entity_id=entity_id,
             file_name=file_name,
-            debtor_name=debtor_name,
+            entity_name=entity_name,
         )
         result = self.client.put_object(
             self.bucket_raw,
@@ -125,24 +125,24 @@ class MinioService:
 def build_raw_object_key(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     file_name: str,
-    debtor_name: str = "",
+    entity_name: str = "",
 ) -> str:
     """Build a stable raw-case-file object key.
 
-    debtor 段优先级:debtor_id > debtor_name > debtor-unknown
+    entity 段优先级: entity_id > entity_name > entity-unknown
     """
     safe_name = Path(file_name or "uploaded-file").name
     encoded_name = quote(safe_name, safe="")
     case_segment = f"case-{case_id}" if case_id > 0 else "case-unknown"
-    if debtor_id > 0:
-        debtor_segment = f"debtor-{debtor_id}"
-    elif (debtor_name or "").strip():
-        debtor_segment = f"debtor-{quote(debtor_name.strip(), safe='')}"
+    if entity_id > 0:
+        entity_segment = f"entity-{entity_id}"
+    elif (entity_name or "").strip():
+        entity_segment = f"entity-{quote(entity_name.strip(), safe='')}"
     else:
-        debtor_segment = "debtor-unknown"
-    return f"{case_segment}/{debtor_segment}/raw/{encoded_name}"
+        entity_segment = "entity-unknown"
+    return f"{case_segment}/{entity_segment}/raw/{encoded_name}"
 
 
 def _guess_content_type(file_name: str) -> str:

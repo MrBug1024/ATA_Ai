@@ -22,7 +22,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".
 def load_chunks(state: AuditGraphState) -> AuditGraphState:
     """Build traceable source_file/page/chunk rows from uploaded files and OCR layout output."""
     case_id = state.get("current_case_id", 0)
-    debtor_id = state.get("current_debtor_id", 0)
+    entity_id = state.get("current_entity_id", 0)
     ingest_payload_ref = state.get("ingest_payload_ref", "")
     uploaded_files = state.get("uploaded_files") or []
     if case_id <= 0 or not uploaded_files:
@@ -47,7 +47,7 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         source_file_rows.append(
             {
                 "case_id": case_id,
-                "debtor_id": debtor_id,
+                "entity_id": entity_id,
                 "file_name": file_name,
                 "file_type": file_item.get("type", "document"),
                 "content_type": file_item.get("content_type", ""),
@@ -101,7 +101,7 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         kg_service=kg_service,
         state=state,
         case_id=case_id,
-        debtor_id=debtor_id,
+        entity_id=entity_id,
         inserted_files=inserted_files,
         uploaded_files=uploaded_files,
     )
@@ -165,7 +165,7 @@ def _persist_upload_batch_context(
     kg_service,
     state: AuditGraphState,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     inserted_files: list[dict[str, Any]],
     uploaded_files: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -180,7 +180,7 @@ def _persist_upload_batch_context(
         **dict(state.get("upload_batch_summary") or {}),
         "upload_batch_id": upload_batch_id,
         "case_id": case_id,
-        "debtor_id": debtor_id,
+        "entity_id": entity_id,
         "batch_name": state.get("batch_name", ""),
         "doc_category": state.get("doc_category", ""),
         "operator_id": state.get("operator_id", ""),

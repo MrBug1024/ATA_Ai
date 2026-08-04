@@ -6,8 +6,8 @@ export interface LangGraphThread {
   title: string;
   checkpoint_id: string;
   case_id: number;
-  debtor_id: number;
-  debtor_name: string;
+  entity_id: number;
+  entity_name: string;
   last_query: string;
   last_intent: string;
   updated_at: string | null;
@@ -25,8 +25,8 @@ export interface ThreadDetailResponse {
   title: string;
   checkpoint_id: string;
   case_id: number;
-  debtor_id: number;
-  debtor_name: string;
+  entity_id: number;
+  entity_name: string;
   last_query: string;
   last_intent: string;
   final_report_ref: string;

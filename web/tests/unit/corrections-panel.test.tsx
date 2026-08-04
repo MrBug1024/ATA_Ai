@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { CorrectionModel } from "@/lib/types/case-analytics";
+import type { CorrectionModel } from "@/lib/types/audit-corrections";
 
 const mocks = vi.hoisted(() => ({
   useCaseCorrections: vi.fn(),

@@ -10,12 +10,11 @@ export type PermissionTier = "field" | "expert" | "management";
 export type ModuleCode =
   | "admin"
   | "corrections"
-  | "deadline"
   | "drilldown"
   | "graph"
-  | "progress"
+  | "materials"
   | "report"
-  | "review";
+  | "tasks";
 
 export interface CompanyRecord {
   company_id: string;

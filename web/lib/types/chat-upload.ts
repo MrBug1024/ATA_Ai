@@ -22,9 +22,9 @@ export interface FileItem {
 export interface ChatUploadResponse {
   upload_batch_id: string;
   case_id: number;
-  debtor_id: number;
-  debtor_name: string;
-  effective_debtor_name: string;
+  entity_id: number;
+  entity_name: string;
+  effective_entity_name: string;
   file_count: number;
   duplicate_files: string[];
   files: FileItem[];
@@ -32,8 +32,8 @@ export interface ChatUploadResponse {
 
 export interface ChatUploadRequest {
   caseId: number;
-  debtorId?: number;
-  debtorName?: string;
+  entityId?: number;
+  entityName?: string;
   docCategory?: string;
   batchName?: string;
   uploadBatchId?: string;

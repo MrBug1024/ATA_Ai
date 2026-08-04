@@ -1,0 +1,155 @@
+name: ata-agent-local
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ata-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ANNUAL_POSTGRES_DATABASE:-ata_agent_platform}
+      POSTGRES_USER: ${ANNUAL_POSTGRES_USER:-ata_agent_app}
+      POSTGRES_PASSWORD: ${ANNUAL_POSTGRES_PASSWORD:?ANNUAL_POSTGRES_PASSWORD is required}
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    ports:
+      - "${ANNUAL_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - annual_postgres_data:/var/lib/postgresql/data
+      - ../../backend/sql/langgraph_checkpointer.sql:/docker-entrypoint-initdb.d/010_langgraph_checkpointer.sql:ro
+      - ../../backend/sql/add_soft_delete_to_checkpoints.sql:/docker-entrypoint-initdb.d/011_checkpoint_soft_delete.sql:ro
+      - ../../backend/sql/conversation_messages.sql:/docker-entrypoint-initdb.d/020_conversation_messages.sql:ro
+      - ../../backend/sql/heavy_payload_store.sql:/docker-entrypoint-initdb.d/030_heavy_payload_store.sql:ro
+      - ../../backend/sql/auth_tables.sql:/docker-entrypoint-initdb.d/040_auth_tables.sql:ro
+      - ../../backend/sql/auth_v2_private_tables.sql:/docker-entrypoint-initdb.d/041_auth_private_tables.sql:ro
+      - ../../backend/sql/auth_report_section_permissions.sql:/docker-entrypoint-initdb.d/042_auth_report_sections.sql:ro
+      - ../../backend/sql/knowledge_graph_v1.sql:/docker-entrypoint-initdb.d/050_knowledge_graph.sql:ro
+      - ../../backend/sql/source_file_minio_fields.sql:/docker-entrypoint-initdb.d/051_source_file_storage.sql:ro
+      - ./postgres-init/060_annual_platform_contract.sql:/docker-entrypoint-initdb.d/060_annual_platform_contract.sql:ro
+      - ../../backend/sql/annual_audit_postgres_v1.sql:/docker-entrypoint-initdb.d/061_annual_platform_migration.sql:ro
+      - ../../backend/sql/case_corrections.sql:/docker-entrypoint-initdb.d/070_case_corrections.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  mysql:
+    image: mysql:8.4
+    container_name: ata-agent-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${ANNUAL_MYSQL_DATABASE:-ata_agent}
+      MYSQL_USER: ${ANNUAL_MYSQL_USER:-ata_agent_app}
+      MYSQL_PASSWORD: ${ANNUAL_MYSQL_PASSWORD:?ANNUAL_MYSQL_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${ANNUAL_MYSQL_ROOT_PASSWORD:?ANNUAL_MYSQL_ROOT_PASSWORD is required}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "${ANNUAL_MYSQL_PORT:-53306}:3306"
+    volumes:
+      - annual_mysql_data:/var/lib/mysql
+      - ../../backend/sql/annual_audit_mysql_v1.sql:/docker-entrypoint-initdb.d/001_annual_audit.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v2.sql:/docker-entrypoint-initdb.d/002_engagement_contract.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v3.sql:/docker-entrypoint-initdb.d/003_remove_mysql_platform_tables.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v4.sql:/docker-entrypoint-initdb.d/004_remove_mysql_source_graph_tables.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v5.sql:/docker-entrypoint-initdb.d/005_structured_annual_data.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v6.sql:/docker-entrypoint-initdb.d/006_annual_tasks.sql:ro
+      - ./mysql-init/006_record_migrations.sql:/docker-entrypoint-initdb.d/007_record_migrations.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -u root -p"$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ata-agent-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${ANNUAL_REDIS_PASSWORD:?ANNUAL_REDIS_PASSWORD is required}
+      TZ: Asia/Shanghai
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${ANNUAL_REDIS_PASSWORD}
+    ports:
+      - "${ANNUAL_REDIS_PORT:-56379}:6379"
+    volumes:
+      - annual_redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$${REDIS_PASSWORD}" ping | grep PONG
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: ata-agent-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${ANNUAL_MINIO_ACCESS_KEY:?ANNUAL_MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${ANNUAL_MINIO_SECRET_KEY:?ANNUAL_MINIO_SECRET_KEY is required}
+      TZ: Asia/Shanghai
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    ports:
+      - "${ANNUAL_MINIO_API_PORT:-61000}:9000"
+      - "${ANNUAL_MINIO_CONSOLE_PORT:-61001}:9001"
+    volumes:
+      - annual_minio_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:9000/minio/health/live
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    container_name: ata-agent-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${ANNUAL_MINIO_ACCESS_KEY:?ANNUAL_MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${ANNUAL_MINIO_SECRET_KEY:?ANNUAL_MINIO_SECRET_KEY is required}
+      MINIO_BUCKET_RAW: ${ANNUAL_MINIO_BUCKET_RAW:-ata-annual-raw}
+      MINIO_BUCKET_DERIVED: ${ANNUAL_MINIO_BUCKET_DERIVED:-ata-annual-derived}
+      MINIO_BUCKET_ARTIFACTS: ${ANNUAL_MINIO_BUCKET_ARTIFACTS:-ata-annual-artifacts}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        mc alias set annual http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "annual/$${MINIO_BUCKET_RAW}" &&
+        mc mb --ignore-existing "annual/$${MINIO_BUCKET_DERIVED}" &&
+        mc mb --ignore-existing "annual/$${MINIO_BUCKET_ARTIFACTS}"
+
+volumes:
+  annual_postgres_data:
+    name: ata-agent-postgres-data
+  annual_mysql_data:
+    name: ata-agent-mysql-data
+  annual_redis_data:
+    name: ata-agent-redis-data
+  annual_minio_data:
+    name: ata-agent-minio-data

@@ -42,7 +42,7 @@ describe("admin backend contract", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("NEXT_PUBLIC_LANGGRAPH_API_BASE_URL", "http://langgraph.test");
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://langgraph.test");
   });
 
   afterEach(() => {
@@ -79,7 +79,7 @@ describe("admin backend contract", () => {
   it("解包标签、公司和用户列表，并保留角色目录结构", async () => {
     const tag = {
       dimension: "expertise",
-      tag_value: "破产重整",
+      tag_value: "收入循环",
       tag_group: "专业领域",
       sort_order: 1,
     } as const;

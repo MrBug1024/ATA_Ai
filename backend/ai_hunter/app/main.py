@@ -9,16 +9,13 @@ from .api.routes_chat import router as chat_router
 from .api.routes_files import router as files_router
 from .api.routes_graph import router as graph_router
 from .api.routes_corrections import router as corrections_router
-from .api.routes_deadline import router as deadline_router
-from .api.routes_progress import router as progress_router
-from .api.routes_review import router as review_router
 from .api.routes_auth import router as auth_router
 from .api.routes_users import router as users_router
 from .graph.checkpointer import close_async_checkpointer
 from .logging_utils import configure_logging
 from .middleware import RequestLoggingMiddleware
 from .settings import get_settings
-from ..domain_engine import register_domain_engine
+from ..annual_audit.api import router as annual_audit_router
 
 
 configure_logging()
@@ -48,7 +45,7 @@ OPENAPI_TAGS = [
 ]
 
 APP_DESCRIPTION = """
-AI Hunter 对前端暴露的统一 API 服务，包含 AI 编排与 NPA 确定性领域引擎。
+AI 会计师年度审计智能体对前端暴露的统一 API 服务，包含 AI 编排、证据图谱、底稿与报告生成。
 
 多租户说明：
 
@@ -118,7 +115,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="AI Hunter API",
+        title="AI 会计师年度审计智能体 API",
         version="0.1.0",
         description=APP_DESCRIPTION,
         debug=settings.app_env == "dev",
@@ -139,13 +136,10 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(files_router)
     app.include_router(graph_router)
-    app.include_router(progress_router)
-    app.include_router(review_router)
     app.include_router(corrections_router)
-    app.include_router(deadline_router)
     app.include_router(auth_router)
     app.include_router(users_router)
-    register_domain_engine(app)
+    app.include_router(annual_audit_router)
 
     @app.get(
         "/docs-index",
@@ -156,7 +150,7 @@ def create_app() -> FastAPI:
     )
     async def docs_index() -> DocsIndexResponse:
         return DocsIndexResponse(
-            service="AI Hunter API",
+            service="AI 会计师年度审计智能体 API",
             version="0.1.0",
             swagger_url=DOCS_URL,
             redoc_url=REDOC_URL,

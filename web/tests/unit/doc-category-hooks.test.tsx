@@ -78,7 +78,7 @@ describe("useCaseMaterialEvents", () => {
     const { result } = renderHook(() => useCaseMaterialEvents(3), { wrapper: freshSwr });
     await waitFor(() => expect(result.current.events).toHaveLength(1));
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://10.0.10.2:8081/files/cases/3/material-events"
+      "http://localhost:8080/files/cases/3/material-events"
     );
   });
 
@@ -102,7 +102,7 @@ describe("useMaterialEvent", () => {
     const { result } = renderHook(() => useMaterialEvent("ev/1"), { wrapper: freshSwr });
     await waitFor(() => expect(result.current.event).not.toBeNull());
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://10.0.10.2:8081/files/material-events/ev%2F1"
+      "http://localhost:8080/files/material-events/ev%2F1"
     );
   });
 

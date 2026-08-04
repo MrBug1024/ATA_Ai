@@ -1,7 +1,7 @@
 import type { UploadAndIngestResponse } from "@/lib/types/doc-categories";
 
 /**
- * 「上传卷宗」对话框的纯状态机。
+ * 「上传年审资料」对话框的纯状态机。
  * 异步编排(校验请求、上传请求、事件轮询)留在组件里,组件只负责在恰当时机
  * dispatch 事件;所有状态转换都集中在这里,可脱离 UI 单测。
  */
@@ -23,6 +23,7 @@ export interface FlowState {
   materialEventId: string | null;
   uploadResult: UploadAndIngestResponse | null;
   uploadBatchId: string | null;
+  failureMessage: string | null;
 }
 
 export const initialFlowState: FlowState = {
@@ -34,6 +35,7 @@ export const initialFlowState: FlowState = {
   materialEventId: null,
   uploadResult: null,
   uploadBatchId: null,
+  failureMessage: null,
 };
 
 export type FlowEvent =
@@ -46,9 +48,9 @@ export type FlowEvent =
   | { type: "VALIDATION_ERRORED" }
   | { type: "UPLOAD_STARTED"; uploadBatchId: string }
   | { type: "UPLOAD_SUCCEEDED"; result: UploadAndIngestResponse }
-  | { type: "UPLOAD_FAILED" }
+  | { type: "UPLOAD_FAILED"; message?: string }
   | { type: "PROCESSING_COMPLETED" }
-  | { type: "PROCESSING_FAILED" }
+  | { type: "PROCESSING_FAILED"; message?: string }
   | { type: "RESET" };
 
 export function uploadMaterialEventId(result: UploadAndIngestResponse): string | null {
@@ -87,7 +89,7 @@ export function flowReducer(state: FlowState, event: FlowEvent): FlowState {
     case "VALIDATION_ERRORED":
       return { ...state, step: "select" };
     case "UPLOAD_STARTED":
-      return { ...state, step: "uploading", uploadBatchId: event.uploadBatchId };
+      return { ...state, step: "uploading", uploadBatchId: event.uploadBatchId, failureMessage: null };
     case "UPLOAD_SUCCEEDED":
       return {
         ...state,
@@ -96,11 +98,16 @@ export function flowReducer(state: FlowState, event: FlowEvent): FlowState {
         materialEventId: uploadMaterialEventId(event.result),
       };
     case "UPLOAD_FAILED":
-      return { ...state, step: "failed" };
+      return { ...state, step: "failed", failureMessage: event.message ?? null };
     case "PROCESSING_COMPLETED":
       return { ...state, step: "completed", materialEventId: null };
     case "PROCESSING_FAILED":
-      return { ...state, step: "failed", materialEventId: null };
+      return {
+        ...state,
+        step: "failed",
+        materialEventId: null,
+        failureMessage: event.message ?? null,
+      };
     case "RESET":
       return initialFlowState;
   }

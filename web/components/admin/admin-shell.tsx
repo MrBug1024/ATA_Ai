@@ -70,7 +70,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                 <Link href="/admin">
                   <ShieldCheck />
                   <div className="flex min-w-0 flex-col leading-tight">
-                    <span className="truncate font-semibold">AI Hunter</span>
+                    <span className="truncate font-semibold">AI 会计师</span>
                     <span className="truncate text-xs text-muted-foreground">
                       管理后台
                     </span>

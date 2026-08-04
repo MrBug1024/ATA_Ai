@@ -48,14 +48,14 @@ class RouteDecisionModel(BaseModel):
         description="二级业务能力",
         json_schema_extra={"enum": list(CAPABILITY_IDS)},
     )
-    intent: Literal["full_audit", "drilldown", "re_audit", "review"] = Field(
+    intent: Literal["full_audit", "drilldown", "re_audit"] = Field(
         default="drilldown",
         description="兼容现有主图的执行意图，由 capability 确定性派生",
     )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="分类置信度")
     needs_clarification: bool = Field(default=False, description="是否必须先向用户澄清")
     source: Literal["rule", "model", "context", "fallback"] = Field(default="model", description="判定来源")
-    case_id: int | None = Field(default=None, description="从请求或上下文解析出的案件 ID")
+    case_id: int | None = Field(default=None, description="从请求或上下文解析出的年审项目 ID")
     action: str = Field(default="", description="查询、创建、完成、指派等具体动作")
     target_id: str = Field(default="", description="任务、批次等操作目标 ID")
     clarification_question: str = Field(default="", description="需要澄清时向用户提出的单个问题")
@@ -80,11 +80,11 @@ class RouteDecisionModel(BaseModel):
         if spec is None:
             raise ValueError(f"未知 capability: {self.capability}")
         self.business_line = spec.business_line
-        self.intent = spec.legacy_intent
+        self.intent = spec.intent
         if self.capability == "clarify" or self.confidence < 0.60:
             self.needs_clarification = True
         if self.needs_clarification and not self.clarification_question:
-            self.clarification_question = "请明确您要处理的业务、案件和具体操作。"
+            self.clarification_question = "请明确要处理的年审项目和具体审计操作。"
         return self
 
 
@@ -97,14 +97,10 @@ class WriteCommandModel(BaseModel):
         default=None,
         description="可选写能力强信号；必须与实际命令字段和路由结果一致。",
     )
-    case_name: str = Field(default="", max_length=200, description="建案时的案件名称。")
-    debtor_name: str = Field(default="", max_length=200, description="建案时的债务人名称。")
-    case_type: Literal["单户", "资产包", "破产重整", "执转破"] | None = Field(
-        default=None,
-        description="建案类型；为空时使用破产重整。",
-    )
-    debtor_uscc: str = Field(default="", max_length=64, description="债务人统一社会信用代码。")
-    asset_purchaser_name: str = Field(default="", max_length=200, description="可选资产购买方。")
+    case_name: str = Field(default="", max_length=200, description="年审项目名称。")
+    entity_name: str = Field(default="", max_length=200, description="被审计单位名称。")
+    entity_uscc: str = Field(default="", max_length=64, description="被审计单位统一社会信用代码。")
+    fiscal_year: int | None = Field(default=None, ge=2000, le=2200, description="会计年度。")
 
     task_action: Literal["create", "complete", "assign", "update"] | None = Field(
         default=None,
@@ -137,7 +133,7 @@ class IntentRouteModel(BaseModel):
 
 
 class CorrectionModel(BaseModel):
-    target: str = Field(description="修正的资产、标的或结论对象")
+    target: str = Field(description="修正的审计事项、数据或结论对象")
     instruction: str = Field(description="强制修正指令")
 
 
@@ -147,26 +143,12 @@ class CorrectionLedgerItemModel(BaseModel):
     source_query: str = Field(description="触发修正的原始用户话术")
 
 
-class RecoveryItemModel(BaseModel):
-    amount: float = Field(description="已实际收到的回款金额（元，数字）")
-    recovered_at: str = Field(default="", description="收款日期 YYYY-MM-DD；无则空")
-    source_desc: str = Field(default="", description="回款来源/资产说明，如某房产拍卖款、分红")
-    disposal_path: str = Field(default="", description="处置路径：清算拍卖/破产重整/协商和解/执行/分红/其它")
-
-
-class RecoveryExtractionModel(BaseModel):
-    records: list[RecoveryItemModel] = Field(
-        default_factory=list,
-        description="文本中明确**已实际发生**的回款记录；忽略预期/计划/目标；无则空列表",
-    )
-
-
 class ParseDocumentResultModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     case_id: int = 0
-    debtor_id: int = 0
-    debtor_name: str = ""
+    entity_id: int = 0
+    entity_name: str = ""
     categories_found: list[str] = Field(default_factory=list)
     records_inserted: int = 0
     details: list[dict] = Field(default_factory=list)
@@ -183,27 +165,27 @@ class DocCategoryDefinitionModel(BaseModel):
 
 
 class DocCategoryCatalogModel(BaseModel):
-    categories: list[DocCategoryDefinitionModel] = Field(default_factory=list, description="标准卷宗类别字典。")
+    categories: list[DocCategoryDefinitionModel] = Field(default_factory=list, description="标准审计资料类别字典。")
 
 
 class CaseDocCategoryStatusItemModel(BaseModel):
     code: str = Field(description="稳定类别编码。")
     name: str = Field(description="类别中文名称。")
-    uploaded: bool = Field(default=False, description="当前案件是否已有该类材料。")
+    uploaded: bool = Field(default=False, description="当前项目是否已有该类资料。")
     file_count: int = Field(default=0, description="该类已上传文件数。")
     record_count: int = Field(default=0, description="该类已入库记录数。")
     last_uploaded_at: str | None = Field(default=None, description="最近一次上传时间。")
 
 
 class CaseDocCategoryStatusModel(BaseModel):
-    case_id: int = Field(default=0, description="案件 ID。")
-    categories: list[CaseDocCategoryStatusItemModel] = Field(default_factory=list, description="案件类别覆盖情况。")
+    case_id: int = Field(default=0, description="年审项目 ID。")
+    categories: list[CaseDocCategoryStatusItemModel] = Field(default_factory=list, description="项目资料类别覆盖情况。")
     missing_categories: list[str] = Field(default_factory=list, description="当前仍缺失的类别编码。")
 
 
 class ValidateDocCategoryRequestModel(BaseModel):
-    case_id: int = Field(default=0, description="案件 ID。")
-    doc_category: str = Field(description="用户选择的卷宗类别编码。")
+    case_id: int = Field(default=0, description="年审项目 ID。")
+    doc_category: str = Field(description="用户选择的审计资料类别编码。")
     file_names: list[str] = Field(default_factory=list, description="待上传文件名列表。")
     text_preview: str = Field(default="", description="可选文本预览，用于轻校验。")
 

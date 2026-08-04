@@ -145,8 +145,8 @@ class ConversationService:
                         "thread_id": row["thread_id"],
                         "checkpoint_id": row["checkpoint_id"],
                         "case_id": self._safe_int(channel_values.get("current_case_id")),
-                        "debtor_id": self._safe_int(channel_values.get("current_debtor_id")),
-                        "debtor_name": str(channel_values.get("current_debtor_name") or ""),
+                        "entity_id": self._safe_int(channel_values.get("current_entity_id")),
+                        "entity_name": str(channel_values.get("current_entity_name") or ""),
                         "last_query": str(channel_values.get("query") or ""),
                         "last_intent": str(channel_values.get("intent") or ""),
                         "final_report_ref": str(channel_values.get("final_report_ref") or ""),
@@ -229,8 +229,8 @@ class ConversationService:
                     "thread_id": row["thread_id"],
                     "checkpoint_id": row["checkpoint_id"],
                     "case_id": self._safe_int(channel_values.get("current_case_id")),
-                    "debtor_id": self._safe_int(channel_values.get("current_debtor_id")),
-                    "debtor_name": str(channel_values.get("current_debtor_name") or ""),
+                    "entity_id": self._safe_int(channel_values.get("current_entity_id")),
+                    "entity_name": str(channel_values.get("current_entity_name") or ""),
                     "last_query": str(channel_values.get("query") or ""),
                     "last_intent": str(channel_values.get("intent") or ""),
                     "final_report_ref": str(channel_values.get("final_report_ref") or ""),
@@ -464,7 +464,7 @@ class ConversationService:
     def _generate_thread_title(self, thread_data: dict[str, Any]) -> str:
         """Generate a readable title for a thread based on its data."""
         case_id = thread_data.get("case_id", 0)
-        debtor_name = thread_data.get("debtor_name", "")
+        entity_name = thread_data.get("entity_name", "")
         last_query = thread_data.get("last_query", "")
         last_intent = thread_data.get("last_intent", "")
         
@@ -475,10 +475,10 @@ class ConversationService:
                 return last_query[:47] + "..."
             return last_query
         
-        # Priority 2: Generate from case_id and debtor_name
+        # Priority 2: Generate from the annual engagement and audited entity.
         if case_id > 0:
-            if debtor_name:
-                return f"案件{case_id} - {debtor_name}"
+            if entity_name:
+                return f"年审项目{case_id} - {entity_name}"
             return f"案件{case_id}"
         
         # Priority 3: Use intent

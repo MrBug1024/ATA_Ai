@@ -57,7 +57,7 @@ describe("DemoValidationGate", () => {
       data: {
         ready: false, total_citations: 3, passed_citations: 1, failed_citations: 2,
         checks: [
-          { citation_id: "1", claim_id: 1, claim_text: "晨光煤矿是债务人", ok: false, evidence_count: 0, anchor_count: 0, file_id: 0, page_no: 0, issues: ["缺少页图证据"] },
+          { citation_id: "1", claim_id: 1, claim_text: "示例制造有限公司是被审计单位", ok: false, evidence_count: 0, anchor_count: 0, file_id: 0, page_no: 0, issues: ["缺少页图证据"] },
         ],
         issues: ["citation [1] 缺少证据"],
         case_id: 116, report_ref: "r",
@@ -67,7 +67,7 @@ describe("DemoValidationGate", () => {
     const { DemoValidationGate } = await import("@/components/knowledge-graph/demo-validation-gate");
     render(<DemoValidationGate caseId={116} reportRef="r" />);
     expect(screen.getByText(/2 条角标失败/)).toBeTruthy();
-    expect(screen.getByText("晨光煤矿是债务人")).toBeTruthy();
+    expect(screen.getByText("示例制造有限公司是被审计单位")).toBeTruthy();
     expect(screen.getByText("缺少页图证据")).toBeTruthy();
   });
 });

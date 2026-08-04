@@ -3,7 +3,7 @@
 Encapsulates the UploadFile -> FileItem normalization so the chat path
 (POST /chat/upload-files, sync, MinIO only) and the operator path
 (POST /files/upload-and-ingest, 202 async, full ingest) share the same
-storage layout and the same debtor-name resolution strategy.
+storage layout and the same audited-entity resolution strategy.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ from fastapi import HTTPException, UploadFile
 
 from ..auth.identity import Identity
 from ..graph.state import FileItem
-from ..services.case_api import get_case_api_client
 from ..services.minio_service import get_minio_service, resolve_minio_reference_url
 from ..settings import Settings
+from ...annual_audit.engagement_repository import get_engagement_profile
 
 
 _PLAIN_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv"}
@@ -30,10 +30,20 @@ _PLAIN_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv"}
 _LOGGER = logging.getLogger(__name__)
 
 
+def _load_engagement_profile(
+    case_id: int,
+    *,
+    identity: Identity | None = None,
+) -> dict:
+    """Load an annual engagement directly without self-calling FastAPI."""
+
+    return get_engagement_profile(int(case_id))
+
+
 @dataclass(frozen=True)
-class DebtorResolution:
-    debtor_id: int
-    debtor_name: str
+class EngagementEntityResolution:
+    entity_id: int
+    entity_name: str
     source: str
 
 
@@ -41,91 +51,50 @@ def _normalize_party_name(value: str) -> str:
     return "".join(str(value or "").split())
 
 
-def _profile_debtors(profile: object) -> list[tuple[int, str]]:
+def _profile_audited_entity(profile: object) -> tuple[int, str] | None:
     if not isinstance(profile, dict):
-        return []
-    rows = profile.get("debtors")
-    if not isinstance(rows, list):
-        return []
-    debtors: list[tuple[int, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            resolved_id = int(row.get("debtor_id") or 0)
-        except (TypeError, ValueError):
-            continue
-        resolved_name = str(row.get("entity_name") or row.get("name") or "").strip()
-        if resolved_id > 0 and resolved_name:
-            debtors.append((resolved_id, resolved_name))
-    return debtors
+        return None
+    annual = profile.get("annual_audit") or {}
+    case = profile.get("case") or {}
+    try:
+        entity_id = int(case.get("case_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    entity_name = str(annual.get("entity_name") or "").strip()
+    return (entity_id, entity_name) if entity_id > 0 and entity_name else None
 
 
-def resolve_effective_debtor(
+def resolve_engagement_entity(
     *,
     case_id: int,
-    debtor_id: int = 0,
-    debtor_name: str = "",
+    entity_id: int = 0,
+    entity_name: str = "",
     identity: Identity | None = None,
-) -> DebtorResolution:
-    """Resolve one upload debtor from authoritative case-profile data.
-
-    Priority: exact debtor_id -> exact debtor_name -> the only case debtor.
-    Parties with non-debtor roles are intentionally ignored.
-    """
+) -> EngagementEntityResolution:
+    """Resolve the audited entity for an upload from engagement master data."""
     if int(case_id or 0) <= 0:
-        raise HTTPException(status_code=400, detail="上传前必须先选择有效案件")
+        raise HTTPException(status_code=400, detail="上传前必须先选择有效年审项目")
     try:
-        profile = get_case_api_client().get_case_profile_sync(int(case_id), identity=identity)
+        profile = _load_engagement_profile(int(case_id), identity=identity)
     except Exception as exc:
         _LOGGER.error(
-            "debtor_name_resolve_failed case_id=%s error=%s", case_id, exc,
+            "audited_entity_resolve_failed project_id=%s error=%s", case_id, exc,
         )
-        raise HTTPException(status_code=502, detail="案件债务人主数据暂不可用，已停止上传") from exc
+        raise HTTPException(status_code=502, detail="年审项目主数据暂不可用，已停止上传") from exc
 
-    debtors = _profile_debtors(profile)
-    requested_id = int(debtor_id or 0)
-    requested_name = str(debtor_name or "").strip()
+    entity = _profile_audited_entity(profile)
+    if entity is None:
+        raise HTTPException(status_code=409, detail="年审项目缺少有效的被审计单位")
+    resolved_id, resolved_name = entity
+    requested_id = int(entity_id or 0)
+    requested_name = str(entity_name or "").strip()
 
-    if requested_id > 0:
-        matches = [item for item in debtors if item[0] == requested_id]
-        if not matches:
-            raise HTTPException(status_code=409, detail="debtor_id 不属于当前案件")
-        resolved_id, resolved_name = matches[0]
-        if requested_name and _normalize_party_name(requested_name) != _normalize_party_name(resolved_name):
-            raise HTTPException(status_code=409, detail="debtor_name 与 debtor_id 对应的案件主数据不一致")
-        return DebtorResolution(resolved_id, resolved_name, "debtor_id")
-
-    if requested_name:
-        normalized = _normalize_party_name(requested_name)
-        matches = [item for item in debtors if _normalize_party_name(item[1]) == normalized]
-        if not matches:
-            raise HTTPException(status_code=409, detail="debtor_name 与当前案件主数据不一致")
-        if len(matches) > 1:
-            raise HTTPException(status_code=409, detail="同名债务人不唯一，请显式传入 debtor_id")
-        return DebtorResolution(matches[0][0], matches[0][1], "debtor_name")
-
-    if len(debtors) == 1:
-        return DebtorResolution(debtors[0][0], debtors[0][1], "single_case_debtor")
-    if not debtors:
-        raise HTTPException(status_code=409, detail="当前案件尚未建立有效债务人")
-    raise HTTPException(status_code=409, detail="当前案件存在多个债务人，请显式传入 debtor_id")
-
-
-def resolve_effective_debtor_name(
-    *,
-    case_id: int,
-    debtor_id: int = 0,
-    debtor_name: str = "",
-    identity: Identity | None = None,
-) -> str:
-    """Compatibility wrapper returning only the authoritative debtor name."""
-    return resolve_effective_debtor(
-        case_id=case_id,
-        debtor_id=debtor_id,
-        debtor_name=debtor_name,
-        identity=identity,
-    ).debtor_name
+    if requested_id > 0 and requested_id != resolved_id:
+        raise HTTPException(status_code=409, detail="实体编号不属于当前年审项目")
+    if requested_name and _normalize_party_name(requested_name) != _normalize_party_name(resolved_name):
+        raise HTTPException(status_code=409, detail="被审计单位名称与年审项目主数据不一致")
+    source = "entity_id" if requested_id > 0 else "entity_name" if requested_name else "engagement"
+    return EngagementEntityResolution(resolved_id, resolved_name, source)
 
 
 async def to_file_item(
@@ -134,8 +103,8 @@ async def to_file_item(
     logger: logging.LoggerAdapter,
     *,
     current_case_id: int,
-    current_debtor_id: int = 0,
-    debtor_name: str = "",
+    current_entity_id: int = 0,
+    entity_name: str = "",
     doc_category: str = "",
     upload_batch_id: str = "",
     populate_content: bool = False,
@@ -145,7 +114,7 @@ async def to_file_item(
     When ``ai_hunter_minio_enabled`` is true, the bytes are uploaded to MinIO
     and the storage_* fields are filled.
 
-    ``populate_content`` controls the legacy ``content`` field:
+    ``populate_content`` controls the inline ``content`` field:
     - True: fill ``content`` with the inlined base64 / text payload (matches
       the pre-refactor behavior used by the 202 async path so the OCR
       pipeline keeps working when MinIO is disabled).
@@ -183,11 +152,11 @@ async def to_file_item(
     if settings.ai_hunter_minio_enabled:
         uploaded = get_minio_service().upload_raw_file(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             file_name=file_name,
             content_type=content_type,
             file_bytes=file_bytes,
-            debtor_name=debtor_name,
+            entity_name=entity_name,
         )
         storage_payload = {
             "storage_ref": uploaded.storage_ref,
@@ -207,11 +176,11 @@ async def to_file_item(
         content_payload = ""
 
     logger.info(
-        "file_normalized name=%s hash=%s case_id=%s debtor_name=%s storage_ref=%s populate_content=%s",
+        "file_normalized name=%s hash=%s project_id=%s entity_name=%s storage_ref=%s populate_content=%s",
         file_name,
         file_hash[:12],
         current_case_id,
-        debtor_name,
+        entity_name,
         storage_payload["storage_ref"],
         populate_content,
     )

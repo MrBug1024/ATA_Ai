@@ -3,12 +3,11 @@
 import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableBranch, RunnableLambda
+from langchain_core.runnables import RunnableLambda
 from langgraph.managed.is_last_step import RemainingSteps
 from langgraph.prebuilt import create_react_agent
 from typing_extensions import TypedDict
 
-from ..capabilities import capabilities_for_executor
 from ..context_loader import resolve_full_context_data, resolve_kg_snapshot, resolve_report_part_b
 from ..json_utils import json_dumps_safe
 from ..llm import build_agent_llm, has_api_key
@@ -48,27 +47,25 @@ def _list_count(value: object) -> int:
 
 
 def _build_case_snapshot(state: AuditGraphState) -> str:
-    """Build a compact case snapshot instead of injecting the raw full_context_json blob."""
+    """Build a compact engagement snapshot for the annual-audit agent."""
     full_context = resolve_full_context_data(state)
     if not isinstance(full_context, dict):
         return _truncate_text(str(state.get("full_context_summary") or "{}"), max_chars=600)
 
-    snapshot = {
-        "case_id": state.get("current_case_id", 0),
-        "debtor_name": state.get("current_debtor_name", ""),
-        "case_keys": list(full_context.keys())[:12],
-        "debtors_count": _list_count(full_context.get("debtors")),
-        "claims_count": _list_count(full_context.get("claims")),
-        "guarantors_count": _list_count(full_context.get("guarantors")),
-        "real_estate_count": _list_count(full_context.get("real_estate_evaluations")),
-        "mining_count": _list_count(full_context.get("mining_evaluations")),
-        "has_whiteglove": bool(full_context.get("whiteglove")),
-        "has_fund_flow": bool(full_context.get("fund_flow")),
-        "engine_result_keys": list((full_context.get("engine_results") or {}).keys())[:8]
-        if isinstance(full_context.get("engine_results"), dict)
-        else [],
-    }
-    return json_dumps_safe(snapshot)
+    return json_dumps_safe(
+        {
+            "engagement_id": state.get("current_case_id", 0),
+            "engagement": full_context.get("annual_audit")
+            or full_context.get("case")
+            or full_context,
+            "data_completeness": full_context.get("data_completeness") or {},
+            "available_analysis_results": list(
+                (full_context.get("engine_results") or {}).keys()
+            )[:8]
+            if isinstance(full_context.get("engine_results"), dict)
+            else [],
+        }
+    )
 
 
 def _build_correction_block(state: AuditGraphState) -> str:
@@ -93,7 +90,11 @@ def _build_correction_block(state: AuditGraphState) -> str:
     return "\n".join(lines)
 
 
-def _build_system_prompt(state: AuditGraphState, *, prompt_name: str = "drilldown_agent.txt") -> list:
+def _build_system_prompt(
+    state: AuditGraphState,
+    *,
+    prompt_name: str = "annual_audit_drilldown_agent.txt",
+) -> list:
     """Assemble the lightweight drilldown system prompt with correction priority last.
 
     Returns a list of messages used directly as the prompt callable for
@@ -109,8 +110,6 @@ def _build_system_prompt(state: AuditGraphState, *, prompt_name: str = "drilldow
     """
     prompt = load_prompt(prompt_name)
     case_id = state.get("current_case_id", 0)
-    current_debtor_id = state.get("current_debtor_id", 0)
-    current_debtor_name = state.get("current_debtor_name", "")
     memory_context = _truncate_text(state.get("memory_context", ""), max_chars=1200) or "无"
     case_snapshot = _build_case_snapshot(state) or "{}"
     kg_snapshot = _truncate_text(
@@ -124,18 +123,15 @@ def _build_system_prompt(state: AuditGraphState, *, prompt_name: str = "drilldow
 
     content = (
         f"{prompt}\n\n"
-        f"当前案件ID: {case_id}\n"
-        f"当前债务人ID: {current_debtor_id}\n"
-        f"当前债务人名称: {current_debtor_name}\n"
-        f"最近入库摘要:\n{parse_summary}\n\n"
+        f"当前年审项目编号: {case_id}\n"
+        f"最近资料解析摘要:\n{parse_summary}\n\n"
         f"本轮路由约束:\n{json_dumps_safe(route_decision)}\n"
-        "只能处理该 capability 范围内的请求；信息不足时直接询问，不得猜测写操作目标。\n\n"
+        "只能处理该 capability 范围内的请求；信息不足时直接询问，不得猜测。\n\n"
         f"历史轻量记忆:\n{memory_context}\n\n"
-        f"当前案件轻量摘要:\n{case_snapshot}\n\n"
-        f"当前案件知识图谱摘要:\n{kg_snapshot}\n\n"
-        f"前序审计后半段/下钻索引:\n{report_part_b}\n\n"
-        "以下修正台账优先级最高；如与旧报告、旧记忆、旧数据摘要冲突，必须以修正台账为准：\n"
-        f"{correction_block}"
+        f"当前年审项目摘要:\n{case_snapshot}\n\n"
+        f"当前证据与关系图谱摘要:\n{kg_snapshot}\n\n"
+        f"已有年审报告/底稿下钻索引:\n{report_part_b}\n\n"
+        f"用户更正记录（最高优先级）:\n{correction_block}"
     )
     return [SystemMessage(content=content), *(state.get("messages") or [])]
 
@@ -191,19 +187,19 @@ def _fallback_agent_output(state: AuditGraphState) -> dict:
     report_part_b = resolve_report_part_b(state)
     return {
         "agent_output": (
-            f"【追问/任务中枢占位】\ncase_id={case_id}\nquery={query}\n"
+            f"【年审分析暂不可用】\n项目编号={case_id}\n问题={query}\n"
             f"memory_context={memory_context[:200]}\n"
             f"case_snapshot={_build_case_snapshot(state)[:200]}\n"
             f"kg_summary={resolve_kg_snapshot(state).get('summary', '')[:200]}\n"
             f"report_part_b={report_part_b[:200]}\n"
-            "这里将接入工具型 Agent。"
+            "当前模型不可用，请稍后重试；本轮未写入任何分析结论。"
         )
     }
 
 
 DOMAIN_AGENT_PROMPTS = {
-    "audit.drilldown": "audit_drilldown_agent.txt",
-    "graph.query": "graph_query_agent.txt",
+    "audit.drilldown": "annual_audit_drilldown_agent.txt",
+    "graph.query": "annual_audit_graph_agent.txt",
 }
 
 
@@ -216,7 +212,7 @@ def _fallback_domain_agent_output(state: AuditGraphState, capability: str) -> di
     return {
         "agent_output": (
             f"【{label}降级结果】\n"
-            f"案件编号：{state.get('current_case_id', 0)}\n"
+            f"年审项目编号：{state.get('current_case_id', 0)}\n"
             f"问题：{state.get('query', '')}\n"
             "当前领域模型不可用，未执行工具调用，请稍后重试。"
         ),
@@ -230,7 +226,78 @@ def _fallback_domain_agent_output(state: AuditGraphState, capability: str) -> di
     }
 
 
-def _build_scoped_agent(llm, capability: str, *, prompt_name: str = "drilldown_agent.txt"):
+def _runtime_fallback_domain_agent_output(state: AuditGraphState, capability: str) -> dict:
+    """Return a fact-grounded result when a configured model fails at runtime.
+
+    A valid API key only proves that an agent can be constructed.  The provider
+    can still be unreachable when the request is executed.  Annual-audit
+    drilldown has deterministic implementations for the same core cycles, so
+    keep the business route usable and make the degraded nature explicit.
+    """
+    if capability != "audit.drilldown":
+        return _fallback_domain_agent_output(state, capability)
+
+    case_id = int(state.get("current_case_id") or 0)
+    if case_id <= 0:
+        return _fallback_domain_agent_output(state, capability)
+
+    try:
+        from ....annual_audit.analysis_service import (
+            data_readiness,
+            run_cash_and_bank,
+            run_sales_receivables,
+        )
+        from ....annual_audit.engagement_repository import get_engagement
+        from ....annual_audit.report_service import render_annual_report_draft
+
+        engagement = get_engagement(case_id)
+        readiness = data_readiness(case_id)
+        sales = run_sales_receivables(case_id)
+        cash = run_cash_and_bank(case_id)
+        report = render_annual_report_draft(
+            engagement=engagement,
+            readiness=readiness,
+            sales_receivables=sales,
+            cash_and_bank=cash,
+            material_sources=list(state.get("case_material_sources") or []),
+        )
+        output = (
+            "> 当前模型服务不可连接；以下内容由本地结构化数据与确定性规则生成，"
+            "未使用模型推断。模型恢复后可重新生成补充语义分析。\n\n"
+            f"{report}"
+        )
+    except Exception as exc:
+        LOGGER.exception(
+            "domain_agent_runtime_fallback_failed capability=%s case_id=%s error=%s",
+            capability,
+            case_id,
+            exc,
+        )
+        return _fallback_domain_agent_output(state, capability)
+
+    return {
+        "agent_output": output,
+        "business_line_result": {
+            "capability": capability,
+            "ok": False,
+            "degraded": True,
+            "error": "agent_model_runtime_unavailable",
+            "tool_calls": [
+                "get_annual_engagement",
+                "analyze_annual_data_readiness",
+                "analyze_sales_receivables",
+                "analyze_cash_and_bank",
+            ],
+        },
+    }
+
+
+def _build_scoped_agent(
+    llm,
+    capability: str,
+    *,
+    prompt_name: str = "annual_audit_drilldown_agent.txt",
+):
     def prompt(state: AuditGraphState) -> list:
         return _build_system_prompt(state, prompt_name=prompt_name)
 
@@ -256,46 +323,7 @@ def build_capability_agent_node(capability: str):
     except Exception as exc:
         LOGGER.warning("domain_agent_build_failed capability=%s error=%s; falling back", capability, exc)
         return RunnableLambda(lambda state: _fallback_domain_agent_output(state, capability))
-    return _build_scoped_agent(llm, capability, prompt_name=prompt_name)
-
-
-def build_drilldown_agent_node():
-    """Build a Runnable agent node so astream_events can穿透 the internal LLM streams."""
-    try:
-        llm = build_agent_llm()
-        if not has_api_key(llm):
-            LOGGER.warning(
-                "drilldown_agent_no_api_key model=%s base_url=%s; falling back to placeholder",
-                getattr(llm, "model_name", "") or getattr(llm, "model", ""),
-                getattr(llm, "openai_api_base", "") or getattr(llm, "base_url", ""),
-            )
-            return RunnableLambda(_fallback_agent_output)
-    except Exception as exc:
-        LOGGER.warning("drilldown_agent_build_failed error=%s; falling back to placeholder", exc)
-        return RunnableLambda(_fallback_agent_output)
-
-    # Use the main graph's state schema so the prompt callable can access
-    # current_case_id, full_context_summary, etc.  The default MessagesState
-    # only carries "messages", which causes the agent to see case_id=0.
-    from ..state import AuditGraphState
-
-    fallback_capability = "common.general"
-    capability_groups = tuple(
-        capability
-        for capability in capabilities_for_executor("drilldown_agent_graph")
-        if capability != fallback_capability
+    agent = _build_scoped_agent(llm, capability, prompt_name=prompt_name)
+    return agent.with_fallbacks(
+        [RunnableLambda(lambda state: _runtime_fallback_domain_agent_output(state, capability))]
     )
-    branches = [
-        (
-            lambda state, expected=capability: (state.get("route_decision") or {}).get("capability") == expected,
-            _build_scoped_agent(llm, capability),
-        )
-        for capability in capability_groups
-    ]
-    return RunnableBranch(*branches, _build_scoped_agent(llm, fallback_capability))
-
-
-# Legacy function kept for non-streaming invoke paths
-def run_drilldown_agent(state: AuditGraphState) -> AuditGraphState:
-    """Invoke a tool-calling agent; keep a placeholder fallback for offline or no-key runs."""
-    return build_drilldown_agent_node().invoke(state)

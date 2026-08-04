@@ -255,7 +255,7 @@ describe("admin hooks", () => {
     await act(async () => {
       await result.current.saveTags.saveUserTags({
         dimension: "expertise",
-        values: ["破产重整"],
+        values: ["收入循环"],
       });
     });
 
@@ -268,7 +268,7 @@ describe("admin hooks", () => {
     });
     expect(mocks.replaceUserTags).toHaveBeenCalledWith("user-1", {
       dimension: "expertise",
-      values: ["破产重整"],
+      values: ["收入循环"],
     });
   });
 

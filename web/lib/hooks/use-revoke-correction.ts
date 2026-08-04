@@ -2,7 +2,7 @@
 
 import { mutate } from "swr";
 import { caseCorrectionsKey, revokeCorrection } from "@/lib/backend/langgraph";
-import type { CorrectionModel } from "@/lib/types/case-analytics";
+import type { CorrectionModel } from "@/lib/types/audit-corrections";
 import { useBackendMutation } from "./use-backend-mutation";
 
 export function useRevokeCorrection(caseId: number) {

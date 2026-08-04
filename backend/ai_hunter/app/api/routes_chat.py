@@ -27,8 +27,6 @@ from ..graph.context_loader import (
 from ..graph.capabilities import capability_permission_modules
 from ..graph.json_utils import json_dumps_safe
 from ..graph.main import build_audit_orchestrator_graph
-from ..graph.report_sections import SECTION_BY_ID, section_id_from_node
-from ..graph.review_sections import REVIEW_SECTION_BY_ID, review_section_id_from_node
 from ..auth.identity import Identity
 from ..auth.permissions import has_module, report_section_code_for_id, require_any_module, require_module, visible_report_sections
 from ..auth.report_filter import filter_report_text_by_sections
@@ -36,12 +34,12 @@ from ..auth.tenancy import get_tenancy_service, require_case_access, require_thr
 
 
 def _any_section_id_from_node(node_name: str) -> str | None:
-    """统一识别审计段(generate_section_N)与复盘段(generate_review_section_RN)。"""
-    return section_id_from_node(node_name) or review_section_id_from_node(node_name)
+    """Annual reports are generated as one artifact rather than legacy section nodes."""
+    return None
 
 
 def _any_section_meta(section_id: str) -> dict:
-    return SECTION_BY_ID.get(section_id) or REVIEW_SECTION_BY_ID.get(section_id) or {}
+    return {}
 
 
 _REASONING_TAG_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
@@ -156,7 +154,7 @@ from ..services.conversation_service import get_conversation_service
 from ..settings import get_settings
 from ..utils.pg_lock import thread_advisory_lock
 from ._upload_helpers import (
-    resolve_effective_debtor,
+    resolve_engagement_entity,
     resolve_upload_batch_id,
     to_file_item,
 )
@@ -166,12 +164,11 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 graph = build_audit_orchestrator_graph()
 LOGGER = logging.getLogger(__name__)
 
-CHAT_INVOKE_MODULES = ("report", "drilldown", "corrections", "review", "progress", "deadline", "graph")
+CHAT_INVOKE_MODULES = ("report", "drilldown", "materials", "tasks", "corrections", "graph")
 INTENT_MODULES = {
     "full_audit": "report",
     "drilldown": "drilldown",
     "re_audit": "corrections",
-    "review": "review",
 }
 CAPABILITY_MODULES = capability_permission_modules()
 
@@ -259,10 +256,10 @@ async def _cached_sse_response(
 class ChatRequest(BaseModel):
     thread_id: str = Field(description="会话线程 ID。多轮对话请保持同一个 thread_id。")
     query: str = Field(default="", description="用户输入内容。")
-    current_case_id: int = Field(default=0, description="当前案件 ID；未知时可传 0。")
-    current_debtor_id: int = Field(default=0, description="当前债务人 ID；未知时可传 0。")
-    current_debtor_name: str = Field(default="", description="当前债务人名称；为空时由图内继续解析。")
-    doc_category: str = Field(default="", description="可选，本批上传卷宗类别编码。")
+    current_case_id: int = Field(default=0, description="当前年审项目 ID；未知时可传 0。")
+    current_entity_id: int = Field(default=0, description="被审计单位实体 ID；未知时可传 0。")
+    current_entity_name: str = Field(default="", description="被审计单位名称；为空时由项目主数据解析。")
+    doc_category: str = Field(default="", description="可选，本批上传审计资料类别编码。")
     batch_name: str = Field(default="", description="可选，本批上传批次名称。")
     upload_batch_id: str = Field(default="", description="可选，本批上传批次 ID。")
     operator_id: str = Field(default="", description="可选，操作员 ID。")
@@ -270,7 +267,7 @@ class ChatRequest(BaseModel):
     write_command: WriteCommandModel | None = Field(
         default=None,
         description=(
-            "Phase 2.5.4 确定性写命令槽位。建案、任务写操作建议由前端传入；"
+            "确定性写命令槽位。创建年审项目、任务写操作建议由前端传入；"
             "身份和租户字段不在此模型中，由服务端鉴权注入。"
         ),
     )
@@ -329,9 +326,9 @@ class ChatRequest(BaseModel):
 
 class ChatInvokeResponse(BaseModel):
     thread_id: str = Field(description="会话线程 ID。")
-    current_case_id: int = Field(default=0, description="当前案件 ID。")
-    current_debtor_id: int = Field(default=0, description="当前债务人 ID。")
-    current_debtor_name: str = Field(default="", description="当前债务人名称。")
+    current_case_id: int = Field(default=0, description="当前年审项目 ID。")
+    current_entity_id: int = Field(default=0, description="被审计单位实体 ID。")
+    current_entity_name: str = Field(default="", description="被审计单位名称。")
     final_report_ref: str = Field(default="", description="最终报告引用 ID。")
     final_report: str = Field(default="", description="最终报告正文。")
     trace_items: list[TraceItemModel] = Field(default_factory=list, description="报告断言对应的证据链。")
@@ -341,33 +338,33 @@ class ChatInvokeResponse(BaseModel):
     )
     unresolved_relations: list[UnresolvedRelationItemModel] = Field(
         default_factory=list,
-        description="当前案件仍待后续批次补齐的未决关系列表。",
+        description="当前年审项目仍待后续批次补齐的未决关系列表。",
     )
     unresolved_claims: list[UnresolvedClaimItemModel] = Field(
         default_factory=list,
-        description="当前案件仍待后续批次补齐的未决断言列表。",
+        description="当前年审项目仍待后续批次补齐的未决断言列表。",
     )
     citation_coverage: CitationCoverageModel = Field(
         default_factory=CitationCoverageModel,
         description="报告角标覆盖率统计。",
     )
     parse_summary: str = Field(default="", description="材料摄入摘要。")
-    doc_category: str = Field(default="", description="卷宗类别编码。")
+    doc_category: str = Field(default="", description="审计资料类别编码。")
     batch_name: str = Field(default="", description="上传批次名称。")
     upload_batch_id: str = Field(default="", description="上传批次 ID。")
     operator_id: str = Field(default="", description="操作员 ID。")
     operator_name: str = Field(default="", description="操作员名称。")
     upload_batch_summary: dict = Field(default_factory=dict, description="上传批次摘要。")
-    recognized_categories: list[str] = Field(default_factory=list, description="识别出的卷宗类别。")
-    missing_categories: list[str] = Field(default_factory=list, description="案件仍缺失的卷宗类别。")
+    recognized_categories: list[str] = Field(default_factory=list, description="识别出的审计资料类别。")
+    missing_categories: list[str] = Field(default_factory=list, description="项目仍缺失的审计资料类别。")
     duplicate_files: list[str] = Field(default_factory=list, description="疑似重复文件列表。")
     suspected_mismatch_files: list[str] = Field(default_factory=list, description="疑似类别不匹配文件列表。")
     new_files: list[str] = Field(default_factory=list, description="本次识别为新增的文件列表。")
-    doc_category_validation: dict = Field(default_factory=dict, description="卷宗类别预校验结果。")
+    doc_category_validation: dict = Field(default_factory=dict, description="审计资料类别预校验结果。")
     intent: str = Field(default="", description="本次路由的图流程意图。")
     route_decision: RouteDecisionModel | None = Field(
         default=None,
-        description="分层路由决策；业务线、capability、legacy intent、权限模块和工具范围由统一注册表约束。",
+        description="分层路由决策；业务线、capability、执行意图、权限模块和工具范围由统一注册表约束。",
     )
     memory_context: str = Field(default="", description="轻量会话记忆摘要。")
 
@@ -377,19 +374,16 @@ class ChatInvokeResponse(BaseModel):
     summary="主对话入口",
     description=(
         "同一接口支持普通 JSON 返回和 SSE 流式返回。"
-        " 后端会根据 query、案件上下文、是否携带 uploaded_files 自动路由到"
-        " operator / audit_analysis / supervision / common 业务线，再识别对应 capability。"
-        " 当前 Phase 2.5.4 在 ROUTER_EXECUTION_MODE=business_line 时，"
-        " case.profile / material.status / material.validate / evidence.resolve / caselaw.search / task.query / deadline.query"
-        " 七个只读 capability 进入确定性业务线节点；audit.full / audit.reaudit / recovery.review"
-        " 进入既有专用图，audit.drilldown / graph.query 进入各自领域 Agent。"
-        " evidence.resolve 只查本案卷宗，caselaw.search 只返回与本案无绑定关系的外部类案参考。"
+        " 后端会根据 query、年审项目上下文和 uploaded_files 路由到资料、审计分析、报告、任务或图谱能力。"
+        " case.profile / material.status / material.validate / evidence.resolve / task.query"
+        " 进入确定性年度审计节点；audit.full / audit.reaudit 进入报告图，"
+        " audit.drilldown / graph.query 进入各自年度审计 Agent。"
+        " evidence.resolve 只查询当前年审项目的资料与证据。"
         " case.create / material.upload / task.write 进入确定性写命令节点；"
-        " 建案和任务操作可使用 write_command 提供结构化槽位，"
-        " 缺少必填字段、身份、案件权限或任务归属校验失败时不执行写入。"
+        " 创建项目和任务操作可使用 write_command 提供结构化槽位，"
+        " 缺少必填字段、身份、项目权限或任务归属校验失败时不执行写入。"
         " material.upload 只验收本轮前置 ingest 结果，不二次摄入。"
-        " 默认模式仍为 legacy；JSON/SSE 的 route_decision 契约不变。"
-        " 低置信度、缺少案件上下文或缺少写操作目标时返回澄清问题，不调用业务工具。"
+        " 低置信度、缺少项目上下文或缺少写操作目标时返回澄清问题，不调用业务工具。"
         "\n\nSSE 切换方式："
         "\n- 请求体传 `stream=true`；或"
         "\n- 请求头传 `Accept: text/event-stream`。"
@@ -426,10 +420,7 @@ async def invoke_chat(payload: ChatRequest, request: Request,
     _require_pre_graph_write_module(identity, payload)
     if settings.auth_enabled:
         requested_case_id = extract_case_id(payload.query) or payload.current_case_id
-        allow_unbound = (
-            settings.router_execution_mode == "business_line"
-            and is_explicit_case_create_request(payload.model_dump())
-        )
+        allow_unbound = is_explicit_case_create_request(payload.model_dump())
         await anyio.to_thread.run_sync(
             lambda: _ensure_chat_thread(identity, payload.thread_id, requested_case_id, allow_unbound)
         )
@@ -468,14 +459,13 @@ async def invoke_chat(payload: ChatRequest, request: Request,
         )
 
     logger.info(
-        "chat_invoke_completed intent=%s capability=%s route_source=%s debtor=%s final_report_chars=%s",
+        "chat_invoke_completed intent=%s capability=%s route_source=%s entity=%s final_report_chars=%s",
         result.get("intent", ""),
         (result.get("route_decision") or {}).get("capability", ""),
         (result.get("route_decision") or {}).get("source", ""),
-        result.get("current_debtor_name", ""),
+        result.get("current_entity_name", ""),
         len(resolve_final_report(result) or result.get("final_report", "") or ""),
     )
-    _capture_recovery_after_turn(payload, result)
     if settings.auth_enabled:
         await anyio.to_thread.run_sync(
             lambda: _bind_created_case_if_needed(payload.thread_id, result, identity)
@@ -628,7 +618,7 @@ async def _stream_chat_events(
 
         try:
             streaming_graph = await _ensure_async_graph()
-            started_sections: set[str] = set()  # 八段式分段流式：已发 section_start 的段
+            started_sections: set[str] = set()
             reasoning_stream_states: dict[str, dict[str, str]] = {}
             async for event in streaming_graph.astream_events(
                 graph_input,
@@ -642,7 +632,7 @@ async def _stream_chat_events(
                 section_id = _any_section_id_from_node(node)
 
                 if kind == "on_chain_end" and name not in {"__end__", "LangGraph"}:
-                    # 段节点结束 → section_done（name 为 generate_section_N）；不可见段不下发
+                    # Emit section completion only when a report generator exposes section nodes.
                     done_sid = _any_section_id_from_node(name)
                     if done_sid and _section_visible(done_sid):
                         for part_kind, part_text in _flush_tagged_reasoning_stream(reasoning_stream_states.get(done_sid, {})):
@@ -694,7 +684,7 @@ async def _stream_chat_events(
                         # 报告段落分权：不可见 section_code 的段 token 不下发
                         if not _section_visible(section_id):
                             continue
-                        # 八段式并行：token 按 section_id 打标，前端分区重组
+                        # Section-capable report generators tag tokens for frontend assembly.
                         if section_id not in started_sections:
                             started_sections.add(section_id)
                             section = _any_section_meta(section_id)
@@ -734,14 +724,13 @@ async def _stream_chat_events(
             final_state = snapshot.values if snapshot else {}
 
             logger.info(
-                "chat_stream_completed intent=%s capability=%s route_source=%s debtor=%s final_report_chars=%s",
+                "chat_stream_completed intent=%s capability=%s route_source=%s entity=%s final_report_chars=%s",
                 final_state.get("intent", ""),
                 (final_state.get("route_decision") or {}).get("capability", ""),
                 (final_state.get("route_decision") or {}).get("source", ""),
-                final_state.get("current_debtor_name", ""),
+                final_state.get("current_entity_name", ""),
                 len(resolve_final_report(final_state) or final_state.get("final_report", "") or ""),
             )
-            _capture_recovery_after_turn(payload, final_state)
             if get_settings().auth_enabled:
                 await anyio.to_thread.run_sync(
                     lambda: _bind_created_case_if_needed(payload.thread_id, final_state, identity)
@@ -798,24 +787,6 @@ def _run_graph_with_logging(
     return latest_state
 
 
-def _capture_recovery_after_turn(payload: ChatRequest, state: dict[str, Any]) -> None:
-    """实收自动捕获（Tier1-3）：扫对话 query（触发2）+ 本轮上传材料（触发1）→ 写 pending 收款。best-effort。"""
-    try:
-        case_id = int(state.get("current_case_id", 0) or 0)
-        if case_id <= 0:
-            return
-        from ..services.recovery_capture import capture_recovery_to_db
-
-        if payload.query:
-            capture_recovery_to_db(payload.query, case_id, origin="chat")
-        if payload.uploaded_files:  # 本轮有上传 → 扫材料；无上传则不扫(避免重复捕获历史材料)
-            agg = resolve_aggregated_text(state)
-            if agg:
-                capture_recovery_to_db(agg, case_id, origin="ingest_material")
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("capture_recovery_after_turn_failed error=%s", str(exc)[:160])
-
-
 def _build_final_response(payload: ChatRequest, result: dict[str, Any],
                           visible_section_codes: set[str] | None = None) -> ChatInvokeResponse:
     """Normalize final API output for both blocking and streaming modes.
@@ -829,8 +800,8 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
     return ChatInvokeResponse(
         thread_id=payload.thread_id,
         current_case_id=result.get("current_case_id", 0),
-        current_debtor_id=result.get("current_debtor_id", 0),
-        current_debtor_name=result.get("current_debtor_name", ""),
+        current_entity_id=result.get("current_entity_id", 0),
+        current_entity_name=result.get("current_entity_name", ""),
         final_report_ref=result.get("final_report_ref", ""),
         final_report=final_report,
         trace_items=[TraceItemModel.model_validate(item) for item in resolve_trace_items(result)],
@@ -869,12 +840,12 @@ class ChatUploadResponse(BaseModel):
     """Sync MinIO upload result for one /chat/upload-files call."""
 
     upload_batch_id: str = Field(description="本批次的批次 ID。")
-    case_id: int = Field(description="关联的案件 ID。")
-    debtor_id: int = Field(default=0, description="关联的债务人 ID。")
-    debtor_name: str = Field(default="", description="经案件主数据校验后的债务人名称。")
-    effective_debtor_name: str = Field(
+    case_id: int = Field(description="关联的年审项目 ID。")
+    entity_id: int = Field(default=0, description="被审计单位实体 ID。")
+    entity_name: str = Field(default="", description="经项目主数据校验后的被审计单位名称。")
+    effective_entity_name: str = Field(
         default="",
-        description="实际用于 MinIO key 命名的权威债务人名称。",
+        description="实际用于 MinIO key 命名的权威被审计单位名称。",
     )
     file_count: int = Field(description="本批次上传文件数(含重复)。")
     duplicate_files: list[str] = Field(
@@ -890,12 +861,11 @@ class ChatUploadResponse(BaseModel):
     "/upload-files",
     summary="对话入口的同步文件上传",
     description=(
-        "在对话流中先一步把卷宗材料落到 MinIO,前端拿到含 storage_ref / file_hash 的 FileItem 列表后,"
+        "在对话流中先一步把审计资料落到 MinIO,前端拿到含 storage_ref / file_hash 的 FileItem 列表后,"
         "再把这份列表挂到 /chat/invoke 的 uploaded_files 字段走同步问图流程。"
         "\n\n- 强约束:current_case_id 必须 > 0。"
-        "\n- AUTH_ENABLED=true 时校验当前用户对案件的 owner/member/company 权限。"
-        "\n- debtor_id/名称必须与案件画像一致；未指定时只允许使用案件唯一债务人。"
-        "\n- 不从卷宗文本猜测债务人，资产购买方等其他 case_party 角色不会参与债务人解析。"
+        "\n- AUTH_ENABLED=true 时校验当前用户对年审项目的 owner/member/company 权限。"
+        "\n- entity_id/名称必须与年审项目主数据一致。"
         "\n- 不写 source_file / material_event 表,file_id 留空,下游继续用 file_hash 追溯。"
         "\n- 重复文件按 SHA256 在本批次内去重,duplicate_files 字段返回被去重的名字。"
     ),
@@ -913,14 +883,14 @@ async def chat_upload_files(
     ),
     current_case_id: int = Form(
         0,
-        description="案件 ID;> 0 必填,对话入口上传必须先关联到具体案件。",
+        description="年审项目 ID;> 0 必填,对话入口上传必须先关联到具体项目。",
     ),
-    current_debtor_id: int = Form(0, description="已知债务人 ID;未知时传 0。"),
-    current_debtor_name: str = Form(
+    current_entity_id: int = Form(0, description="被审计单位实体 ID;未知时传 0。"),
+    current_entity_name: str = Form(
         "",
-        description="已知债务人名称;为空时由后端从 case_api 查询,再降级为空。",
+        description="被审计单位名称;为空时由年审项目主数据解析。",
     ),
-    doc_category: str = Form("", description="可选,本批卷宗类别编码;非必填。"),
+    doc_category: str = Form("", description="可选,本批审计资料类别编码;非必填。"),
     batch_name: str = Form("", description="可选,本批次名称。"),
     upload_batch_id: str = Form("", description="可选,本批次 ID;空时由后端生成。"),
     operator_id: str = Form("", description="可选,操作员 ID。"),
@@ -940,8 +910,8 @@ async def chat_upload_files(
         raise HTTPException(
             status_code=400,
             detail=(
-                "current_case_id 必填且 > 0:对话入口的上传材料必须先关联到具体案件。"
-                "如尚未选定案件,请先在 /chat/invoke 中发起带 current_case_id 的对话,"
+                "current_case_id 必填且 > 0:对话入口的上传资料必须先关联到具体年审项目。"
+                "如尚未选定项目,请先在 /chat/invoke 中发起带 current_case_id 的对话,"
                 "再调用本接口上传补充材料。"
             ),
         )
@@ -957,21 +927,21 @@ async def chat_upload_files(
         case_id=current_case_id,
     )
 
-    debtor_resolution = resolve_effective_debtor(
+    entity_resolution = resolve_engagement_entity(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
-        debtor_name=current_debtor_name,
+        entity_id=current_entity_id,
+        entity_name=current_entity_name,
         identity=identity,
     )
-    current_debtor_id = debtor_resolution.debtor_id
-    current_debtor_name = debtor_resolution.debtor_name
-    effective_debtor_name = debtor_resolution.debtor_name
+    current_entity_id = entity_resolution.entity_id
+    current_entity_name = entity_resolution.entity_name
+    effective_entity_name = entity_resolution.entity_name
     logger.info(
-        "chat_upload_received files=%s debtor_id=%s effective_debtor_name=%s resolution_source=%s upload_batch_id=%s",
+        "chat_upload_received files=%s entity_id=%s effective_entity_name=%s resolution_source=%s upload_batch_id=%s",
         len(files),
-        current_debtor_id,
-        effective_debtor_name,
-        debtor_resolution.source,
+        current_entity_id,
+        effective_entity_name,
+        entity_resolution.source,
         resolved_batch_id,
     )
 
@@ -984,8 +954,8 @@ async def chat_upload_files(
             settings,
             logger,
             current_case_id=current_case_id,
-            current_debtor_id=current_debtor_id,
-            debtor_name=effective_debtor_name,
+            current_entity_id=current_entity_id,
+            entity_name=effective_entity_name,
             doc_category=doc_category,
             upload_batch_id=resolved_batch_id,
         )
@@ -1000,9 +970,9 @@ async def chat_upload_files(
     return {
         "upload_batch_id": resolved_batch_id,
         "case_id": current_case_id,
-        "debtor_id": current_debtor_id,
-        "debtor_name": current_debtor_name,
-        "effective_debtor_name": effective_debtor_name,
+        "entity_id": current_entity_id,
+        "entity_name": current_entity_name,
+        "effective_entity_name": effective_entity_name,
         "file_count": len(uploaded_files),
         "duplicate_files": duplicate_files,
         "files": uploaded_files,
@@ -1019,15 +989,15 @@ def _summarize_node_update(node_name: str, payload: Any) -> str:
         return "已装载轻量对话记忆"
     if node_name == "resolve_case_context":
         case_id = payload.get("current_case_id", 0)
-        debtor_name = payload.get("current_debtor_name", "")
-        if debtor_name:
-            return f"已解析案件上下文，case_id={case_id}，debtor={debtor_name}"
-        return f"已解析案件上下文，case_id={case_id}"
+        entity_name = payload.get("current_entity_name", "")
+        if entity_name:
+            return f"已解析年审项目上下文，项目ID={case_id}，被审计单位={entity_name}"
+        return f"已解析年审项目上下文，项目ID={case_id}"
     if node_name == "ingest_graph":
         parse_summary = payload.get("parse_summary", "")
-        debtor_name = payload.get("current_debtor_name", "")
-        if parse_summary and debtor_name:
-            return f"补充材料已摄入，debtor={debtor_name}，{parse_summary}"
+        entity_name = payload.get("current_entity_name", "")
+        if parse_summary and entity_name:
+            return f"补充资料已摄入，被审计单位={entity_name}，{parse_summary}"
         if parse_summary:
             return f"补充材料已摄入，{parse_summary}"
         return "补充材料摄入完成"
@@ -1064,8 +1034,6 @@ def _summarize_node_update(node_name: str, payload: Any) -> str:
             return "业务线完整审计已完成"
         if capability == "audit.reaudit":
             return "业务线修正重审已完成"
-        if capability == "recovery.review":
-            return "业务线回款复盘已完成"
         agent_output = (payload.get("agent_output") or "").strip()
         return f"业务线能力执行已完成：{agent_output[:80]}" if agent_output else "业务线能力执行已完成"
     if node_name == "finalize_answer":
@@ -1085,8 +1053,8 @@ def _dehydrate_node_payload(node_name: str, payload: Any) -> dict[str, Any]:
         "intent",
         "route_decision",
         "current_case_id",
-        "current_debtor_id",
-        "current_debtor_name",
+        "current_entity_id",
+        "current_entity_name",
         "parse_summary",
         "doc_category",
         "batch_name",
@@ -1149,9 +1117,9 @@ class ThreadListItem(BaseModel):
     thread_id: str = Field(description="会话线程 ID")
     title: str = Field(description="会话标题")
     checkpoint_id: str = Field(description="最新检查点 ID")
-    case_id: int = Field(description="案件 ID")
-    debtor_id: int = Field(description="债务人 ID")
-    debtor_name: str = Field(description="债务人名称")
+    case_id: int = Field(description="年审项目 ID")
+    entity_id: int = Field(description="被审计单位实体 ID")
+    entity_name: str = Field(description="被审计单位名称")
     last_query: str = Field(description="最后一次用户输入")
     last_intent: str = Field(description="最后一次意图")
     updated_at: str | None = Field(description="最后更新时间")
@@ -1170,16 +1138,16 @@ class ThreadDetailResponse(BaseModel):
     thread_id: str = Field(description="会话线程 ID")
     title: str = Field(description="会话标题")
     checkpoint_id: str = Field(description="最新检查点 ID")
-    case_id: int = Field(description="案件 ID")
-    debtor_id: int = Field(description="债务人 ID")
-    debtor_name: str = Field(description="债务人名称")
+    case_id: int = Field(description="年审项目 ID")
+    entity_id: int = Field(description="被审计单位实体 ID")
+    entity_name: str = Field(description="被审计单位名称")
     last_query: str = Field(description="最后一次用户输入")
     last_intent: str = Field(description="最后一次意图")
     final_report_ref: str = Field(description="最终报告引用 ID")
     memory_context: str = Field(description="轻量会话记忆摘要")
     step: int = Field(description="当前步骤数")
     upload_batch_id: str = Field(default="", description="上传批次 ID")
-    doc_category: str = Field(default="", description="卷宗类别")
+    doc_category: str = Field(default="", description="审计资料类别")
     batch_name: str = Field(default="", description="批次名称")
     created_at: str | None = Field(description="会话创建时间")
     updated_at: str | None = Field(description="最后更新时间")

@@ -76,14 +76,15 @@ describe("flowReducer", () => {
     expect(s.step).toBe("failed");
   });
 
-  it("PROCESSING_COMPLETED / PROCESSING_FAILED 清空事件 ID", () => {
+  it("PROCESSING_COMPLETED / PROCESSING_FAILED 清空事件 ID并保留失败原因", () => {
     const base: FlowState = { ...initialFlowState, step: "processing", materialEventId: "evt-1" };
     const done = flowReducer(base, { type: "PROCESSING_COMPLETED" });
     expect(done.step).toBe("completed");
     expect(done.materialEventId).toBeNull();
-    const failed = flowReducer(base, { type: "PROCESSING_FAILED" });
+    const failed = flowReducer(base, { type: "PROCESSING_FAILED", message: "表格解析失败" });
     expect(failed.step).toBe("failed");
     expect(failed.materialEventId).toBeNull();
+    expect(failed.failureMessage).toBe("表格解析失败");
   });
 
   it("RESET 回到初始状态", () => {
@@ -96,6 +97,7 @@ describe("flowReducer", () => {
       materialEventId: "e",
       uploadResult: uploadResp("e"),
       uploadBatchId: "batch-e",
+      failureMessage: null,
     };
     expect(flowReducer(dirty, { type: "RESET" })).toEqual(initialFlowState);
   });
@@ -105,8 +107,9 @@ describe("flowReducer", () => {
       type: "UPLOAD_STARTED",
       uploadBatchId: "batch-retry",
     });
-    const failed = flowReducer(uploading, { type: "UPLOAD_FAILED" });
+    const failed = flowReducer(uploading, { type: "UPLOAD_FAILED", message: "网络失败" });
     expect(failed.uploadBatchId).toBe("batch-retry");
+    expect(failed.failureMessage).toBe("网络失败");
 
     const changed = flowReducer(
       { ...failed, validationResult: okResult },

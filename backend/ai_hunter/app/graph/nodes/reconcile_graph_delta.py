@@ -126,7 +126,7 @@ def _decide_graph_delta(
         try:
             llm = build_zero_temp_router_llm()
             structured_llm = llm.with_structured_output(GraphDeltaDecisionBundleModel)
-            prompt = load_prompt("reconcile_graph_delta.txt")
+            prompt = load_prompt("annual_audit_reconcile_graph_delta.txt")
             result = structured_llm.invoke(
                 [
                     SystemMessage(content=prompt),
@@ -506,9 +506,11 @@ def _supports_semantic_family_override(candidate: dict[str, Any], signature: dic
 def _fallback_override_would_drop_specificity(candidate: dict[str, Any], signature: dict[str, Any]) -> bool:
     signature_family = str(signature.get("claim_family", "") or "")
     if signature_family not in {
-        "bankruptcy_application",
-        "bankruptcy_acceptance",
-        "bankruptcy_declaration",
+        "financial_statement_balance",
+        "revenue_recognition",
+        "receivable_aging",
+        "bank_transaction",
+        "audit_adjustment",
     }:
         return False
     candidate_text = str(candidate.get("claim_text", "") or "")
@@ -543,13 +545,12 @@ def _claims_share_fact_slot(*, claim_family: str, candidate_text: str, signature
 
 def _claim_family_markers(claim_family: str) -> tuple[str, ...]:
     family_markers = {
-        "insolvency": ("资不抵债", "清算净值", "资产评估总价值"),
-        "restructuring_possibility": ("债权人会议", "重整", "和解"),
-        "creditors_meeting": ("债权人会议", "时间", "地点", "召开", "举行"),
-        "administrator_appointment": ("管理人", "指定", "担任"),
-        "bankruptcy_application": ("申请", "破产清算"),
-        "bankruptcy_acceptance": ("受理", "破产清算"),
-        "bankruptcy_declaration": ("宣告破产", "裁定破产"),
+        "financial_statement_balance": ("资产负债表", "期末余额", "年末余额", "账面余额"),
+        "revenue_recognition": ("营业收入", "收入确认", "销售收入", "截止测试", "截止性", "跨期"),
+        "receivable_aging": ("应收账款", "账龄", "坏账准备", "函证", "总账"),
+        "bank_transaction": ("银行流水", "银行账户", "交易金额", "对手方", "对账单", "未达账项"),
+        "related_party": ("关联方", "关联交易", "实际控制人"),
+        "audit_adjustment": ("审计调整", "调整分录", "未调整差异", "错报"),
     }
     return family_markers.get(claim_family, ())
 
@@ -557,14 +558,14 @@ def _claim_family_markers(claim_family: str) -> tuple[str, ...]:
 def _specificity_markers(text: str) -> set[str]:
     normalized = _normalize_text(text)
     markers: set[str] = set()
-    if "贵州省六盘水市中级人民法院" in normalized or "人民法院" in normalized or "法院" in normalized:
-        markers.add("court")
-    if "裁定" in normalized:
-        markers.add("ruling")
-    if "申请" in normalized:
-        markers.add("application")
-    if any(token in normalized for token in ("2024年", "2025年", "2026年", "2027年", "月", "日")):
+    if any(token in normalized for token in ("资产负债表", "利润表", "现金流量表", "附注")):
+        markers.add("statement")
+    if any(token in normalized for token in ("借方", "贷方", "凭证号", "科目编码")):
+        markers.add("journal")
+    if any(token in normalized for token in ("2024年", "2025年", "2026年", "2027年", "月", "日", "期末")):
         markers.add("date")
+    if any(token in normalized for token in ("元", "万元", "金额", "余额")):
+        markers.add("amount")
     return markers
 
 
@@ -572,18 +573,16 @@ def _claim_semantic_family(claim_text: str) -> str:
     normalized = _normalize_text(claim_text)
     if not normalized:
         return "generic"
-    if "债权人会议" in normalized:
-        if "重整" in normalized or "和解" in normalized:
-            return "restructuring_possibility"
-        return "creditors_meeting"
-    if "资不抵债" in normalized or "清算净值" in normalized or "资产评估总价值" in normalized:
-        return "insolvency"
-    if "管理人" in normalized and ("指定" in normalized or "担任" in normalized):
-        return "administrator_appointment"
-    if "申请" in normalized and "破产" in normalized:
-        return "bankruptcy_application"
-    if "受理" in normalized and "破产" in normalized:
-        return "bankruptcy_acceptance"
-    if "宣告破产" in normalized or ("裁定" in normalized and "破产" in normalized):
-        return "bankruptcy_declaration"
+    if any(token in normalized for token in ("审计调整", "调整分录", "未调整差异", "错报")):
+        return "audit_adjustment"
+    if any(token in normalized for token in ("应收账款", "账龄", "坏账准备", "函证", "总账")):
+        return "receivable_aging"
+    if any(token in normalized for token in ("营业收入", "收入确认", "销售收入", "截止测试", "截止性", "跨期")):
+        return "revenue_recognition"
+    if any(token in normalized for token in ("银行流水", "银行账户", "交易金额", "对手方", "对账单", "未达账项")):
+        return "bank_transaction"
+    if any(token in normalized for token in ("关联方", "关联交易", "实际控制人")):
+        return "related_party"
+    if any(token in normalized for token in ("资产负债表", "期末余额", "年末余额", "账面余额")):
+        return "financial_statement_balance"
     return "generic"

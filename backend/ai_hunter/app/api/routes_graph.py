@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..graph.schemas import (
     DemoCaseTraceValidationRequestModel,
     DemoCaseTraceValidationResponseModel,
-    EvidenceDrawerPageModel,
     EvidenceItemModel,
     EvidenceResolveRequestModel,
     EvidenceResolveResponseModel,
@@ -19,7 +18,6 @@ from ..graph.schemas import (
     RelationEvidenceResponseModel,
     TraceItemModel,
 )
-from ..graph.context_loader import parse_legacy_claim_citation_id
 from ..services.demo_case_trace_service import get_demo_case_trace_service
 from ..services.kg_service import get_kg_service
 from ..services.minio_service import resolve_minio_reference_url
@@ -51,102 +49,16 @@ async def resolve_evidence(
     identity: Identity = Depends(get_current_identity),
 ) -> EvidenceResolveResponseModel:
     """Resolve one claim into concrete evidence anchors."""
+    from ai_hunter.annual_audit.evidence_service import resolve_report_evidence
+
     require_case_access(payload.case_id, identity)
-    claim_id = int(payload.claim_id or 0)
-    claim_text = ""
-    if claim_id <= 0 and payload.report_ref and payload.citation_id:
-        resolved = get_kg_service().resolve_claim_by_citation(
-            case_id=payload.case_id,
+    return EvidenceResolveResponseModel.model_validate(
+        resolve_report_evidence(
+            engagement_id=payload.case_id,
             report_ref=payload.report_ref,
             citation_id=payload.citation_id,
+            claim_id=payload.claim_id,
         )
-        claim_id = int(resolved.get("claim_id", 0) or 0)
-        claim_text = str(resolved.get("claim_text", "") or "")
-    if claim_id <= 0:
-        claim_id = parse_legacy_claim_citation_id(payload.citation_id)
-
-    kg_service = get_kg_service()
-    # issue #9: the direct claim_id path skipped claim_text, leaving the evidence
-    # drawer title empty when entering from the graph. Backfill it from kg_claim
-    # so claim_id and citation_id paths are consistent.
-    if claim_id > 0 and not claim_text:
-        claim_text = kg_service.fetch_claim_text(claim_id, case_id=payload.case_id)
-    raw_evidences = kg_service.fetch_claim_evidence(claim_id, case_id=payload.case_id) if claim_id > 0 else []
-    evidences = [
-        EvidenceItemModel.model_validate(
-            {
-                **(evidence.model_dump() if hasattr(evidence, "model_dump") else dict(evidence)),
-                "page_image_ref": resolve_minio_reference_url(
-                    str(
-                        (
-                            evidence.page_image_ref
-                            if hasattr(evidence, "page_image_ref")
-                            else evidence.get("page_image_ref", "")
-                        )
-                        or ""
-                    )
-                ),
-            }
-        )
-        for evidence in raw_evidences
-    ]
-    primary_evidence = evidences[0] if evidences else None
-    primary_page = None
-    if primary_evidence is not None:
-        page_rows = kg_service.fetch_page_anchors(
-            file_id=primary_evidence.file_id,
-            page_no=primary_evidence.page_no,
-            chunk_id=primary_evidence.chunk_id,
-        )
-        if page_rows:
-            first = page_rows[0]
-            primary_page = EvidenceDrawerPageModel(
-                file_id=primary_evidence.file_id,
-                page_no=primary_evidence.page_no,
-                page_width=int(first.get("page_width", 0) or 0),
-                page_height=int(first.get("page_height", 0) or 0),
-                page_image_ref=resolve_minio_reference_url(str(first.get("page_image_ref", "") or "")),
-                source_file_url=resolve_minio_reference_url(str(first.get("storage_ref", "") or "")),
-                content_type=str(first.get("content_type", "") or primary_evidence.content_type or ""),
-                anchors=[
-                    EvidenceItemModel(
-                        chunk_id=str(row.get("chunk_id", "") or ""),
-                        file_id=primary_evidence.file_id,
-                        file_name=primary_evidence.file_name,
-                        page_no=primary_evidence.page_no,
-                        quote_text=str(row.get("quote_text", "") or ""),
-                        bbox_list=row.get("bbox_list") or [],
-                        page_image_ref=resolve_minio_reference_url(str(row.get("page_image_ref", "") or "")),
-                        source_page_id=int(row.get("source_page_id", 0) or 0),
-                        source_file_url=resolve_minio_reference_url(str(row.get("storage_ref", "") or "")),
-                        content_type=str(row.get("content_type", "") or primary_evidence.content_type or ""),
-                    )
-                    for row in page_rows
-                ],
-            )
-    # Disambiguate the empty result so the frontend can tell a typo'd/self-built
-    # report_ref apart from a citation that genuinely has no evidence.
-    if claim_id > 0:
-        resolution_status = "ok" if evidences else "no_evidence"
-    elif payload.report_ref and payload.citation_id:
-        resolution_status = (
-            "citation_not_found"
-            if kg_service.report_ref_exists(case_id=payload.case_id, report_ref=payload.report_ref)
-            else "ref_not_found"
-        )
-    else:
-        resolution_status = "no_evidence"
-
-    return EvidenceResolveResponseModel(
-        case_id=payload.case_id,
-        report_ref=payload.report_ref,
-        citation_id=payload.citation_id,
-        claim_id=claim_id,
-        claim_text=claim_text,
-        evidences=evidences,
-        primary_evidence=primary_evidence,
-        primary_page=primary_page,
-        resolution_status=resolution_status,
     )
 
 

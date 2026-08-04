@@ -1,11 +1,6 @@
 import { clearAuthSession, getAuthorizationHeader } from "@/lib/auth/token-store";
 
-/**
- * Low-level transport for LangGraph and Cases requests.
- *
- * The unified backend receives the browser-held bearer token. During rollback
- * only, a separately configured legacy Cases API remains unauthenticated.
- */
+/** Low-level transport for every request to the unified annual-audit API. */
 
 const PUBLIC_PATHS = new Set(["/login"]);
 
@@ -34,25 +29,12 @@ function inputUrl(input: RequestInfo | URL): string {
   return input instanceof Request ? input.url : String(input);
 }
 
-function unifiedApiBaseUrl(): string {
+function apiBaseUrl(): string {
   return trimTrailingSlash(process.env.NEXT_PUBLIC_API_BASE_URL ?? "");
 }
 
-function langgraphBaseUrl(): string {
-  return (
-    unifiedApiBaseUrl() ||
-    trimTrailingSlash(process.env.NEXT_PUBLIC_LANGGRAPH_API_BASE_URL ?? "")
-  );
-}
-
-function casesBaseUrl(): string {
-  return (
-    unifiedApiBaseUrl() || trimTrailingSlash(process.env.NEXT_PUBLIC_CASES_API_BASE_URL ?? "")
-  );
-}
-
 function isAuthenticatedApiRequest(input: RequestInfo | URL): boolean {
-  const base = langgraphBaseUrl();
+  const base = apiBaseUrl();
   if (!base) return false;
   const url = inputUrl(input);
   return url === base || url.startsWith(`${base}/`);
@@ -97,9 +79,9 @@ function trimTrailingSlash(url: string): string {
 }
 
 export function casesUrl(path: string): string {
-  return `${casesBaseUrl()}${path}`;
+  return `${apiBaseUrl()}${path}`;
 }
 
 export function langgraphUrl(path: string): string {
-  return `${langgraphBaseUrl()}${path}`;
+  return `${apiBaseUrl()}${path}`;
 }

@@ -19,7 +19,6 @@ from ..graph.heavy_state import get_heavy_payload, put_heavy_payload
 from ..graph.schemas import CaseDocCategoryStatusModel, ValidateDocCategoryResultModel
 from ..graph.state import FileItem
 from ..logging_utils import build_request_logger, preview_text
-from ..services.doc_category_api import get_doc_category_api_client, get_mock_doc_category_service
 from ..services.kg_service import get_kg_service
 from ..services.material_event_progress import build_material_event_id, mark_upload_ingest_progress
 from ..services.minio_service import resolve_minio_reference_url
@@ -33,7 +32,7 @@ from ..subgraphs.ingest_graph import (
     build_upload_parse_graph,
 )
 from ..subgraphs.build_knowledge_graph_graph import build_knowledge_graph_graph
-from ._upload_helpers import resolve_effective_debtor, resolve_upload_batch_id, to_file_item
+from ._upload_helpers import resolve_engagement_entity, resolve_upload_batch_id, to_file_item
 
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -78,7 +77,7 @@ class UploadBatchPersistenceChecksResponse(BaseModel):
 class UploadBatchResponse(BaseModel):
     upload_batch_id: str = ""
     case_id: int | None = None
-    debtor_id: int | None = None
+    entity_id: int | None = None
     batch_name: str = ""
     doc_category: str | None = None
     operator_id: str = ""
@@ -128,7 +127,7 @@ class UploadBatchSummaryResponse(BaseModel):
 class MaterialEventResponse(BaseModel):
     material_event_id: str = ""
     case_id: int | None = None
-    debtor_id: int | None = None
+    entity_id: int | None = None
     upload_batch_id: str = ""
     event_type: str = ""
     status: str = ""
@@ -430,14 +429,27 @@ async def list_case_unresolved_items(
         status=status,
         limit=limit,
     )
+    def _serialize_items(items: list[dict]) -> list[dict]:
+        serialized: list[dict] = []
+        for item in items:
+            created_at = item.get("created_at")
+            if hasattr(created_at, "isoformat"):
+                created_at = created_at.isoformat()
+            elif created_at is not None and not isinstance(created_at, str):
+                created_at = str(created_at)
+            serialized.append({**item, "created_at": created_at})
+        return serialized
+
+    unresolved_relations = _serialize_items(payload.get("unresolved_relations", []))
+    unresolved_claims = _serialize_items(payload.get("unresolved_claims", []))
     return {
         "case_id": case_id,
         "upload_batch_id": upload_batch_id,
         "status": status,
-        "unresolved_relation_count": len(payload.get("unresolved_relations", [])),
-        "unresolved_claim_count": len(payload.get("unresolved_claims", [])),
-        "unresolved_relations": payload.get("unresolved_relations", []),
-        "unresolved_claims": payload.get("unresolved_claims", []),
+        "unresolved_relation_count": len(unresolved_relations),
+        "unresolved_claim_count": len(unresolved_claims),
+        "unresolved_relations": unresolved_relations,
+        "unresolved_claims": unresolved_claims,
     }
 
 
@@ -536,7 +548,7 @@ def _mark_retry_progress(
 
     mark_upload_ingest_progress(
         case_id=int(batch.get("case_id", 0) or 0),
-        debtor_id=int(batch.get("debtor_id", 0) or 0),
+        entity_id=int(batch.get("entity_id", 0) or 0),
         batch_name=str(batch.get("batch_name", "") or ""),
         doc_category=str(batch.get("doc_category", "") or ""),
         operator_id=str(batch.get("operator_id", "") or ""),
@@ -578,10 +590,10 @@ def _mark_retry_progress(
     summary="上传文件并异步触发摄入",
     description=(
         "接收前端 multipart 文件上传，完成校验与文件落存储后立即返回受理结果。"
-        " OCR、parse_document 与图谱摄入改为后台异步执行，前端可使用"
+        " OCR、结构化解析与图谱摄入由后台异步执行，前端可使用"
         " `material_event_id` 和 `upload_batch_id` 轮询状态接口。"
-        " 上传前必须先建案并绑定 current_case_id，不允许 case_id=0；债务人按案件画像中的"
-        " debtor_id/唯一债务人解析，调用方名称只做一致性校验，不从材料文本猜测债务人。"
+        " 上传前必须先创建并绑定年审项目，不允许 current_case_id=0；"
+        "被审计单位由年审项目主数据确定。"
     ),
     response_description=(
         "返回受理成功后的批次 ID、材料事件 ID 与状态查询路径。"
@@ -600,16 +612,16 @@ async def upload_and_ingest(
     ),
     current_case_id: int = Form(
         0,
-        description="案件 ID；始终必须大于 0，且鉴权开启时当前用户必须有案件访问权限。",
+        description="年审项目 ID；始终必须大于 0，且鉴权开启时当前用户必须有项目访问权限。",
     ),
-    current_debtor_id: int = Form(0, description="已知债务人 ID。未知时可传 0。"),
-    current_debtor_name: str = Form(
+    current_entity_id: int = Form(0, description="被审计单位实体 ID。未知时可传 0。"),
+    current_entity_name: str = Form(
         "",
-        description="可选债务人名称；仅用于与案件主数据一致性校验，不从材料内容猜测。",
+        description="可选被审计单位名称；仅用于与年审项目主数据一致性校验。",
     ),
     doc_category: str = Form(
         "",
-        description="本批卷宗类别编码。同一批次只允许上传一种类别。",
+        description="本批审计资料类别编码。同一批次只允许上传一种类别。",
     ),
     batch_name: str = Form(
         "",
@@ -621,7 +633,7 @@ async def upload_and_ingest(
     ),
     operator_id: str = Form("", description="可选，操作员 ID。"),
     operator_name: str = Form("", description="可选，操作员名称。"),
-    identity: Identity = Depends(require_any_module(("corrections", "admin"))),
+    identity: Identity = Depends(require_any_module(("materials", "admin"))),
 ) -> dict:
     """Accept multipart uploads, persist lightweight metadata, and enqueue background ingest."""
     settings = get_settings()
@@ -639,25 +651,25 @@ async def upload_and_ingest(
             detail=f"单次最多上传 {settings.max_upload_files} 个文件。",
         )
     if current_case_id <= 0:
-        raise HTTPException(status_code=400, detail="上传前必须先建案并绑定有效 current_case_id")
+        raise HTTPException(status_code=400, detail="上传前必须先创建并绑定有效年审项目")
     require_case_access(current_case_id, identity)
     if not doc_category.strip():
         raise HTTPException(
             status_code=400,
-            detail="缺少 doc_category；当前约定同一批次只允许上传一种卷宗类别。",
+            detail="缺少 doc_category；当前约定同一批次只允许上传一种审计资料类别。",
         )
 
     operator_id = operator_id or identity.user_id
     operator_name = operator_name or identity.username
     resolved_batch_id = resolve_upload_batch_id(upload_batch_id)
-    debtor_resolution = resolve_effective_debtor(
+    entity_resolution = resolve_engagement_entity(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
-        debtor_name=current_debtor_name,
+        entity_id=current_entity_id,
+        entity_name=current_entity_name,
         identity=identity,
     )
-    current_debtor_id = debtor_resolution.debtor_id
-    current_debtor_name = debtor_resolution.debtor_name
+    current_entity_id = entity_resolution.entity_id
+    current_entity_name = entity_resolution.entity_name
     kg_service = get_kg_service()
     fetch_existing_batch = getattr(kg_service, "fetch_source_upload_batch", None)
     existing_batch = fetch_existing_batch(resolved_batch_id) if callable(fetch_existing_batch) else {}
@@ -666,7 +678,7 @@ async def upload_and_ingest(
             batch=existing_batch,
             files=files,
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             doc_category=doc_category,
         )
         existing_status = str(existing_batch.get("status", "") or "")
@@ -686,11 +698,11 @@ async def upload_and_ingest(
         )
         return _build_idempotent_upload_response(existing_batch)
     logger.info(
-        "files_upload_received uploaded_file_count=%s debtor_id=%s debtor_name=%s resolution_source=%s doc_category=%s batch_name=%s upload_batch_id=%s",
+        "files_upload_received uploaded_file_count=%s entity_id=%s entity_name=%s resolution_source=%s doc_category=%s batch_name=%s upload_batch_id=%s",
         len(files),
-        current_debtor_id,
-        preview_text(current_debtor_name, 80),
-        debtor_resolution.source,
+        current_entity_id,
+        preview_text(current_entity_name, 80),
+        entity_resolution.source,
         doc_category,
         preview_text(batch_name, 80),
         resolved_batch_id,
@@ -713,8 +725,8 @@ async def upload_and_ingest(
                 settings,
                 logger,
                 current_case_id=current_case_id,
-                current_debtor_id=current_debtor_id,
-                debtor_name=current_debtor_name,
+                current_entity_id=current_entity_id,
+                entity_name=current_entity_name,
                 doc_category=doc_category,
                 upload_batch_id=resolved_batch_id,
                 populate_content=True,
@@ -737,7 +749,7 @@ async def upload_and_ingest(
         )
         _persist_failed_upload_batch(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             batch_name=batch_name,
             doc_category=doc_category,
             operator_id=operator_id,
@@ -781,7 +793,7 @@ async def upload_and_ingest(
     }
     mark_upload_ingest_progress(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
+        entity_id=current_entity_id,
         batch_name=batch_name,
         doc_category=doc_category,
         operator_id=operator_id,
@@ -799,7 +811,7 @@ async def upload_and_ingest(
     )
     mark_upload_ingest_progress(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
+        entity_id=current_entity_id,
         batch_name=batch_name,
         doc_category=doc_category,
         operator_id=operator_id,
@@ -818,7 +830,7 @@ async def upload_and_ingest(
     try:
         _persist_uploaded_file_membership(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             upload_batch_id=resolved_batch_id,
             uploaded_files=uploaded_files,
         )
@@ -831,7 +843,7 @@ async def upload_and_ingest(
         )
         mark_upload_ingest_progress(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             batch_name=batch_name,
             doc_category=doc_category,
             operator_id=operator_id,
@@ -856,8 +868,8 @@ async def upload_and_ingest(
         raise HTTPException(status_code=500, detail=error_payload) from exc
     job_payload = _build_upload_ingest_job_payload(
         current_case_id=current_case_id,
-        current_debtor_id=current_debtor_id,
-        current_debtor_name=current_debtor_name,
+        current_entity_id=current_entity_id,
+        current_entity_name=current_entity_name,
         doc_category=doc_category,
         batch_name=batch_name,
         upload_batch_id=resolved_batch_id,
@@ -886,7 +898,7 @@ async def upload_and_ingest(
         )
         mark_upload_ingest_progress(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             batch_name=batch_name,
             doc_category=doc_category,
             operator_id=operator_id,
@@ -946,15 +958,15 @@ async def _validate_upload_batch_replay(
     batch: dict,
     files: list[UploadFile],
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     doc_category: str,
 ) -> None:
     """Reject reuse of an upload_batch_id for a different tenant object or file set."""
     mismatched_fields = []
     if int(batch.get("case_id", 0) or 0) != int(case_id or 0):
         mismatched_fields.append("case_id")
-    if int(batch.get("debtor_id", 0) or 0) != int(debtor_id or 0):
-        mismatched_fields.append("debtor_id")
+    if int(batch.get("entity_id", 0) or 0) != int(entity_id or 0):
+        mismatched_fields.append("entity_id")
     if str(batch.get("doc_category", "") or "") != str(doc_category or ""):
         mismatched_fields.append("doc_category")
     if mismatched_fields:
@@ -1027,8 +1039,8 @@ def _build_idempotent_upload_response(batch: dict) -> dict:
 def _build_upload_ingest_job_payload(
     *,
     current_case_id: int,
-    current_debtor_id: int,
-    current_debtor_name: str,
+    current_entity_id: int,
+    current_entity_name: str,
     doc_category: str,
     batch_name: str,
     upload_batch_id: str,
@@ -1045,8 +1057,8 @@ def _build_upload_ingest_job_payload(
     material_event_id = _build_material_event_id(upload_batch_id)
     return {
         "current_case_id": int(current_case_id or 0),
-        "current_debtor_id": int(current_debtor_id or 0),
-        "current_debtor_name": str(current_debtor_name or ""),
+        "current_entity_id": int(current_entity_id or 0),
+        "current_entity_name": str(current_entity_name or ""),
         "doc_category": str(doc_category or ""),
         "batch_name": str(batch_name or ""),
         "upload_batch_id": str(upload_batch_id or ""),
@@ -1066,7 +1078,7 @@ def _build_upload_ingest_job_payload(
 def _persist_uploaded_file_membership(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     upload_batch_id: str,
     uploaded_files: list[FileItem],
 ) -> list[dict]:
@@ -1083,7 +1095,7 @@ def _persist_uploaded_file_membership(
         source_rows.append(
             {
                 "case_id": int(case_id),
-                "debtor_id": int(debtor_id or 0),
+                "entity_id": int(entity_id or 0),
                 "file_name": str(item.get("name", "") or "uploaded-file"),
                 "file_type": str(item.get("type", "") or "document"),
                 "content_type": str(item.get("content_type", "") or ""),
@@ -1139,8 +1151,8 @@ def _build_base_upload_state(job_payload: dict, *, initial_stage: str) -> dict:
     upload_batch_summary = dict(job_payload.get("upload_batch_summary", {}) or {})
     return {
         "current_case_id": int(job_payload.get("current_case_id", 0) or 0),
-        "current_debtor_id": int(job_payload.get("current_debtor_id", 0) or 0),
-        "current_debtor_name": str(job_payload.get("current_debtor_name", "") or ""),
+        "current_entity_id": int(job_payload.get("current_entity_id", 0) or 0),
+        "current_entity_name": str(job_payload.get("current_entity_name", "") or ""),
         "doc_category": str(job_payload.get("doc_category", "") or ""),
         "batch_name": str(job_payload.get("batch_name", "") or ""),
         "upload_batch_id": str(job_payload.get("upload_batch_id", "") or ""),
@@ -1179,8 +1191,8 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
     """Execute upload parse out of band, persist progress, then optionally enqueue graph enrichment."""
     base_state = _build_base_upload_state(job_payload, initial_stage="ocr_running")
     current_case_id = int(base_state.get("current_case_id", 0) or 0)
-    current_debtor_id = int(base_state.get("current_debtor_id", 0) or 0)
-    current_debtor_name = str(base_state.get("current_debtor_name", "") or "")
+    current_entity_id = int(base_state.get("current_entity_id", 0) or 0)
+    current_entity_name = str(base_state.get("current_entity_name", "") or "")
     doc_category = str(base_state.get("doc_category", "") or "")
     batch_name = str(base_state.get("batch_name", "") or "")
     upload_batch_id = str(base_state.get("upload_batch_id", "") or "")
@@ -1195,7 +1207,7 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
 
     mark_upload_ingest_progress(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
+        entity_id=current_entity_id,
         batch_name=batch_name,
         doc_category=doc_category,
         operator_id=operator_id,
@@ -1223,7 +1235,7 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
         )
         mark_upload_ingest_progress(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             batch_name=batch_name,
             doc_category=doc_category,
             operator_id=operator_id,
@@ -1247,7 +1259,7 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
 
     current_stage = "parse_completed"
     parse_case_id = int(parse_result.get("current_case_id", current_case_id) or 0)
-    parse_debtor_id = int(parse_result.get("current_debtor_id", current_debtor_id) or 0)
+    parse_entity_id = int(parse_result.get("current_entity_id", current_entity_id) or 0)
     parse_batch_name = str(parse_result.get("batch_name", batch_name) or batch_name)
     parse_doc_category = str(parse_result.get("doc_category", doc_category) or doc_category)
     parse_operator_id = str(parse_result.get("operator_id", operator_id) or operator_id)
@@ -1264,19 +1276,9 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
     aggregated_text_ref = str(parse_result.get("aggregated_text_ref", "") or "")
     parse_document_result_ref = str(parse_result.get("parse_document_result_ref", "") or "")
 
-    # 触发3：操作员上传卷宗材料 → 从材料文本自动捕获已发生回款（写 pending，待人工确认）
-    try:
-        from ..services.recovery_capture import capture_recovery_to_db
-        _agg = resolve_aggregated_text(parse_result)
-        _cid = int(parse_case_id or current_case_id or 0)
-        if _agg and _cid > 0:
-            capture_recovery_to_db(_agg, _cid, origin="ingest_material")
-    except Exception:  # noqa: BLE001 — 回款捕获绝不影响入库
-        pass
-
     mark_upload_ingest_progress(
         case_id=parse_case_id,
-        debtor_id=parse_debtor_id,
+        entity_id=parse_entity_id,
         batch_name=parse_batch_name,
         doc_category=parse_doc_category,
         operator_id=parse_operator_id,
@@ -1315,7 +1317,7 @@ def _run_upload_parse_job(job_payload: dict, *, enqueue_graph_job: bool = True) 
         )
         mark_upload_ingest_progress(
             case_id=parse_case_id,
-            debtor_id=parse_debtor_id,
+            entity_id=parse_entity_id,
             batch_name=parse_batch_name,
             doc_category=parse_doc_category,
             operator_id=parse_operator_id,
@@ -1350,8 +1352,8 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
     """Execute graph enrichment from a persisted parse-stage result."""
     parse_result = dict(job_payload.get("parse_result", {}) or {})
     current_case_id = int(parse_result.get("current_case_id", 0) or 0)
-    current_debtor_id = int(parse_result.get("current_debtor_id", 0) or 0)
-    current_debtor_name = str(parse_result.get("current_debtor_name", "") or "")
+    current_entity_id = int(parse_result.get("current_entity_id", 0) or 0)
+    current_entity_name = str(parse_result.get("current_entity_name", "") or "")
     doc_category = str(parse_result.get("doc_category", "") or "")
     batch_name = str(parse_result.get("batch_name", "") or "")
     upload_batch_id = str(parse_result.get("upload_batch_id", "") or "")
@@ -1377,7 +1379,7 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
     current_stage = "graph_running"
     mark_upload_ingest_progress(
         case_id=current_case_id,
-        debtor_id=current_debtor_id,
+        entity_id=current_entity_id,
         batch_name=batch_name,
         doc_category=doc_category,
         operator_id=operator_id,
@@ -1412,7 +1414,7 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
         )
         mark_upload_ingest_progress(
             case_id=current_case_id,
-            debtor_id=current_debtor_id,
+            entity_id=current_entity_id,
             batch_name=batch_name,
             doc_category=doc_category,
             operator_id=operator_id,
@@ -1447,8 +1449,8 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
     response_batch_id = str(result.get("upload_batch_id", upload_batch_id) or upload_batch_id)
 
     LOGGER.info(
-        "files_upload_completed debtor=%s records_inserted=%s categories=%s doc_category=%s aggregated_text_chars=%s upload_batch_id=%s",
-        result.get("current_debtor_name", current_debtor_name),
+        "files_upload_completed entity=%s records_inserted=%s categories=%s doc_category=%s aggregated_text_chars=%s upload_batch_id=%s",
+        result.get("current_entity_name", current_entity_name),
         result.get("records_inserted", 0),
         result.get("categories_found", [])[:10],
         doc_category,
@@ -1457,7 +1459,7 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
     )
     mark_upload_ingest_progress(
         case_id=response_case_id,
-        debtor_id=int(result.get("current_debtor_id", current_debtor_id) or 0),
+        entity_id=int(result.get("current_entity_id", current_entity_id) or 0),
         batch_name=result.get("batch_name", batch_name),
         doc_category=result.get("doc_category", doc_category),
         operator_id=result.get("operator_id", operator_id),
@@ -1569,10 +1571,14 @@ def _build_retry_parse_job_payload(*, batch: dict, event: dict) -> dict:
     metadata = dict(batch.get("metadata", {}) or {})
     uploaded_files = _build_retry_uploaded_files(batch)
     _validate_retry_uploaded_files_have_content(uploaded_files, retry_stage="parse")
+    entity_resolution = resolve_engagement_entity(
+        case_id=int(batch.get("case_id", 0) or 0),
+        entity_id=int(batch.get("entity_id", 0) or 0),
+    )
     return _build_upload_ingest_job_payload(
         current_case_id=int(batch.get("case_id", 0) or 0),
-        current_debtor_id=int(batch.get("debtor_id", 0) or 0),
-        current_debtor_name="",
+        current_entity_id=entity_resolution.entity_id,
+        current_entity_name=entity_resolution.entity_name,
         doc_category=str(batch.get("doc_category", "") or ""),
         batch_name=str(batch.get("batch_name", "") or ""),
         upload_batch_id=str(batch.get("upload_batch_id", "") or ""),
@@ -1608,6 +1614,10 @@ def _build_retry_graph_job_payload(*, batch: dict, event: dict) -> dict:
     event_payload = dict(event.get("event_payload", {}) or {})
     uploaded_files = _build_retry_uploaded_files(batch)
     _validate_retry_uploaded_files_have_content(uploaded_files, retry_stage="graph")
+    entity_resolution = resolve_engagement_entity(
+        case_id=int(batch.get("case_id", 0) or 0),
+        entity_id=int(batch.get("entity_id", 0) or 0),
+    )
     ingest_payload_ref = str(event_payload.get("ingest_payload_ref", "") or metadata.get("ingest_payload_ref", "") or "").strip()
     aggregated_text_ref = str(event_payload.get("aggregated_text_ref", "") or metadata.get("aggregated_text_ref", "") or "").strip()
     parse_document_result_ref = str(
@@ -1618,8 +1628,8 @@ def _build_retry_graph_job_payload(*, batch: dict, event: dict) -> dict:
     return _build_graph_enrichment_job_payload(
         {
             "current_case_id": int(batch.get("case_id", 0) or 0),
-            "current_debtor_id": int(batch.get("debtor_id", 0) or 0),
-            "current_debtor_name": "",
+            "current_entity_id": entity_resolution.entity_id,
+            "current_entity_name": entity_resolution.entity_name,
             "doc_category": str(batch.get("doc_category", "") or ""),
             "batch_name": str(batch.get("batch_name", "") or ""),
             "upload_batch_id": str(batch.get("upload_batch_id", "") or ""),
@@ -1799,13 +1809,15 @@ def _decorate_material_event_response(event: dict) -> dict:
 
 
 def _resolve_doc_category_validation(*, current_case_id: int, doc_category: str, file_names: list[str]) -> dict:
+    from ai_hunter.annual_audit.document_repository import validate_doc_category
+
     settings = get_settings()
     if not doc_category:
         return {
             "ok": False,
             "suspected_mismatch": True,
             "suspected_duplicate": False,
-            "message": "缺少 doc_category；当前约定同一批次只允许上传一种卷宗类别。",
+            "message": "缺少 doc_category；当前约定同一批次只允许上传一种审计资料类别。",
         }
     payload = {
         "case_id": current_case_id,
@@ -1813,29 +1825,16 @@ def _resolve_doc_category_validation(*, current_case_id: int, doc_category: str,
         "file_names": file_names,
         "text_preview": "",
     }
-    if settings.enable_doc_category_api_mock:
-        return get_mock_doc_category_service().validate_doc_category(payload).model_dump()
-    try:
-        return get_doc_category_api_client().validate_doc_category_sync(payload)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "suspected_mismatch": False,
-            "suspected_duplicate": False,
-            "message": f"doc_category 预校验暂不可用: {exc}",
-        }
+    return validate_doc_category(payload, settings=settings)
 
 
 def _resolve_case_doc_category_status(case_id: int) -> dict:
+    from ai_hunter.annual_audit.document_repository import get_case_doc_categories
+
     if int(case_id or 0) <= 0:
         return {"case_id": int(case_id or 0), "categories": [], "missing_categories": []}
     settings = get_settings()
-    if settings.enable_doc_category_api_mock:
-        return get_mock_doc_category_service().get_case_doc_categories(int(case_id)).model_dump()
-    try:
-        return get_doc_category_api_client().get_case_doc_categories_sync(int(case_id))
-    except Exception:
-        return {"case_id": int(case_id), "categories": [], "missing_categories": []}
+    return get_case_doc_categories(int(case_id), settings=settings)
 
 
 def _build_upload_error(
@@ -1859,7 +1858,7 @@ def _build_upload_error(
 def _persist_failed_upload_batch(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     batch_name: str,
     doc_category: str,
     operator_id: str,
@@ -1875,7 +1874,7 @@ def _persist_failed_upload_batch(
             {
                 "upload_batch_id": upload_batch_id,
                 "case_id": case_id,
-                "debtor_id": debtor_id,
+                "entity_id": entity_id,
                 "batch_name": batch_name,
                 "doc_category": doc_category,
                 "operator_id": operator_id,
@@ -1898,7 +1897,7 @@ def _persist_failed_upload_batch(
 def _upsert_material_event_safe(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     batch_name: str,
     doc_category: str,
     operator_id: str,
@@ -1917,7 +1916,7 @@ def _upsert_material_event_safe(
             {
                 "material_event_id": _build_material_event_id(upload_batch_id),
                 "case_id": int(case_id or 0),
-                "debtor_id": int(debtor_id or 0),
+                "entity_id": int(entity_id or 0),
                 "upload_batch_id": upload_batch_id,
                 "event_type": "supplement_upload",
                 "status": status,
@@ -1938,7 +1937,7 @@ def _upsert_material_event_safe(
 def _upsert_source_upload_batch_completion_safe(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     batch_name: str,
     doc_category: str,
     operator_id: str,
@@ -1953,7 +1952,7 @@ def _upsert_source_upload_batch_completion_safe(
 ) -> None:
     _upsert_source_upload_batch_safe(
         case_id=case_id,
-        debtor_id=debtor_id,
+        entity_id=entity_id,
         batch_name=batch_name,
         doc_category=doc_category,
         operator_id=operator_id,
@@ -1972,7 +1971,7 @@ def _upsert_source_upload_batch_completion_safe(
 def _upsert_source_upload_batch_safe(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     batch_name: str,
     doc_category: str,
     operator_id: str,
@@ -1993,7 +1992,7 @@ def _upsert_source_upload_batch_safe(
             {
                 "upload_batch_id": upload_batch_id,
                 "case_id": int(case_id or 0),
-                "debtor_id": int(debtor_id or 0),
+                "entity_id": int(entity_id or 0),
                 "batch_name": batch_name,
                 "doc_category": doc_category,
                 "operator_id": operator_id,

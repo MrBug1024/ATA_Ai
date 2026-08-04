@@ -103,7 +103,7 @@ function normalizeType(value: string): string {
 function entityCategory(entityType: string): EntityCategory {
   const type = normalizeType(entityType);
   if (
-    ["person", "individual", "natural_person", "judge", "debtor", "自然人", "个人"].includes(
+    ["person", "individual", "natural_person", "judge", "自然人", "个人"].includes(
       type
     )
   ) {

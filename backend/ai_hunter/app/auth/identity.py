@@ -1,13 +1,13 @@
 """身份契约（Tier 3 认证层）。
 
-不良资产 v2 支持两类身份来源：
+年度审计平台支持两类身份来源：
   - platform：用户经**用户中心**登录拿到 JWT，本服务只**验签 + 取身份**。
   - private：私有化部署下使用本项目本地身份；本阶段先复用同一验签入口承载本地 token。
 
 取身份优先级：
   ① Authorization: Bearer <JWT/token> —— 配了密钥/公钥就验签解码（claims: sub/name/company/apps/roles）
   ② 开发态信任头 X-User-Id / X-User-Roles / X-Company-Id（AUTH_DEV_TRUST_HEADERS）
-  ③ AUTH_ENABLED=false → 返回全权限默认 admin 身份（现有接口/测试不受影响）
+  ③ AUTH_ENABLED=false → 返回全权限默认 admin 身份
      AUTH_ENABLED=true 且无有效凭证 → 401
 
 JWT 验签：HS256 无第三方依赖（hmac 手验）；RS256 需安装 PyJWT。

@@ -3,7 +3,7 @@
 import { FormEvent, useId, useState } from "react";
 import { History, LoaderCircle, Plus, RefreshCw, Undo2 } from "lucide-react";
 import { toast } from "sonner";
-import type { CorrectionModel } from "@/lib/types/case-analytics";
+import type { CorrectionModel } from "@/lib/types/audit-corrections";
 import { useCaseCorrections } from "@/lib/hooks/use-case-corrections";
 import { useCreateCorrection } from "@/lib/hooks/use-create-correction";
 import { useRevokeCorrection } from "@/lib/hooks/use-revoke-correction";

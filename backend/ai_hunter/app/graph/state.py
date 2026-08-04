@@ -60,7 +60,7 @@ from .schemas import (
 )
 
 
-Intent = Literal["full_audit", "drilldown", "re_audit", "review"]
+Intent = Literal["full_audit", "drilldown", "re_audit"]
 
 
 class FileItem(TypedDict, total=False):
@@ -124,8 +124,8 @@ class AuditGraphState(TypedDict, total=False):
     case_switched: bool
 
     current_case_id: int
-    current_debtor_id: int
-    current_debtor_name: str
+    current_entity_id: int
+    current_entity_name: str
     doc_category: str
     batch_name: str
     upload_batch_id: str
@@ -162,6 +162,7 @@ class AuditGraphState(TypedDict, total=False):
     new_files: list[str]
     text_file_content_refs: dict[str, str]
     upload_batch_summary: dict[str, Any]
+    annual_import_summary: dict[str, Any]
     material_event_summary: dict[str, Any]
     defer_upload_batch_completion: bool
     doc_category_validation: dict[str, Any] | ValidateDocCategoryResultModel
@@ -171,7 +172,7 @@ class AuditGraphState(TypedDict, total=False):
 
     intent: Intent
     route_decision: dict[str, Any] | RouteDecisionModel
-    route_shadow: dict[str, Any]
+    execution_route: dict[str, Any]
     business_line_plan: dict[str, Any]
     business_line_result: dict[str, Any]
     operator_context: BusinessLineContext
@@ -185,12 +186,8 @@ class AuditGraphState(TypedDict, total=False):
 
     computed_metrics_ref: str
 
-    # 八段式：各段文本 heavy ref（section_id → ref）。并行节点各写一段，用 reducer 合并。
-    # 复盘报告(intent=review)的 R1/R2/R3 段也复用此字段。
+    # 年审报告各段文本 heavy ref（section_id -> ref）。
     report_section_refs: Annotated[dict[str, str], merge_section_refs]
-
-    # AI 复盘对账上下文（fetch_review_context 写：{case_id, forecasts, records, metrics}）。
-    review_context: dict[str, Any]
 
     report_part_a_ref: str
     report_part_a_summary: str
@@ -214,6 +211,7 @@ class AuditGraphState(TypedDict, total=False):
     kg_claims: list[dict[str, Any] | ExtractionClaimModel]
     kg_summary: str
     kg_subgraph_ref: str
+    case_material_sources: list[dict[str, Any]]
     superseded_claim_ids: list[int]
     superseded_relation_ids: list[int]
     reconciliation_items: list[dict[str, Any] | ReconciliationLedgerItemModel]

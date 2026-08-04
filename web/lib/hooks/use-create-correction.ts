@@ -2,7 +2,7 @@
 
 import { mutate } from "swr";
 import { caseCorrectionsKey, createCorrection } from "@/lib/backend/langgraph";
-import type { CorrectionCreateRequest, CorrectionModel } from "@/lib/types/case-analytics";
+import type { CorrectionCreateRequest, CorrectionModel } from "@/lib/types/audit-corrections";
 import { useBackendMutation } from "./use-backend-mutation";
 
 export function useCreateCorrection(caseId: number) {

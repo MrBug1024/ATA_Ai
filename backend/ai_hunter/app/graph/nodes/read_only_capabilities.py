@@ -1,4 +1,4 @@
-"""Deterministic read-only capability nodes used by Phase 2.5.2 business-line routing."""
+"""Deterministic read-only nodes used by annual-audit business-line routing."""
 
 from __future__ import annotations
 
@@ -10,10 +10,13 @@ from typing import Any
 from ..context_loader import resolve_trace_items
 from ...services.case_evidence import rank_case_evidence
 from ...services.kg_service import get_kg_service
-from ...tools.audit_tools import audit_deadline_scan, get_case_profile
-from ...tools.doc_category_tools import get_case_doc_category_status, get_doc_categories
-from ...tools.retrieval_tools import query_wenshu_knowledge
-from ...tools.task_tools import manage_tasks
+from ....annual_audit.tools import (
+    analyze_annual_data_readiness,
+    get_annual_engagement,
+    get_annual_material_status,
+    list_annual_material_requirements,
+    list_annual_tasks,
+)
 from ..state import AuditGraphState
 
 
@@ -43,7 +46,7 @@ def _parse_tool_output(tool_name: str, raw: str) -> dict[str, Any]:
 
 
 def _missing_case_result(capability: str) -> dict[str, Any]:
-    message = "请先提供要查询的案件编号。"
+    message = "请先提供要查询的年审项目编号。"
     return {
         "agent_output": message,
         "business_line_result": {
@@ -79,29 +82,31 @@ def query_case_profile(state: AuditGraphState) -> dict[str, Any]:
     case_id = _case_id(state)
     if case_id <= 0:
         return _missing_case_result("case.profile")
-    raw = get_case_profile.invoke({"case_id": case_id})
-    return _render_result("case.profile", [_parse_tool_output("get_case_profile", raw)])
+    raw = get_annual_engagement.invoke({"case_id": case_id})
+    return _render_result("case.profile", [_parse_tool_output("get_annual_engagement", raw)])
 
 
 def query_material_status(state: AuditGraphState) -> dict[str, Any]:
     case_id = _case_id(state)
     if case_id <= 0:
         return _missing_case_result("material.status")
-    raw = get_case_doc_category_status.invoke({"case_id": case_id})
-    return _render_result("material.status", [_parse_tool_output("get_case_doc_category_status", raw)])
+    raw = get_annual_material_status.invoke({"case_id": case_id})
+    return _render_result("material.status", [_parse_tool_output("get_annual_material_status", raw)])
 
 
 def query_material_validation(state: AuditGraphState) -> dict[str, Any]:
     case_id = _case_id(state)
     if case_id <= 0:
         return _missing_case_result("material.validate")
-    catalog = get_doc_categories.invoke({})
-    status = get_case_doc_category_status.invoke({"case_id": case_id})
+    catalog = list_annual_material_requirements.invoke({})
+    status = get_annual_material_status.invoke({"case_id": case_id})
+    readiness = analyze_annual_data_readiness.invoke({"case_id": case_id})
     return _render_result(
         "material.validate",
         [
-            _parse_tool_output("get_doc_categories", catalog),
-            _parse_tool_output("get_case_doc_category_status", status),
+            _parse_tool_output("list_annual_material_requirements", catalog),
+            _parse_tool_output("get_annual_material_status", status),
+            _parse_tool_output("analyze_annual_data_readiness", readiness),
         ],
     )
 
@@ -125,7 +130,7 @@ def query_evidence(state: AuditGraphState) -> dict[str, Any]:
     evidence_items = rank_case_evidence(traces or state_traces, query, limit=5)
     if not evidence_items:
         return {
-            "agent_output": "当前案件尚无可回源的卷宗证据，请先上传并解析案件材料。",
+            "agent_output": "当前年审项目尚无可回源证据，请先上传并解析审计资料。",
             "business_line_result": {
                 "capability": "evidence.resolve",
                 "read_only": True,
@@ -149,7 +154,7 @@ def query_evidence(state: AuditGraphState) -> dict[str, Any]:
     }
     return {
         "agent_output": (
-            f"已从案件 {case_id} 卷宗中找到 {len(evidence_items)} 条可回源证据。\n"
+            f"已从年审项目 {case_id} 中找到 {len(evidence_items)} 条可回源证据。\n"
             f"关键结果：{json.dumps(facts, ensure_ascii=False)}\n"
             "下一步：可按角标、断言或关键词继续缩小范围。"
         ),
@@ -166,44 +171,12 @@ def query_evidence(state: AuditGraphState) -> dict[str, Any]:
     }
 
 
-def query_caselaw(state: AuditGraphState) -> dict[str, Any]:
-    raw = query_wenshu_knowledge.invoke({"question": str(state.get("query") or ""), "limit": 5})
-    output = _parse_tool_output("query_wenshu_knowledge", raw)
-    key_facts = dict(output.get("key_facts") or {})
-    key_facts.update(
-        {
-            "source_scope": "external_caselaw",
-            "case_binding": False,
-            "reference_only": True,
-        }
-    )
-    output["key_facts"] = key_facts
-    output["summary"] = "外部类案参考，不代表当前案件事实。" + str(output.get("summary") or "")
-    result = _render_result("caselaw.search", [output])
-    result["business_line_result"].update(
-        {
-            "source_scope": "external_caselaw",
-            "case_binding": False,
-            "reference_only": True,
-        }
-    )
-    return result
-
-
 def query_tasks(state: AuditGraphState) -> dict[str, Any]:
     case_id = _case_id(state)
     if case_id <= 0:
         return _missing_case_result("task.query")
-    raw = manage_tasks.invoke({"action": "list", "case_id": case_id})
-    return _render_result("task.query", [_parse_tool_output("manage_tasks", raw)])
-
-
-def query_deadline(state: AuditGraphState) -> dict[str, Any]:
-    case_id = _case_id(state)
-    if case_id <= 0:
-        return _missing_case_result("deadline.query")
-    raw = audit_deadline_scan.invoke({"case_id": case_id})
-    return _render_result("deadline.query", [_parse_tool_output("audit_deadline_scan", raw)])
+    raw = list_annual_tasks.invoke({"case_id": case_id})
+    return _render_result("task.query", [_parse_tool_output("list_annual_tasks", raw)])
 
 
 READ_ONLY_EXECUTOR_NODES: dict[str, ReadNode] = {
@@ -211,17 +184,17 @@ READ_ONLY_EXECUTOR_NODES: dict[str, ReadNode] = {
     "query_material_status": query_material_status,
     "query_material_validation": query_material_validation,
     "query_evidence": query_evidence,
-    "query_caselaw": query_caselaw,
     "query_tasks": query_tasks,
-    "query_deadline": query_deadline,
 }
 
 READ_ONLY_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
-    "query_case_profile": ("get_case_profile",),
-    "query_material_status": ("get_case_doc_category_status",),
-    "query_material_validation": ("get_doc_categories", "get_case_doc_category_status"),
+    "query_case_profile": ("get_annual_engagement",),
+    "query_material_status": ("get_annual_material_status",),
+    "query_material_validation": (
+        "list_annual_material_requirements",
+        "get_annual_material_status",
+        "analyze_annual_data_readiness",
+    ),
     "query_evidence": (),
-    "query_caselaw": ("query_wenshu_knowledge",),
-    "query_tasks": ("manage_tasks",),
-    "query_deadline": ("audit_deadline_scan",),
+    "query_tasks": ("list_annual_tasks",),
 }

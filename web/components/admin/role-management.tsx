@@ -69,12 +69,11 @@ const TIER_LABELS: Record<PermissionTier, string> = {
 const MODULE_LABELS: Record<ModuleCode, string> = {
   admin: "后台管理",
   corrections: "纠错治理",
-  deadline: "期限管理",
   drilldown: "报告下钻",
   graph: "知识图谱",
-  progress: "进度跟踪",
+  materials: "审计资料",
   report: "审计报告",
-  review: "案件复核",
+  tasks: "审计任务",
 };
 
 const DEFAULT_TIERS: PermissionTier[] = ["field", "expert", "management"];

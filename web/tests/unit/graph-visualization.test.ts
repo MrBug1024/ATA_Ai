@@ -44,7 +44,7 @@ describe("prepareGraphVisualization", () => {
   it("清理自环和悬空边，并按方向合并平行关系", () => {
     const nodes = [
       node("entity_18", "贵州省六盘水市中级人民法院", "court", 18),
-      node("entity_2", "贵州盘县某煤矿", "company", 2),
+      node("entity_2", "示例供应链有限公司", "company", 2),
     ];
     const edges = [
       edge("edge_b", "entity_18", "entity_2", 102, "宣告", 0.8),
@@ -91,9 +91,9 @@ describe("prepareGraphVisualization", () => {
 
   it("同名实体优先用本地化类型消歧，同类型时追加实体 id", () => {
     const result = prepareGraphVisualization([
-      node("entity_2", "贵州盘县某煤矿", "company", 2),
-      node("entity_16", " 贵州盘县某煤矿 ", "organization", 16),
-      node("entity_66", "贵州盘县某煤矿", "enterprise", 66),
+      node("entity_2", "示例供应链有限公司", "company", 2),
+      node("entity_16", " 示例供应链有限公司 ", "organization", 16),
+      node("entity_66", "示例供应链有限公司", "enterprise", 66),
       node("entity_4", "同名主体", "company", 4),
       node("entity_5", "同名主体", "company", 5),
     ], []);
@@ -104,9 +104,9 @@ describe("prepareGraphVisualization", () => {
     expect(labels).toEqual({
       entity_4: "同名主体（公司 · #4）",
       entity_5: "同名主体（公司 · #5）",
-      entity_2: "贵州盘县某煤矿（公司）",
-      entity_66: "贵州盘县某煤矿（企业）",
-      entity_16: "贵州盘县某煤矿（组织）",
+      entity_2: "示例供应链有限公司（公司）",
+      entity_66: "示例供应链有限公司（企业）",
+      entity_16: "示例供应链有限公司（组织）",
     });
     expect(new Set(Object.values(labels)).size).toBe(5);
     expect(result.stats).toMatchObject({

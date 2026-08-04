@@ -1,4 +1,4 @@
-"""Deterministic command nodes for Phase 2.5.4 write capabilities."""
+"""Deterministic command nodes for annual-audit write capabilities."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 
 from ...auth.identity import Identity
 from ...auth.permissions import has_module
-from ...services.case_api import get_case_api_client
-from ...services.task_api import get_task_api_client
+from ....annual_audit.engagement_repository import create_engagement
+from ....annual_audit.task_repository import create_task_batch, manage_tasks
 from ..state import AuditGraphState
 from ..write_contracts import (
     resolve_case_create_command,
@@ -91,7 +91,7 @@ def create_case_command(state: AuditGraphState) -> dict[str, Any]:
         return _command_result(
             "case.create",
             ok=False,
-            summary="当前会话已绑定案件，未创建新案件；请使用新的未绑定会话。",
+            summary="当前会话已绑定年审项目，未创建新项目；请使用新的未绑定会话。",
             command=payload,
             error="thread_already_bound_to_case",
         )
@@ -101,38 +101,44 @@ def create_case_command(state: AuditGraphState) -> dict[str, Any]:
             "case.create",
             ok=False,
             summary=(
-                "缺少可信身份上下文，未创建案件。"
+                "缺少可信身份上下文，未创建年审项目。"
                 if identity_error == "missing_identity_context"
-                else "当前身份无案件写入权限，未创建案件。"
+                else "当前身份无年审项目写入权限，未创建项目。"
             ),
             command=payload,
             error=identity_error,
         )
     try:
-        response = get_case_api_client().create_case_sync(payload, identity=identity)
+        response = create_engagement(
+            {
+                **payload,
+                "company_id": identity.company_id,
+                "owner_id": identity.user_id,
+                "created_by": identity.user_id,
+            }
+        )
         case_id = int(response.get("case_id") or 0)
-        debtor_id = int(response.get("debtor_id") or 0)
-        if case_id <= 0 or debtor_id <= 0:
-            raise ValueError("上游未返回有效 case_id/debtor_id")
+        if case_id <= 0:
+            raise ValueError("年审项目仓储未返回有效项目编号")
     except Exception as exc:
         return _command_result(
             "case.create",
             ok=False,
             degraded=True,
-            summary=f"案件创建失败，未继续执行后续写操作：{str(exc)[:180]}",
+            summary=f"年审项目创建失败，未继续执行后续写操作：{str(exc)[:180]}",
             command=payload,
             error="upstream_write_failed",
         )
 
     decision = _decision(state)
     decision["case_id"] = case_id
-    summary = str(response.get("message") or f"案件已创建，case_id={case_id}。")
+    summary = str(response.get("message") or f"年审项目已创建，项目编号={case_id}。")
     result = _command_result("case.create", ok=True, summary=summary, command=payload, response=response)
     result.update(
         {
             "current_case_id": case_id,
-            "current_debtor_id": debtor_id,
-            "current_debtor_name": payload["debtor_name"],
+            "current_entity_id": 0,
+            "current_entity_name": payload["entity_name"],
             "route_decision": decision,
         }
     )
@@ -157,7 +163,7 @@ def record_material_upload(state: AuditGraphState) -> dict[str, Any]:
         return _command_result(
             "material.upload",
             ok=False,
-            summary="请先绑定案件并上传要处理的卷宗文件。",
+            summary="请先绑定年审项目并上传要处理的审计资料。",
             command=command,
             error="missing_required_slots",
         )
@@ -219,7 +225,7 @@ def write_task_command(state: AuditGraphState) -> dict[str, Any]:
         return _command_result(
             "task.write", ok=False, summary=message, command=command, error="missing_required_slots"
         )
-    _, identity_error = _identity_error(state, "progress")
+    _, identity_error = _identity_error(state, "tasks")
     if identity_error:
         return _command_result(
             "task.write",
@@ -233,7 +239,6 @@ def write_task_command(state: AuditGraphState) -> dict[str, Any]:
             error=identity_error,
         )
 
-    client = get_task_api_client()
     try:
         action = command["action"]
         if action == "create":
@@ -246,15 +251,15 @@ def write_task_command(state: AuditGraphState) -> dict[str, Any]:
                 "priority": command["priority"],
                 "source_engine": "business_line",
             }
-            response = client.create_batch_sync(case_id, [task])
+            response = create_task_batch(case_id, [task])
         else:
             task_id = int(command["task_id"])
-            tasks = client.manage_sync({"case_id": case_id, "action": "list"})
+            tasks = manage_tasks({"case_id": case_id, "action": "list"})
             if not _task_exists(tasks, task_id):
                 return _command_result(
                     "task.write",
                     ok=False,
-                    summary=f"案件 {case_id} 下不存在任务 {task_id}，未执行写入。",
+                    summary=f"年审项目 {case_id} 下不存在任务 {task_id}，未执行写入。",
                     command=command,
                     error="task_not_found_in_case",
                 )
@@ -273,7 +278,7 @@ def write_task_command(state: AuditGraphState) -> dict[str, Any]:
                     "task_id": task_id,
                     "assigned_to": command["assigned_to"],
                 }
-            response = client.manage_sync(payload)
+            response = manage_tasks(payload)
     except Exception as exc:
         return _command_result(
             "task.write",
@@ -300,7 +305,7 @@ WRITE_EXECUTOR_NODES = {
 }
 
 WRITE_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
-    "create_case_command": ("create_case",),
+    "create_case_command": (),
     "record_material_upload_command": (),
-    "write_task_command": ("create_task_batch", "manage_tasks"),
+    "write_task_command": (),
 }

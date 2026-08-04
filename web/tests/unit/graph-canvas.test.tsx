@@ -5,7 +5,7 @@ import { prepareGraphVisualization } from "@/components/knowledge-graph/graph-vi
 import type { GraphNode, GraphEdge } from "@/lib/types/knowledge-graph";
 
 const nodes: GraphNode[] = [
-  { id: "entity_1", entity_id: 1, label: "晨光煤矿", entity_type: "company", risk_level: "high" },
+  { id: "entity_1", entity_id: 1, label: "示例制造有限公司", entity_type: "company", risk_level: "high" },
   { id: "entity_2", entity_id: 2, label: "张三", entity_type: "person", risk_level: "low" },
 ];
 const edges: GraphEdge[] = [
@@ -29,8 +29,8 @@ describe("buildGraphData", () => {
     const n1 = data.nodes?.find((n) => n.id === "entity_1");
     expect(n1?.data).toMatchObject({
       entityId: 1,
-      fullLabel: "晨光煤矿",
-      displayLabel: "晨光煤矿",
+      fullLabel: "示例制造有限公司",
+      displayLabel: "示例制造有限公司",
       typeLabel: "公司",
       entityType: "company",
       riskLevel: "high",

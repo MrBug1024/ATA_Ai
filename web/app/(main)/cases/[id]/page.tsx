@@ -2,13 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { Network } from "lucide-react";
+import Link from "next/link";
+import { MessageSquare, Network } from "lucide-react";
 import { getThreadDetail } from "@/lib/backend/langgraph";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { useCases } from "@/lib/hooks/use-cases";
 import { useCaseMaterialEvents } from "@/lib/hooks/use-case-material-events";
+import { useCaseDocCategories } from "@/lib/hooks/use-case-doc-categories";
 import { useEvolutionItems } from "@/lib/hooks/use-evolution-items";
 import { useUnresolvedItems } from "@/lib/hooks/use-unresolved-items";
 import { useConversations } from "@/lib/hooks/use-conversations";
@@ -19,24 +21,15 @@ import { DemoValidationGate } from "@/components/knowledge-graph/demo-validation
 import { MaterialEventTimeline } from "@/components/knowledge-graph/material-event-timeline";
 import { EvolutionTimeline } from "@/components/knowledge-graph/evolution-timeline";
 import { UnresolvedItemsPanel } from "@/components/knowledge-graph/unresolved-items-panel";
-import { useCaseProgress } from "@/lib/hooks/use-case-progress";
-import { ProgressBoardPanel } from "@/components/cases/progress-board";
-import { RecoveryPanel } from "@/components/cases/recovery-panel";
-import { ForecastPanel } from "@/components/cases/forecast-panel";
-import { ReviewDialog } from "@/components/cases/review-dialog";
 import { CorrectionsPanel } from "@/components/cases/corrections-panel";
-import { DeadlineBoard } from "@/components/cases/deadline-board";
 
 export default function CaseDetailPage() {
   const params = useParams();
   const caseId = Number(params?.id);
   const { user } = useAuth();
   const canUseGraph = canAccessModule(user, "graph");
-  const canUseProgress = canAccessModule(user, "progress");
-  const canUseReview = canAccessModule(user, "review");
-  const canUseDeadline = canAccessModule(user, "deadline");
   const canUseCorrections = canAccessModule(user, "corrections");
-  const needsReportRef = canUseGraph || canUseProgress;
+  const needsReportRef = canUseGraph;
 
   const { cases } = useCases();
   const caseItem = cases.find((c) => c.case_id === caseId) ?? null;
@@ -44,16 +37,15 @@ export default function CaseDetailPage() {
   const {
     events,
     isLoading: eventsLoading,
+    error: eventsError,
     refresh: refreshEvents,
   } = useCaseMaterialEvents(caseId);
   const { items: evolutionItems, isLoading: evolutionLoading } = useEvolutionItems(caseId);
   const { data: unresolvedData, isLoading: unresolvedLoading } = useUnresolvedItems(caseId);
   const {
-    progress,
-    isLoading: progressLoading,
-    error: progressError,
-    refresh: refreshProgress,
-  } = useCaseProgress(canUseProgress ? caseId : null);
+    caseDocCategories,
+    isLoading: docCategoriesLoading,
+  } = useCaseDocCategories(caseId);
   const { conversations } = useConversations({
     caseId,
     limit: 200,
@@ -97,13 +89,18 @@ export default function CaseDetailPage() {
       <div className="flex flex-wrap items-center gap-3 border-b px-4 py-3">
         <SidebarTrigger className="shrink-0" />
         <div className="min-w-0 flex-1">
-          <h1 className="text-base font-semibold">{caseItem?.case_name ?? `案件 ${caseId}`}</h1>
-          {caseItem?.debtor_names && (
-            <p className="text-xs text-muted-foreground">{caseItem.debtor_names}</p>
+          <h1 className="text-base font-semibold">{caseItem?.case_name ?? `年审项目 ${caseId}`}</h1>
+          {caseItem?.entity_name && (
+            <p className="text-xs text-muted-foreground">{caseItem.entity_name}</p>
           )}
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-          {canUseReview && <ReviewDialog caseId={caseId} />}
+          <Button asChild size="sm">
+            <Link href={`/chat?caseId=${caseId}`}>
+              <MessageSquare data-icon="inline-start" />
+              进入 AI 对话
+            </Link>
+          </Button>
           {canUseGraph && (
             <>
               <DemoValidationGate caseId={caseId} reportRef={reportRef} />
@@ -124,13 +121,10 @@ export default function CaseDetailPage() {
       <Tabs defaultValue="events" className="flex flex-1 flex-col overflow-hidden">
         <div className="overflow-x-auto px-4 pt-3">
           <TabsList variant="line" className="min-w-max justify-start">
-            <TabsTrigger value="events">材料事件</TabsTrigger>
-            <TabsTrigger value="evolution">结论演进</TabsTrigger>
-            <TabsTrigger value="unresolved">未决补件</TabsTrigger>
-            {canUseProgress && <TabsTrigger value="progress">进度看板</TabsTrigger>}
-            {canUseProgress && <TabsTrigger value="recovery">回款管理</TabsTrigger>}
-            {canUseDeadline && <TabsTrigger value="deadline">时效看板</TabsTrigger>}
-            {canUseCorrections && <TabsTrigger value="corrections">权威订正</TabsTrigger>}
+            <TabsTrigger value="events">资料处理记录</TabsTrigger>
+            <TabsTrigger value="evolution">审计结论演进</TabsTrigger>
+            <TabsTrigger value="unresolved">待补资料</TabsTrigger>
+            {canUseCorrections && <TabsTrigger value="corrections">审计调整</TabsTrigger>}
           </TabsList>
         </div>
 
@@ -139,6 +133,7 @@ export default function CaseDetailPage() {
             <MaterialEventTimeline
               events={events}
               isLoading={eventsLoading}
+              error={eventsError}
               onRetried={refreshEvents}
             />
           </TabsContent>
@@ -146,37 +141,13 @@ export default function CaseDetailPage() {
             <EvolutionTimeline items={evolutionItems} isLoading={evolutionLoading} />
           </TabsContent>
           <TabsContent value="unresolved" className="mt-0">
-            <UnresolvedItemsPanel data={unresolvedData} isLoading={unresolvedLoading} />
+            <UnresolvedItemsPanel
+              data={unresolvedData}
+              isLoading={unresolvedLoading}
+              caseDocCategories={caseDocCategories ?? null}
+              docCategoriesLoading={docCategoriesLoading}
+            />
           </TabsContent>
-          {canUseProgress && (
-            <TabsContent value="progress" className="mt-0">
-              <ProgressBoardPanel
-                progress={progress}
-                isLoading={progressLoading}
-                error={progressError}
-                onRetry={() => refreshProgress()}
-              />
-            </TabsContent>
-          )}
-          {canUseProgress && (
-            <TabsContent value="recovery" className="mt-0">
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <h3 className="mb-3 text-sm font-medium">实际回款</h3>
-                  <RecoveryPanel caseId={caseId} />
-                </div>
-                <div>
-                  <h3 className="mb-3 text-sm font-medium">预期回款</h3>
-                  <ForecastPanel caseId={caseId} reportRef={reportRef} />
-                </div>
-              </div>
-            </TabsContent>
-          )}
-          {canUseDeadline && (
-            <TabsContent value="deadline" className="mt-0">
-              <DeadlineBoard caseId={caseId} />
-            </TabsContent>
-          )}
           {canUseCorrections && (
             <TabsContent value="corrections" className="mt-0">
               <CorrectionsPanel caseId={caseId} />

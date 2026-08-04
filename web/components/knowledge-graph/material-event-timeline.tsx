@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -34,6 +34,7 @@ const STAGE_LABELS: Record<string, string> = {
 interface MaterialEventTimelineProps {
   events: CaseMaterialEventItem[];
   isLoading: boolean;
+  error?: string | null;
   onRetried?: () => void | Promise<unknown>;
 }
 
@@ -48,14 +49,6 @@ function RetryFailedBatch({
 }) {
   const { retry, isMutating, error } = useRetryUploadBatch(uploadBatchId);
   const [submitted, setSubmitted] = useState(false);
-
-  useEffect(() => {
-    if (!submitted || !onRetried) return;
-    const interval = window.setInterval(() => {
-      void Promise.resolve(onRetried()).catch(() => undefined);
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [submitted, onRetried]);
 
   const handleRetry = async () => {
     try {
@@ -96,13 +89,14 @@ function RetryFailedBatch({
 export function MaterialEventTimeline({
   events,
   isLoading,
+  error,
   onRetried,
 }: MaterialEventTimelineProps) {
   const [expandedError, setExpandedError] = useState<string | null>(null);
 
   if (isLoading) {
     return (
-      <div className="flex flex-col gap-4" aria-label="正在加载材料事件">
+      <div className="flex flex-col gap-4" aria-label="正在加载资料处理记录">
         <span className="sr-only">加载中…</span>
         <Skeleton className="h-32" />
         <Skeleton className="h-32" />
@@ -110,8 +104,19 @@ export function MaterialEventTimeline({
     );
   }
 
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <div>
+          <AlertTitle>资料处理记录加载失败</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </div>
+      </Alert>
+    );
+  }
+
   if (events.length === 0) {
-    return <p className="py-8 text-center text-sm text-muted-foreground">暂无材料事件</p>;
+    return <p className="py-8 text-center text-sm text-muted-foreground">暂无资料处理记录，请先上传年审资料</p>;
   }
 
   return (
@@ -144,7 +149,9 @@ export function MaterialEventTimeline({
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
                   <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
-                    {STAGE_LABELS[event.stage] ?? event.stage}
+                    {event.status === "failed"
+                      ? STAGE_LABELS.failed
+                      : STAGE_LABELS[event.stage] ?? event.stage}
                   </span>
                   {event.has_conclusion_changes && (
                     <span className="rounded-md border px-2 py-1 text-xs text-foreground">
@@ -157,12 +164,19 @@ export function MaterialEventTimeline({
                 <p className="text-xs text-muted-foreground">
                   {event.file_count} 个文件
                   {event.records_inserted !== undefined
-                    ? ` · ${event.records_inserted} 条记录`
+                    ? ` · ${event.records_inserted} 条结构化记录`
                     : ""}
                   {event.created_at
                     ? ` · ${new Date(event.created_at).toLocaleString("zh-CN")}`
                     : ""}
                 </p>
+
+                {typeof event.event_payload?.parse_summary === "string" &&
+                  event.event_payload.parse_summary && (
+                    <p className="rounded-md bg-muted/50 px-2.5 py-2 text-xs leading-relaxed text-foreground/80">
+                      {event.event_payload.parse_summary}
+                    </p>
+                  )}
 
                 {event.status === "failed" && (
                   <div className="flex flex-wrap items-start justify-between gap-2">

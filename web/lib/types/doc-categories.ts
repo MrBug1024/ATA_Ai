@@ -153,7 +153,7 @@ export interface UploadBatchPersistenceChecks {
 export interface UploadBatchDetail {
   upload_batch_id: string;
   case_id: number;
-  debtor_id: number;
+  entity_id: number;
   batch_name: string;
   doc_category: string;
   operator_id: string;
@@ -218,7 +218,7 @@ export interface MaterialEventPayload {
 export interface MaterialEventDetail {
   material_event_id: string;
   case_id: number;
-  debtor_id: number;
+  entity_id: number;
   upload_batch_id: string;
   event_type: string;
   status: string;
@@ -247,7 +247,7 @@ export interface MaterialEventDetail {
 export interface CaseMaterialEventItem {
   material_event_id: string;
   case_id?: number;
-  debtor_id?: number;
+  entity_id?: number;
   event_type: string;
   status: string;
   upload_batch_id: string;

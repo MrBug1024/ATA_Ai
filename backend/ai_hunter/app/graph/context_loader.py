@@ -5,7 +5,6 @@ from typing import Any
 from ..services.minio_service import resolve_minio_reference_url
 from .heavy_state import get_heavy_payload
 from .json_utils import json_dumps_safe
-from .metrics_engine import compute_metrics
 from .state import AuditGraphState
 
 
@@ -40,90 +39,6 @@ def resolve_full_context_json(state: AuditGraphState) -> str:
     return "{}"
 
 
-# ── 报告上下文对齐（下游 1.1）+ 本息口径回收率（下游 1.2）──────────────────
-# 报告改用上游权威字段（real_estate_dehydrated/mining_dehydrated 战术沙盘 +
-# engine_results.valuation_squeeze 去毒明细），弃用 legacy 截断的
-# real_estate_evaluations/mining_evaluations；回收率改用本息口径下游重算。
-
-# 回收率口径参数（可配置预留；默认值见此，后续接 settings）。
-RECOVERY_PARAMS = {
-    "recovery_base": "principal_interest",  # 分母口径：终审本金+利息（排除罚息/复利/迟延）
-}
-
-
-def _num(value: Any) -> float | None:
-    """Best-effort 数值化；非数字/None → None。"""
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def compute_recovery_metrics(full_context_data: dict[str, Any]) -> dict[str, Any]:
-    """下游本息口径回收率（1.2）。
-
-    - recovery_base = Σ(principal+interest)，仅本息齐全的 claim（排除 penalty/delayed_interest/复利）。
-    - unsplittable：无本息拆分的 claim（如重整方案派生）→ 计数 + total_claim 合计 + 各自清偿率。
-    - asset_net_total = valuation_squeeze.total_net_value（去毒后资产净值）。
-    - recovery_rate_principal_interest = asset_net_total / recovery_base。
-    与上游 valuation_squeeze.recovery_rate（分母为 SUM(total_claim)，含罚息复利）口径分离。
-    """
-    claims = full_context_data.get("claims") or []
-    valuation = (full_context_data.get("engine_results") or {}).get("valuation_squeeze") or {}
-
-    recovery_base = 0.0
-    subordinated_total = 0.0
-    split_count = 0
-    unsplittable_total = 0.0
-    unsplittable_count = 0
-    restructuring_rates: list[float] = []
-
-    for c in claims:
-        if not isinstance(c, dict):
-            continue
-        principal = _num(c.get("principal"))
-        interest = _num(c.get("interest"))
-        penalty = _num(c.get("penalty"))
-        delayed = _num(c.get("delayed_interest"))
-        if principal is not None or interest is not None:
-            recovery_base += (principal or 0.0) + (interest or 0.0)
-            split_count += 1
-        else:
-            unsplittable_count += 1
-            unsplittable_total += _num(c.get("total_claim")) or 0.0
-        subordinated_total += (penalty or 0.0) + (delayed or 0.0)
-        rate = _num(c.get("proposed_recovery_rate"))
-        if rate is not None:
-            restructuring_rates.append(rate)
-
-    asset_net_total = _num(valuation.get("total_net_value"))
-    rate_pi = (
-        round(asset_net_total / recovery_base, 4)
-        if asset_net_total is not None and recovery_base > 0
-        else None
-    )
-
-    return {
-        "params": dict(RECOVERY_PARAMS),
-        "recovery_base_principal_interest": round(recovery_base, 2),
-        "subordinated_total": round(subordinated_total, 2),
-        "asset_net_total": round(asset_net_total, 2) if asset_net_total is not None else None,
-        "recovery_rate_principal_interest": rate_pi,  # 0-1 比值
-        "recovery_rate_principal_interest_pct": round(rate_pi * 100, 2) if rate_pi is not None else None,
-        "split_claim_count": split_count,
-        "unsplittable_claim_count": unsplittable_count,
-        "unsplittable_total_claim": round(unsplittable_total, 2),
-        "restructuring_recovery_rates": restructuring_rates,
-        "note": (
-            "recovery_base 为本息口径（principal+interest，排除罚息/复利/迟延）；"
-            "asset_net_total 取自 valuation_squeeze 去毒净值；"
-            "无本息拆分的 claim（如重整方案）计入 unsplittable，参考其 proposed_recovery_rate（清偿率）。"
-        ),
-    }
-
-
 def resolve_report_section(state: AuditGraphState, section_id: str) -> str:
     """解析某段报告文本：从 report_section_refs[section_id] 的 heavy payload 取。"""
     refs = state.get("report_section_refs") or {}
@@ -137,45 +52,32 @@ def resolve_report_section(state: AuditGraphState, section_id: str) -> str:
 
 
 def resolve_computed_metrics(state: AuditGraphState) -> dict[str, Any]:
-    """解析确定性数值引擎结果：优先 computed_metrics_ref（compute_metrics 节点已算），否则就地计算。"""
+    """Resolve annual deterministic analysis output when present."""
     payload = get_heavy_payload(state.get("computed_metrics_ref", ""))
     if isinstance(payload, dict) and payload:
         return payload
-    return compute_metrics(resolve_full_context_data(state))
+    full_context = resolve_full_context_data(state)
+    engine_results = full_context.get("engine_results") or {}
+    return dict(engine_results.get("annual_audit") or {})
 
 
 def build_report_context(
     full_context_data: dict[str, Any],
     computed_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """精选报告上下文（1.1）：用权威字段，弃 legacy 截断字段，注入数值引擎结果。"""
-    engine = full_context_data.get("engine_results") or {}
+    """Build the compact annual-audit context used by chat and evidence views."""
     return {
         "case_id": full_context_data.get("case_id", 0),
         "case": full_context_data.get("case"),
-        "debtors": full_context_data.get("debtors") or [],
-        "claims": full_context_data.get("claims") or [],
-        "guarantors": full_context_data.get("guarantors") or [],
-        "financial_snapshots": full_context_data.get("financial_snapshots") or [],
-        # 权威资产表示（战术沙盘：全量总账 + 核心 topN + 碎片打包 + 毒点），替代 legacy 截断字段
-        "real_estate": full_context_data.get("real_estate_dehydrated") or {},
-        "mining": full_context_data.get("mining_dehydrated") or {},
-        # 去毒明细（net_value/discount_factors/verdict/totals）
-        "valuation_detail": engine.get("valuation_squeeze") or {},
-        # 时效看板 / 行为扫描 / 轧差
-        "deadline_board": engine.get("deadline_scan") or {},
-        "behavioral": engine.get("behavioral_scan") or {},
-        "delta": engine.get("delta_check") or {},
-        "whiteglove": full_context_data.get("whiteglove") or {},
-        "fund_flow": full_context_data.get("fund_flow") or {},
-        # 确定性数值引擎结果（本息回收率 + NPV + 去毒总账 + 数据质量）
-        "computed_metrics": computed_metrics if computed_metrics is not None else compute_metrics(full_context_data),
-        "_field_note": "资产请用 real_estate/mining（沙盘）+ valuation_detail（去毒）；数值用 computed_metrics（本息回收率/NPV/总账）；已弃用 legacy real_estate_evaluations/mining_evaluations 截断字段。",
+        "audited_entity": full_context_data.get("audited_entity") or {},
+        "annual_audit": full_context_data.get("annual_audit") or {},
+        "data_completeness": full_context_data.get("data_completeness") or {},
+        "analysis_results": computed_metrics if computed_metrics is not None else {},
     }
 
 
 def resolve_report_full_context_json(state: AuditGraphState) -> str:
-    """报告用的精选 full-context JSON（1.1+1.2+数值引擎）。无数据时回退原始 JSON。"""
+    """Resolve a compact annual-audit context JSON string."""
     data = resolve_full_context_data(state)
     if not data:
         return resolve_full_context_json(state)

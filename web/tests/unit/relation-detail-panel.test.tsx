@@ -44,9 +44,9 @@ describe("RelationDetailPanel", () => {
 
   it("shows entity label and type when node selected", async () => {
     const { RelationDetailPanel } = await import("@/components/knowledge-graph/relation-detail-panel");
-    const selection = { type: "node" as const, nodeId: "e-1", entityId: 1, label: "晨光煤矿", entityType: "company", riskLevel: "high" };
+    const selection = { type: "node" as const, nodeId: "e-1", entityId: 1, label: "示例制造有限公司", entityType: "company", riskLevel: "high" };
     render(<RelationDetailPanel selection={selection} caseId={116} reportRef={null} />);
-    expect(screen.getByText("晨光煤矿")).toBeTruthy();
+    expect(screen.getByText("示例制造有限公司")).toBeTruthy();
     expect(screen.getByText("company")).toBeTruthy();
   });
 

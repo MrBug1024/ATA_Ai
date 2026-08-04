@@ -10,7 +10,7 @@ from typing import Any
 
 
 ROLE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-DEFAULT_AUTH_SEED_FILE = Path(__file__).resolve().parents[3] / "config" / "auth_private_seed.json"
+DEFAULT_AUTH_SEED_FILE = Path(__file__).resolve().parents[3] / "config" / "annual_audit_auth_seed.json"
 
 
 @lru_cache(maxsize=4)
@@ -102,7 +102,7 @@ def _legacy_aliases() -> dict[str, str]:
 
 
 def canonical_role_code(role_code: str) -> str:
-    """Return the stable English role code for legacy or canonical input."""
+    """Return the stable annual-audit role code."""
     value = (role_code or "").strip()
     return _legacy_aliases().get(value, value)
 

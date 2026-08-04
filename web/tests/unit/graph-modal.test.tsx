@@ -58,7 +58,7 @@ vi.mock("@/lib/hooks/use-graph-subgraph", () => ({
 vi.mock("@/lib/hooks/use-graph-entities", () => ({
   useGraphEntities: () => ({
     entities: [
-      { entity_id: 2, label: "晨光煤矿", entity_type: "company", degree: 18 },
+      { entity_id: 2, label: "示例制造有限公司", entity_type: "company", degree: 18 },
       { entity_id: 18, label: "某法院", entity_type: "court", degree: 22 },
     ],
     isLoading: false,
@@ -159,7 +159,7 @@ describe("GraphModal", () => {
   it("聚合平行边、自关联不入画布，并可切换关系标签", async () => {
     const nodes = [
       { id: "entity_12", entity_id: 12, label: "中心", entity_type: "court" },
-      { id: "entity_2", entity_id: 2, label: "煤矿", entity_type: "company" },
+      { id: "entity_2", entity_id: 2, label: "制造企业", entity_type: "company" },
     ] satisfies GraphNode[];
     const edges = [
       { id: "r1", relation_id: 1, source: "entity_12", target: "entity_2", label: "裁定", relation_type: "r", confidence: 0.9 },
@@ -198,7 +198,7 @@ describe("GraphModal", () => {
     expect(mockFetch).not.toHaveBeenCalled();
     expect(screen.getByText("中心实体")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "搜索实体" })).toBeTruthy();
-    expect(screen.getByText("晨光煤矿")).toBeTruthy();
+    expect(screen.getByText("示例制造有限公司")).toBeTruthy();
     expect(screen.getByText("某法院")).toBeTruthy();
   });
 });

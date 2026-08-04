@@ -1,9 +1,4 @@
-"""用户投影 + 人员标签 + 本地角色服务（Tier 3）。
-
-标签归不良资产本地（用户中心未上线前在本项目维护）。表见 sql/auth_tables.sql。
-v2-A 起角色来源逐步切到 app_user_role；JWT/dev header roles 只做迁移期回退。
-纯数据层，不调 LLM。
-"""
+"""年度审计用户投影、人员标签和本地角色数据服务。"""
 
 from __future__ import annotations
 

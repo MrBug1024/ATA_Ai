@@ -1,7 +1,7 @@
 "use client";
 
 import useSWR from "swr";
-import type { CorrectionModel } from "@/lib/types/case-analytics";
+import type { CorrectionModel } from "@/lib/types/audit-corrections";
 import { caseCorrectionsKey, listCaseCorrections } from "@/lib/backend/langgraph";
 
 export function useCaseCorrections(caseId: number | null, includeHistory = false) {

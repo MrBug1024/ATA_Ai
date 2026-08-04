@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
-vi.stubEnv("NEXT_PUBLIC_CASES_API_BASE_URL", "http://cs");
+vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://cs");
 
 beforeEach(() => {
   mockFetch.mockReset();
@@ -37,7 +37,7 @@ describe("operations", () => {
       json: async () => ({ detail: [{ msg: "案件名称不能为空" }] }),
     });
     const { createCase } = await import("@/lib/backend/cases");
-    const err = await createCase({ case_name: "", case_type: "破产清算" }).catch(
+    const err = await createCase({ case_name: "", case_type: "年度财务报表审计" }).catch(
       (e: unknown) => e
     );
     expect((err as Error).message).toBe("案件名称不能为空");

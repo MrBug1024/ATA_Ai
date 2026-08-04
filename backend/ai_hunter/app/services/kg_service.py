@@ -70,7 +70,7 @@ class KnowledgeGraphService:
         """Build an upsert query that only touches columns present in the live database."""
         preferred_columns = [
             "case_id",
-            "debtor_id",
+            "entity_id",
             "file_name",
             "file_type",
             "content_type",
@@ -180,7 +180,7 @@ class KnowledgeGraphService:
         """Fill missing source_file columns with harmless defaults for dynamic upserts."""
         defaults = {
             "case_id": 0,
-            "debtor_id": 0,
+            "entity_id": 0,
             "file_name": "",
             "file_type": "",
             "content_type": "",
@@ -294,17 +294,17 @@ class KnowledgeGraphService:
             return {}
         query = """
         INSERT INTO public.source_upload_batch (
-            upload_batch_id, case_id, debtor_id, batch_name, doc_category,
+            upload_batch_id, case_id, entity_id, batch_name, doc_category,
             operator_id, operator_name, status, file_count, new_file_count,
             duplicate_file_count, suspected_mismatch_file_count, records_inserted, metadata
         ) VALUES (
-            %(upload_batch_id)s, %(case_id)s, %(debtor_id)s, %(batch_name)s, %(doc_category)s,
+            %(upload_batch_id)s, %(case_id)s, %(entity_id)s, %(batch_name)s, %(doc_category)s,
             %(operator_id)s, %(operator_name)s, %(status)s, %(file_count)s, %(new_file_count)s,
             %(duplicate_file_count)s, %(suspected_mismatch_file_count)s, %(records_inserted)s, %(metadata)s
         )
         ON CONFLICT (upload_batch_id) DO UPDATE
         SET case_id = EXCLUDED.case_id,
-            debtor_id = EXCLUDED.debtor_id,
+            entity_id = EXCLUDED.entity_id,
             batch_name = EXCLUDED.batch_name,
             doc_category = EXCLUDED.doc_category,
             operator_id = EXCLUDED.operator_id,
@@ -318,14 +318,14 @@ class KnowledgeGraphService:
             metadata = EXCLUDED.metadata,
             updated_at = NOW()
         RETURNING
-            upload_batch_id, case_id, debtor_id, batch_name, doc_category,
+            upload_batch_id, case_id, entity_id, batch_name, doc_category,
             operator_id, operator_name, status, file_count, new_file_count,
             duplicate_file_count, suspected_mismatch_file_count, records_inserted, metadata
         """
         payload = {
             "upload_batch_id": upload_batch_id,
             "case_id": case_id,
-            "debtor_id": int(summary.get("debtor_id", 0) or 0),
+            "entity_id": int(summary.get("entity_id", 0) or 0),
             "batch_name": str(summary.get("batch_name", "") or ""),
             "doc_category": str(summary.get("doc_category", "") or "") or None,
             "operator_id": str(summary.get("operator_id", "") or ""),
@@ -354,7 +354,7 @@ class KnowledgeGraphService:
                 cur.execute(
                     """
                     SELECT
-                        upload_batch_id, case_id, debtor_id, batch_name, doc_category,
+                        upload_batch_id, case_id, entity_id, batch_name, doc_category,
                         operator_id, operator_name, status, file_count, new_file_count,
                         duplicate_file_count, suspected_mismatch_file_count,
                         records_inserted, metadata, created_at, updated_at
@@ -432,7 +432,7 @@ class KnowledgeGraphService:
                 cur.execute(
                     """
                     SELECT
-                        upload_batch_id, case_id, debtor_id, batch_name, doc_category,
+                        upload_batch_id, case_id, entity_id, batch_name, doc_category,
                         operator_id, operator_name, status, file_count, new_file_count,
                         duplicate_file_count, suspected_mismatch_file_count,
                         records_inserted, metadata, created_at, updated_at
@@ -498,19 +498,19 @@ class KnowledgeGraphService:
         status = str(summary.get("status", "") or "received")
         query = """
         INSERT INTO public.material_event (
-            material_event_id, case_id, debtor_id, upload_batch_id, event_type, status,
+            material_event_id, case_id, entity_id, upload_batch_id, event_type, status,
             batch_name, doc_category, operator_id, operator_name,
             file_count, records_inserted, event_payload, error_message,
             started_at, completed_at, failed_at
         ) VALUES (
-            %(material_event_id)s, %(case_id)s, %(debtor_id)s, %(upload_batch_id)s, %(event_type)s, %(status)s,
+            %(material_event_id)s, %(case_id)s, %(entity_id)s, %(upload_batch_id)s, %(event_type)s, %(status)s,
             %(batch_name)s, %(doc_category)s, %(operator_id)s, %(operator_name)s,
             %(file_count)s, %(records_inserted)s, %(event_payload)s, %(error_message)s,
             %(started_at)s, %(completed_at)s, %(failed_at)s
         )
         ON CONFLICT (material_event_id) DO UPDATE
         SET case_id = EXCLUDED.case_id,
-            debtor_id = EXCLUDED.debtor_id,
+            entity_id = EXCLUDED.entity_id,
             upload_batch_id = EXCLUDED.upload_batch_id,
             event_type = EXCLUDED.event_type,
             status = EXCLUDED.status,
@@ -527,7 +527,7 @@ class KnowledgeGraphService:
             failed_at = COALESCE(EXCLUDED.failed_at, public.material_event.failed_at),
             updated_at = NOW()
         RETURNING
-            material_event_id, case_id, debtor_id, upload_batch_id, event_type, status,
+            material_event_id, case_id, entity_id, upload_batch_id, event_type, status,
             batch_name, doc_category, operator_id, operator_name,
             file_count, records_inserted, event_payload, error_message,
             started_at, completed_at, failed_at, created_at, updated_at
@@ -535,7 +535,7 @@ class KnowledgeGraphService:
         payload = {
             "material_event_id": material_event_id,
             "case_id": case_id,
-            "debtor_id": int(summary.get("debtor_id", 0) or 0),
+            "entity_id": int(summary.get("entity_id", 0) or 0),
             "upload_batch_id": str(summary.get("upload_batch_id", "") or ""),
             "event_type": str(summary.get("event_type", "") or "supplement_upload"),
             "status": status,
@@ -572,7 +572,7 @@ class KnowledgeGraphService:
                 cur.execute(
                     """
                     SELECT
-                        material_event_id, case_id, debtor_id, upload_batch_id, event_type, status,
+                        material_event_id, case_id, entity_id, upload_batch_id, event_type, status,
                         batch_name, doc_category, operator_id, operator_name,
                         file_count, records_inserted, event_payload, error_message,
                         started_at, completed_at, failed_at, created_at, updated_at
@@ -598,7 +598,7 @@ class KnowledgeGraphService:
                 cur.execute(
                     """
                     SELECT
-                        material_event_id, case_id, debtor_id, upload_batch_id, event_type, status,
+                        material_event_id, case_id, entity_id, upload_batch_id, event_type, status,
                         batch_name, doc_category, operator_id, operator_name,
                         file_count, records_inserted, event_payload, error_message,
                         started_at, completed_at, failed_at, created_at, updated_at

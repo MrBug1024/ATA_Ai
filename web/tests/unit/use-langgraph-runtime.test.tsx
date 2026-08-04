@@ -61,9 +61,9 @@ async function attachViaAdapter(name: string, hash: string) {
   const response: ChatUploadResponse = {
     upload_batch_id: "b1",
     case_id: 1,
-    debtor_id: 0,
-    debtor_name: "",
-    effective_debtor_name: "",
+    entity_id: 0,
+    entity_name: "",
+    effective_entity_name: "",
     file_count: 1,
     duplicate_files: [],
     files: [fi],

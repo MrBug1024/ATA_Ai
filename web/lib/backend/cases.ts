@@ -13,16 +13,14 @@ export interface Case {
   case_id: number;
   case_name: string;
   case_type: string;
-  debtor_names?: string;
-  debtor_count?: number;
+  entity_name: string;
   status: string;
-  composite_score?: number;
-  delta_score?: number;
-  valuation_score?: number;
-  deadline_score?: number;
-  behavioral_score?: number;
   task_count?: number;
   pending_task_count?: number;
+  engagement_code?: string;
+  fiscal_year?: number;
+  period_start?: string;
+  period_end?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -46,14 +44,15 @@ export function casesKey(page: number, keyword: string): string {
 }
 
 export async function listCases(page: number, keyword: string): Promise<CasesPage> {
-  return getJson<CasesPage>(casesKey(page, keyword), "获取案件列表失败");
+  return getJson<CasesPage>(casesKey(page, keyword), "获取年审项目列表失败");
 }
 
 export interface CreateCasePayload {
   case_name: string;
   case_type: string;
-  debtor_name?: string;
-  debtor_uscc?: string;
+  entity_name: string;
+  entity_uscc?: string;
+  fiscal_year?: number;
 }
 
 export async function createCase(
@@ -69,7 +68,7 @@ export function docCategoriesKey(): string {
 }
 
 export async function getDocCategories(): Promise<DocCategoriesResp["categories"]> {
-  const data = await getJson<DocCategoriesResp>(docCategoriesKey(), "获取卷宗类别失败");
+  const data = await getJson<DocCategoriesResp>(docCategoriesKey(), "获取年审资料类别失败");
   return data.categories ?? [];
 }
 
@@ -78,7 +77,7 @@ export function caseDocCategoriesKey(caseId: number): string {
 }
 
 export async function getCaseDocCategories(caseId: number): Promise<CaseDocCategoriesResp> {
-  return getJson<CaseDocCategoriesResp>(caseDocCategoriesKey(caseId), "获取案件卷宗类别失败");
+  return getJson<CaseDocCategoriesResp>(caseDocCategoriesKey(caseId), "获取年审项目资料类别失败");
 }
 
 export async function validateDocCategory(

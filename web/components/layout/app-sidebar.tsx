@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   MessageSquare,
-  Scale,
+  ClipboardCheck,
   User,
   Loader2,
   Trash2,
@@ -65,7 +65,7 @@ export function AppSidebar() {
               A
             </div>
             <span className="text-sm font-semibold tracking-tight text-sidebar-foreground">
-              AI Hunter
+              AI 会计师
             </span>
           </Link>
           <button
@@ -119,8 +119,8 @@ export function AppSidebar() {
               <SidebarMenuItem>
                 <SidebarMenuButton asChild isActive={pathname === "/cases"}>
                   <Link href="/cases">
-                    <Scale className="size-4" />
-                    <span>案件列表</span>
+                    <ClipboardCheck className="size-4" />
+                    <span>年审项目</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -300,7 +300,7 @@ function ConversationList({
                     ? "bg-emerald-100 text-emerald-700"
                     : "bg-muted text-muted-foreground/70"
                 )}>
-                  {conversation.case_id ? "案件" : "通用"}
+                  {conversation.case_id ? "年审" : "通用"}
                 </span>
               </Link>
             </SidebarMenuButton>

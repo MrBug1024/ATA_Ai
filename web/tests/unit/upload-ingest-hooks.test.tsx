@@ -32,7 +32,7 @@ describe("useUploadIngest", () => {
     });
     expect(resp).toMatchObject({ material_event_id: "ev-1" });
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("http://10.0.10.2:8081/files/upload-and-ingest");
+    expect(url).toBe("http://localhost:8080/files/upload-and-ingest");
     expect((init as RequestInit).method).toBe("POST");
     expect((init as RequestInit).body).toBeInstanceOf(FormData);
     const form = (init as RequestInit).body as FormData;

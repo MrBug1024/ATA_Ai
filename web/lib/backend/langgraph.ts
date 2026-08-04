@@ -4,26 +4,14 @@ import {
   getJson,
   postJson,
   postWithoutBody,
-  putJson,
   postForm,
   deleteJson,
 } from "./http";
 import type {
-  ProgressBoard,
-  UpdateProgressRequest,
-  ForecastListResponse,
-  ForecastItem,
-  ForecastSeedRequest,
-  RecoveryListResponse,
-  RecoveryRecord,
-  CreateRecoveryRequest,
-  ReviewRequest,
-  ReviewResponse,
   CorrectionCreateRequest,
   CorrectionListResponse,
   CorrectionModel,
-  DeadlineBoardResponse,
-} from "@/lib/types/case-analytics";
+} from "@/lib/types/audit-corrections";
 import type {
   FileItem,
   ChatUploadRequest,
@@ -153,8 +141,8 @@ export async function chatInvoke(req: ChatInvokeRequest, signal?: AbortSignal): 
       thread_id: req.threadId,
       query: req.query,
       current_case_id: req.caseId ?? 0,
-      current_debtor_id: 0,
-      current_debtor_name: "",
+      current_entity_id: 0,
+      current_entity_name: "",
       stream: true,
       uploaded_files: req.uploadedFiles ?? [],
       client_turn_id: req.clientTurnId ?? "",
@@ -179,8 +167,8 @@ export async function uploadChatFiles(
   const form = new FormData();
   for (const f of files) form.append("files", f);
   form.append("current_case_id", String(req.caseId));
-  form.append("current_debtor_id", String(req.debtorId ?? 0));
-  form.append("current_debtor_name", req.debtorName ?? "");
+  form.append("current_entity_id", String(req.entityId ?? 0));
+  form.append("current_entity_name", req.entityName ?? "");
   if (req.docCategory) form.append("doc_category", req.docCategory);
   if (req.batchName) form.append("batch_name", req.batchName);
   if (req.uploadBatchId) form.append("upload_batch_id", req.uploadBatchId);
@@ -194,8 +182,8 @@ export interface UploadIngestRequest {
   current_case_id: number;
   doc_category: string;
   batch_name?: string;
-  current_debtor_id?: number;
-  current_debtor_name?: string;
+  current_entity_id?: number;
+  current_entity_name?: string;
   upload_batch_id?: string;
   operator_id?: string;
   operator_name?: string;
@@ -205,8 +193,8 @@ export async function uploadAndIngest(req: UploadIngestRequest): Promise<UploadA
   const form = new FormData();
   for (const f of req.files) form.append("files", f);
   form.append("current_case_id", String(req.current_case_id));
-  form.append("current_debtor_id", String(req.current_debtor_id ?? 0));
-  form.append("current_debtor_name", req.current_debtor_name ?? "");
+  form.append("current_entity_id", String(req.current_entity_id ?? 0));
+  form.append("current_entity_name", req.current_entity_name ?? "");
   form.append("doc_category", req.doc_category);
   if (req.batch_name) form.append("batch_name", req.batch_name);
   if (req.upload_batch_id) form.append("upload_batch_id", req.upload_batch_id);
@@ -377,75 +365,7 @@ export async function resolveEvidence(req: EvidenceResolveRequest): Promise<Evid
   return postJson<EvidenceResolveResponse>(langgraphUrl("/evidence/resolve"), req, "解析证据失败");
 }
 
-// ── Case analytics(进度 / 预测 / 回款 / 复盘,均在 LangGraph 8081) ──────────────
-// 注意:路径以 /cases 开头但属于 LangGraph 后端,故用 langgraphUrl(),勿放进 cases.ts(8080)。
-
-export function caseProgressKey(caseId: number): string {
-  return langgraphUrl(`/cases/${caseId}/progress`);
-}
-
-export async function getCaseProgress(caseId: number): Promise<ProgressBoard> {
-  return getJson<ProgressBoard>(caseProgressKey(caseId), "获取案件进度失败");
-}
-
-export async function updateCaseProgress(
-  caseId: number,
-  req: UpdateProgressRequest
-): Promise<void> {
-  await putJson<unknown>(caseProgressKey(caseId), req, "更新案件进度失败");
-}
-
-export function caseForecastKey(caseId: number): string {
-  return langgraphUrl(`/cases/${caseId}/forecast`);
-}
-
-export async function listCaseForecasts(caseId: number): Promise<ForecastItem[]> {
-  const data = await getJson<ForecastListResponse>(caseForecastKey(caseId), "获取预期回款失败");
-  return data.forecasts ?? [];
-}
-
-export async function seedCaseForecast(
-  caseId: number,
-  req: ForecastSeedRequest
-): Promise<void> {
-  await postJson<unknown>(caseForecastKey(caseId), req, "写入预期回款失败");
-}
-
-export function caseRecoveryKey(caseId: number): string {
-  return langgraphUrl(`/cases/${caseId}/recovery`);
-}
-
-export async function listCaseRecovery(caseId: number): Promise<RecoveryRecord[]> {
-  const data = await getJson<RecoveryListResponse>(caseRecoveryKey(caseId), "获取回款明细失败");
-  return data.records ?? [];
-}
-
-export async function createRecovery(
-  caseId: number,
-  req: CreateRecoveryRequest
-): Promise<RecoveryRecord> {
-  return postJson<RecoveryRecord>(caseRecoveryKey(caseId), req, "记录回款失败");
-}
-
-export async function confirmRecovery(
-  caseId: number,
-  recordId: number
-): Promise<RecoveryRecord> {
-  return postWithoutBody<RecoveryRecord>(
-    langgraphUrl(`/cases/${caseId}/recovery/${recordId}/confirm`),
-    "确认回款失败"
-  );
-}
-
-export async function reviewCase(caseId: number, req: ReviewRequest = {}): Promise<ReviewResponse> {
-  return postJson<ReviewResponse>(
-    langgraphUrl(`/cases/${caseId}/review`),
-    req,
-    "AI 复盘失败"
-  );
-}
-
-// ── Case corrections / deadline board ────────────────────────────────────────
+// ── Annual-audit authoritative corrections ───────────────────────────────────
 
 export function caseCorrectionsKey(caseId: number, includeHistory = false): string {
   const suffix = includeHistory ? "?include_history=true" : "";
@@ -458,7 +378,7 @@ export async function listCaseCorrections(
 ): Promise<CorrectionModel[]> {
   const data = await getJson<CorrectionListResponse>(
     caseCorrectionsKey(caseId, includeHistory),
-    "获取案件订正失败"
+    "获取审计调整失败"
   );
   return data.corrections ?? [];
 }
@@ -470,7 +390,7 @@ export async function createCorrection(
   return postJson<CorrectionModel>(
     caseCorrectionsKey(caseId),
     req,
-    "新增案件订正失败"
+    "新增审计调整失败"
   );
 }
 
@@ -480,14 +400,6 @@ export async function revokeCorrection(
 ): Promise<CorrectionModel> {
   return postWithoutBody<CorrectionModel>(
     langgraphUrl(`/cases/${caseId}/corrections/${correctionId}/revoke`),
-    "撤销案件订正失败"
+    "撤销审计调整失败"
   );
-}
-
-export function caseDeadlineBoardKey(caseId: number): string {
-  return langgraphUrl(`/cases/${caseId}/deadline-board`);
-}
-
-export async function getCaseDeadlineBoard(caseId: number): Promise<DeadlineBoardResponse> {
-  return getJson<DeadlineBoardResponse>(caseDeadlineBoardKey(caseId), "获取司法时效看板失败");
 }

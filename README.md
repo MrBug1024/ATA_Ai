@@ -1,22 +1,34 @@
-# AI Hunter
+# AI 会计师年度审计智能体
 
-AI Hunter 原平台的规范化单仓工作区。当前整理只合并工程和运行入口，不改变不良资产处置业务能力。
+本仓库是面向年度财务报表审计的 AI 智能体平台。平台提供 AI 对话、会话记忆、文件摄入、证据追溯、关系图谱、报告生成、权限与管理后台；运行时只提供年度审计业务。
 
 ## 目录
 
 ```text
-backend/   统一 FastAPI 服务（AI 编排 + NPA 领域引擎）
-web/       Next.js 前端
-new_docs/  新项目客户原始资料（本轮不参与实现）
+backend/   FastAPI + LangGraph 年度审计后端
+web/       Next.js 对话式年度审计前端
+new_docs/  客户原始资料与年度审计逻辑资料
+deploy/    本地独立 PostgreSQL、MySQL、Redis、MinIO
+scripts/   本地环境管理脚本
 ```
 
-后端只启动一个进程、监听一个端口。原 8080 领域接口路径保持不变，并与原 8081 AI、认证、会话、文件、图谱和治理接口一起由 `ai_hunter.app.main:app` 提供。
+## 本地数据隔离
 
-## 本地启动
+年度审计使用独立的本地存储：
+
+- PostgreSQL：`127.0.0.1:55432/ata_agent_platform`
+- MySQL：`127.0.0.1:53306/ata_agent`
+- Redis：`127.0.0.1:56379`
+- MinIO API：`127.0.0.1:61000`
+
+这些存储由 `deploy/annual-audit` 管理，不连接历史项目数据库。
+
+## 启动
 
 ```powershell
+.\scripts\annual-audit-local.ps1 up
+
 cd backend
-python -m pip install -e ".[dev]"
 python -m ai_hunter
 
 cd ..\web
@@ -24,8 +36,15 @@ pnpm install
 pnpm dev
 ```
 
-前端只需配置：
+前端只配置一个后端地址：
 
 ```env
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8081
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
 ```
+
+访问地址：
+
+- 前端：<http://localhost:3000>
+- 后端文档：<http://localhost:8080/docs>
+
+本地最高权限账号由年度审计种子初始化：`superadmin`。

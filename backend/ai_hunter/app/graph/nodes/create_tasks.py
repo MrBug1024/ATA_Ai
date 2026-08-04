@@ -1,7 +1,7 @@
 """Task creation node for the post-report SOP flow."""
 
 from ...settings import get_settings
-from ...services.task_api import get_task_api_client
+from ....annual_audit.task_repository import create_task_batch
 from ..state import AuditGraphState
 
 
@@ -11,7 +11,7 @@ def should_create_tasks(state: AuditGraphState) -> str:
 
 
 def create_tasks(state: AuditGraphState) -> AuditGraphState:
-    """Create tasks through the live task API, or preserve a mock status on failure."""
+    """Create project tasks through the annual-audit repository."""
     case_id = state.get("current_case_id", 0)
     tasks = state.get("extracted_tasks", []) or []
     if not get_settings().enable_task_autocreate:
@@ -24,7 +24,7 @@ def create_tasks(state: AuditGraphState) -> AuditGraphState:
         }
     if case_id > 0 and tasks:
         try:
-            result = get_task_api_client().create_batch_sync(case_id, tasks)
+            result = create_task_batch(case_id, tasks)
             return {"task_create_result": result}
         except Exception:
             pass

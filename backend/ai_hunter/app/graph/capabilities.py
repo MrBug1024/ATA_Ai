@@ -1,4 +1,4 @@
-"""Single registry for routed business lines and capabilities."""
+"""Single annual-audit registry for routed business lines and capabilities."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Literal, Mapping
 
 
 BusinessLine = Literal["operator", "audit_analysis", "supervision", "common"]
-LegacyIntent = Literal["full_audit", "drilldown", "re_audit", "review"]
+GraphIntent = Literal["full_audit", "drilldown", "re_audit"]
 AccessMode = Literal["read", "write", "system"]
 
 
@@ -24,8 +24,7 @@ class CapabilitySpec:
     code: str
     description: str
     business_line: BusinessLine
-    legacy_intent: LegacyIntent
-    executor: str
+    intent: GraphIntent
     business_line_executor: str | None
     permission_module: str
     access_mode: AccessMode
@@ -36,18 +35,24 @@ class CapabilitySpec:
 BUSINESS_LINE_SPECS: Mapping[str, BusinessLineSpec] = MappingProxyType(
     {
         "operator": BusinessLineSpec(
-            "operator", "案件创建、材料上传、OCR、类别校验、补件和批次状态", "operator_subgraph"
+            "operator",
+            "年审项目创建、资料上传、OCR、分类校验与资料完整性",
+            "operator_subgraph",
         ),
         "audit_analysis": BusinessLineSpec(
             "audit_analysis",
-            "完整审计、修正重审、局部分析、证据追溯、知识图谱及企业和资金分析",
+            "完整年审、订正重跑、循环分析、证据追溯、关系图谱、底稿与报告",
             "audit_analysis_subgraph",
         ),
         "supervision": BusinessLineSpec(
-            "supervision", "任务查询和操作、司法时效、进度及回款复盘", "supervision_subgraph"
+            "supervision",
+            "审计程序、待办任务、分派与复核跟踪",
+            "supervision_subgraph",
         ),
         "common": BusinessLineSpec(
-            "common", "闲聊、帮助、导航、澄清和无法稳定判断的请求", "common_subgraph"
+            "common",
+            "年审帮助、导航、澄清和通用问答",
+            "common_subgraph",
         ),
     }
 )
@@ -58,8 +63,7 @@ def _spec(
     description: str,
     business_line: BusinessLine,
     *,
-    intent: LegacyIntent = "drilldown",
-    executor: str = "drilldown_agent_graph",
+    intent: GraphIntent = "drilldown",
     business_executor: str | None = None,
     permission: str = "drilldown",
     access: AccessMode = "read",
@@ -70,8 +74,7 @@ def _spec(
         code=code,
         description=description,
         business_line=business_line,
-        legacy_intent=intent,
-        executor=executor,
+        intent=intent,
         business_line_executor=business_executor,
         permission_module=permission,
         access_mode=access,
@@ -83,53 +86,56 @@ def _spec(
 _CAPABILITY_SPEC_LIST = (
     _spec(
         "case.create",
-        "创建案件",
+        "创建年度审计项目",
         "operator",
         business_executor="create_case_command",
         permission="report",
         access="write",
-        tools=("create_case",),
     ),
     _spec(
         "case.profile",
-        "查询案件画像",
+        "查询年审项目画像与审计期间",
         "operator",
         business_executor="query_case_profile",
         permission="report",
-        tools=("get_case_profile",),
+        tools=("get_annual_engagement",),
     ),
     _spec(
         "material.upload",
-        "上传并处理案件材料",
+        "上传并处理财务与审计资料",
         "operator",
         business_executor="record_material_upload_command",
         permission="report",
         access="write",
         requires_case=True,
-        tools=("get_doc_categories", "validate_doc_category", "parse_document", "ingest_structured_fields"),
     ),
     _spec(
         "material.status",
-        "查询材料或批次状态",
+        "查询资料处理状态和缺口",
         "operator",
         business_executor="query_material_status",
         permission="report",
-        tools=("get_case_doc_category_status",),
+        requires_case=True,
+        tools=("get_annual_material_status",),
     ),
     _spec(
         "material.validate",
-        "校验材料类别和完整性",
+        "校验资料类别、完整性和结构化数据就绪度",
         "operator",
         business_executor="query_material_validation",
         permission="report",
-        tools=("get_doc_categories", "get_case_doc_category_status", "validate_doc_category"),
+        requires_case=True,
+        tools=(
+            "list_annual_material_requirements",
+            "get_annual_material_status",
+            "analyze_annual_data_readiness",
+        ),
     ),
     _spec(
         "audit.full",
-        "生成完整审计报告",
+        "生成完整年审底稿和报告草稿",
         "audit_analysis",
         intent="full_audit",
-        executor="full_audit_graph",
         business_executor="full_audit_graph",
         permission="report",
         access="write",
@@ -137,10 +143,9 @@ _CAPABILITY_SPEC_LIST = (
     ),
     _spec(
         "audit.reaudit",
-        "记录修正并重新审计",
+        "记录权威订正并重新生成底稿和报告",
         "audit_analysis",
         intent="re_audit",
-        executor="extract_correction",
         business_executor="reaudit_graph",
         permission="corrections",
         access="write",
@@ -148,84 +153,58 @@ _CAPABILITY_SPEC_LIST = (
     ),
     _spec(
         "audit.drilldown",
-        "审计结论下钻分析",
+        "对收入、应收、货币资金等审计循环下钻分析",
         "audit_analysis",
-        business_executor="audit_drilldown_agent",
+        business_executor="annual_audit_drilldown_agent",
+        requires_case=True,
         tools=(
-            "get_case_profile",
-            "audit_behavioral_scan",
-            "audit_valuation_squeeze",
-            "audit_delta_check",
-            "audit_deadline_scan",
+            "get_annual_engagement",
+            "get_annual_audit_context",
+            "analyze_annual_data_readiness",
+            "analyze_sales_receivables",
+            "analyze_cash_and_bank",
         ),
     ),
     _spec(
         "evidence.resolve",
-        "查询当前案件卷宗证据原文和引用锚点",
+        "查询当前年审项目的原始证据、引用与页锚点",
         "audit_analysis",
         business_executor="query_evidence",
         permission="graph",
-        tools=("resolve_case_evidence",),
-    ),
-    _spec(
-        "caselaw.search",
-        "检索外部相似裁判案例，仅供类案参考",
-        "audit_analysis",
-        business_executor="query_caselaw",
-        permission="graph",
-        tools=("query_wenshu_knowledge",),
+        requires_case=True,
     ),
     _spec(
         "graph.query",
-        "查询知识图谱、企业穿透和资金关系",
+        "查询主体、交易、账户和资金流向关系图谱",
         "audit_analysis",
         business_executor="graph_query_agent",
         permission="graph",
-        tools=("fetch_enterprise", "get_fund_flow", "get_whiteglove_analysis", "query_wenshu_knowledge"),
+        requires_case=True,
+        tools=("get_annual_engagement", "get_annual_audit_context"),
     ),
     _spec(
         "task.query",
-        "查询督办任务",
+        "查询审计程序和待办任务",
         "supervision",
         business_executor="query_tasks",
-        permission="progress",
-        tools=("manage_tasks",),
+        permission="tasks",
+        requires_case=True,
+        tools=("list_annual_tasks",),
     ),
     _spec(
         "task.write",
-        "创建、完成、指派或更新督办任务",
+        "创建、完成、指派或更新审计任务",
         "supervision",
         business_executor="write_task_command",
-        permission="progress",
-        access="write",
-        requires_case=True,
-        tools=("create_task_batch", "manage_tasks"),
-    ),
-    _spec(
-        "deadline.query",
-        "查询司法时效",
-        "supervision",
-        business_executor="query_deadline",
-        permission="deadline",
-        tools=("audit_deadline_scan",),
-    ),
-    _spec(
-        "recovery.review",
-        "生成回款复盘",
-        "supervision",
-        intent="review",
-        executor="review_graph",
-        business_executor="review_graph",
-        permission="review",
+        permission="tasks",
         access="write",
         requires_case=True,
     ),
-    _spec("common.general", "处理闲聊、帮助和导航", "common"),
+    _spec("common.general", "处理年审帮助、导航和通用问答", "common"),
     _spec(
         "clarify",
-        "向用户澄清业务、案件或操作目标",
+        "澄清年审项目、资料、循环或操作目标",
         "common",
-        executor="clarify_route",
         access="system",
     ),
 )
@@ -240,19 +219,11 @@ CAPABILITY_IDS = tuple(CAPABILITY_SPECS)
 def validate_capability_registry() -> None:
     if len(CAPABILITY_SPECS) != len(_CAPABILITY_SPEC_LIST):
         raise ValueError("capability code must be unique")
-    if len({line.subgraph_node for line in BUSINESS_LINE_SPECS.values()}) != len(BUSINESS_LINE_SPECS):
-        raise ValueError("business line subgraph_node must be unique")
     for code, spec in CAPABILITY_SPECS.items():
-        if code != spec.code:
-            raise ValueError(f"capability registry key mismatch: {code}")
-        if spec.business_line not in BUSINESS_LINE_SPECS:
-            raise ValueError(f"unknown business line for capability {code}: {spec.business_line}")
-        if spec.legacy_intent not in {"full_audit", "drilldown", "re_audit", "review"}:
-            raise ValueError(f"unknown legacy intent for capability {code}: {spec.legacy_intent}")
+        if code != spec.code or spec.business_line not in BUSINESS_LINE_SPECS:
+            raise ValueError(f"invalid capability registration: {code}")
         if spec.access_mode not in {"read", "write", "system"}:
-            raise ValueError(f"unknown access mode for capability {code}: {spec.access_mode}")
-        if not spec.executor or not spec.permission_module:
-            raise ValueError(f"capability {code} requires executor and permission_module")
+            raise ValueError(f"invalid access mode for capability {code}")
         if len(spec.tool_names) != len(set(spec.tool_names)):
             raise ValueError(f"capability {code} contains duplicate tools")
 
@@ -280,21 +251,17 @@ def business_line_enabled_capabilities() -> tuple[str, ...]:
     return tuple(spec.code for spec in CAPABILITY_SPECS.values() if spec.business_line_executor)
 
 
-def capabilities_for_executor(executor: str) -> tuple[str, ...]:
-    return tuple(spec.code for spec in CAPABILITY_SPECS.values() if spec.executor == executor)
-
-
 def capability_permission_modules() -> dict[str, str]:
     return {spec.code: spec.permission_module for spec in CAPABILITY_SPECS.values()}
 
 
 def render_route_catalog() -> str:
-    lines = ["当前注册表允许的业务线与 capability："]
+    lines = ["年度审计智能体当前允许的业务线与能力："]
     for line in BUSINESS_LINE_SPECS.values():
         lines.append(f"- {line.code}: {line.description}")
         for spec in CAPABILITY_SPECS.values():
             if spec.business_line == line.code:
-                requirement = "（需案件上下文）" if spec.requires_case else ""
+                requirement = "（需年审项目上下文）" if spec.requires_case else ""
                 lines.append(f"  - {spec.code}: {spec.description}{requirement}")
     return "\n".join(lines)
 

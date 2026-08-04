@@ -1,0 +1,56 @@
+{
+  "super_admin_role_code": "super_admin",
+  "company_admin_role_code": "company_admin",
+  "legacy_role_aliases": {},
+  "companies": [
+    {
+      "company_id": "co_annual_local",
+      "company_name": "本地年审演示机构",
+      "company_type": "owner",
+      "status": "active",
+      "notes": "年审项目本地 Docker 开发环境默认机构。"
+    }
+  ],
+  "report_sections": [
+    {"section_code": "engagement_scope", "section_id": "1", "title": "项目范围与资料完整性", "audience": "field", "sort_order": 1, "status": "active", "description": "项目期间、资料清单和缺口"},
+    {"section_code": "revenue_audit", "section_id": "2", "title": "营业收入审计", "audience": "expert", "sort_order": 2, "status": "active", "description": "趋势、凭证和截止测试"},
+    {"section_code": "receivables_audit", "section_id": "3", "title": "应收账款审计", "audience": "expert", "sort_order": 3, "status": "active", "description": "账龄、集中度、函证和减值"},
+    {"section_code": "cash_audit", "section_id": "4", "title": "货币资金审计", "audience": "expert", "sort_order": 4, "status": "active", "description": "银行流水、函证和异常交易"},
+    {"section_code": "findings", "section_id": "5", "title": "风险事项与审计调整", "audience": "management", "sort_order": 5, "status": "active", "description": "风险事项、差异和审计调整建议"},
+    {"section_code": "evidence_index", "section_id": "6", "title": "证据与复核索引", "audience": "field", "sort_order": 6, "status": "active", "description": "文件、工作表、行号和引用覆盖率"},
+    {"section_code": "opinion_draft", "section_id": "7", "title": "审计报告初稿", "audience": "management", "sort_order": 7, "status": "active", "description": "未经项目组复核不得签发"}
+  ],
+  "roles": [
+    {"role_code": "super_admin", "role_name": "全局超级管理员", "tier": "management", "modules": ["*"], "visible_report_sections": ["*"], "description": "本地初始化与系统运维"},
+    {"role_code": "company_admin", "role_name": "机构管理员", "tier": "management", "modules": ["*"], "visible_report_sections": ["*"], "description": "本机构用户与项目管理"},
+    {"role_code": "engagement_manager", "role_name": "项目经理", "tier": "management", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["*"], "description": "年审项目总体负责"},
+    {"role_code": "auditor", "role_name": "审计人员", "tier": "expert", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["engagement_scope", "revenue_audit", "receivables_audit", "cash_audit", "evidence_index"], "description": "执行审计程序并编制底稿"},
+    {"role_code": "reviewer", "role_name": "复核人员", "tier": "management", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["*"], "description": "复核底稿、风险事项和报告初稿"},
+    {"role_code": "audit_assistant", "role_name": "审计助理", "tier": "field", "modules": ["materials", "tasks", "report"], "visible_report_sections": ["engagement_scope", "revenue_audit", "receivables_audit", "cash_audit", "evidence_index"], "description": "资料整理和基础程序执行"}
+  ],
+  "tag_catalog": [
+    {"dimension": "project_role", "tag_value": "项目经理", "tag_group": "", "sort_order": 1},
+    {"dimension": "project_role", "tag_value": "审计人员", "tag_group": "", "sort_order": 2},
+    {"dimension": "project_role", "tag_value": "复核人员", "tag_group": "", "sort_order": 3},
+    {"dimension": "project_role", "tag_value": "审计助理", "tag_group": "", "sort_order": 4},
+    {"dimension": "title", "tag_value": "注册会计师", "tag_group": "", "sort_order": 1},
+    {"dimension": "title", "tag_value": "税务师", "tag_group": "", "sort_order": 2},
+    {"dimension": "expertise", "tag_value": "财务报表审计", "tag_group": "年审", "sort_order": 1},
+    {"dimension": "expertise", "tag_value": "收入与应收", "tag_group": "业务循环", "sort_order": 2},
+    {"dimension": "expertise", "tag_value": "货币资金", "tag_group": "业务循环", "sort_order": 3}
+  ],
+  "bootstrap_users": [
+    {
+      "user_id": "local_super_admin",
+      "login_identifier": "superadmin",
+      "username": "系统超级管理员",
+      "company_id": "",
+      "auth_source": "local",
+      "status": "active",
+      "is_super_admin": true,
+      "roles": ["super_admin"],
+      "password_env": "INIT_SUPER_ADMIN_PASSWORD",
+      "note": "年审本地环境超级管理员。"
+    }
+  ]
+}

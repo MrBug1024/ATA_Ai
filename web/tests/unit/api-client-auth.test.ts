@@ -9,7 +9,7 @@ const tokenMocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth/token-store", () => tokenMocks);
 
-describe("apiFetch auth", () => {
+describe("unified annual-audit API authentication", () => {
   const fetchMock = vi.fn();
   let originalLocation: Location;
 
@@ -18,67 +18,54 @@ describe("apiFetch auth", () => {
     tokenMocks.getAuthorizationHeader.mockReset().mockReturnValue("bearer access-1");
     tokenMocks.clearAuthSession.mockReset();
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("NEXT_PUBLIC_LANGGRAPH_API_BASE_URL", "http://langgraph.test");
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://annual-api.test");
     originalLocation = window.location;
     Object.defineProperty(window, "location", {
       configurable: true,
-      value: { href: "", pathname: "/cases", search: "?page=2" },
+      value: { href: "", pathname: "/audits", search: "?page=2" },
     });
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      value: originalLocation,
-    });
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
   });
 
-  it("只给 LangGraph 请求附加 bearer", async () => {
+  it("attaches bearer credentials to every unified API route", async () => {
     fetchMock.mockResolvedValue(new Response("{}", { status: 200 }));
-
-    await apiFetch("http://langgraph.test/chat/threads");
-    await apiFetch("http://cases.test/api/cases");
-
-    const langgraphHeaders = new Headers(fetchMock.mock.calls[0][1]?.headers);
-    const casesHeaders = new Headers(fetchMock.mock.calls[1][1]?.headers);
-    expect(langgraphHeaders.get("Authorization")).toBe("bearer access-1");
-    expect(casesHeaders.has("Authorization")).toBe(false);
+    await apiFetch("http://annual-api.test/chat/threads");
+    await apiFetch("http://annual-api.test/api/cases");
+    for (const call of fetchMock.mock.calls) {
+      const headers = new Headers(call[1]?.headers);
+      expect(headers.get("Authorization")).toBe("bearer access-1");
+    }
   });
 
-  it("统一后端下案件接口也附加 bearer", async () => {
-    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://unified.test");
+  it("does not send the platform token to another origin", async () => {
     fetchMock.mockResolvedValue(new Response("{}", { status: 200 }));
-
-    await apiFetch("http://unified.test/api/cases");
-
+    await apiFetch("http://external.test/reference");
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
-    expect(headers.get("Authorization")).toBe("bearer access-1");
+    expect(headers.has("Authorization")).toBe(false);
   });
 
-  it("LangGraph 401 清理 token 并携带 from 跳转", async () => {
+  it("clears the session and redirects after an authenticated 401", async () => {
     fetchMock.mockResolvedValue(new Response("{}", { status: 401 }));
-
-    await expect(apiFetch("http://langgraph.test/me")).rejects.toBeInstanceOf(
+    await expect(apiFetch("http://annual-api.test/me")).rejects.toBeInstanceOf(
       UnauthorizedError
     );
-
     expect(tokenMocks.clearAuthSession).toHaveBeenCalledOnce();
-    expect(window.location.href).toBe("/login?from=%2Fcases%3Fpage%3D2");
+    expect(window.location.href).toBe("/login?from=%2Faudits%3Fpage%3D2");
   });
 
-  it("认证接口可以自行检查 401", async () => {
+  it("lets the login operation inspect its own 401 response", async () => {
     fetchMock.mockResolvedValue(new Response('{"detail":"bad credentials"}', { status: 401 }));
-
     const response = await apiFetch(
-      "http://langgraph.test/auth/login",
+      "http://annual-api.test/auth/login",
       { method: "POST" },
       { auth: false, handleUnauthorized: false }
     );
-
     expect(response.status).toBe(401);
     expect(tokenMocks.clearAuthSession).not.toHaveBeenCalled();
-    expect(window.location.href).toBe("");
   });
 });

@@ -6,7 +6,7 @@ import re
 from typing import Any, Mapping
 
 
-SUPPORTED_CASE_TYPES = ("单户", "资产包", "破产重整", "执转破")
+DEFAULT_ENGAGEMENT_TYPE = "年度财务报表审计"
 TASK_ACTION_ALIASES = {
     "create": "create",
     "创建": "create",
@@ -44,23 +44,23 @@ def _labeled_value(query: str, *labels: str) -> str:
 def resolve_case_create_command(state: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
     command = command_dict(state)
     query = str(state.get("query") or "")
-    case_name = str(command.get("case_name") or "").strip() or _labeled_value(query, "案件名称", "案名")
-    debtor_name = str(command.get("debtor_name") or "").strip() or _labeled_value(
-        query, "债务人名称", "债务人"
+    case_name = str(command.get("case_name") or "").strip() or _labeled_value(query, "项目名称", "审计项目")
+    entity_name = str(command.get("entity_name") or "").strip() or _labeled_value(
+        query, "被审计单位", "单位名称", "企业名称"
     )
-    case_type = str(command.get("case_type") or "").strip()
-    if not case_type:
-        case_type = next((candidate for candidate in SUPPORTED_CASE_TYPES if candidate in query), "破产重整")
+    fiscal_year = command.get("fiscal_year")
+    if not fiscal_year:
+        year_match = re.search(r"(?<!\d)(20\d{2})(?:\s*年)?", query)
+        fiscal_year = int(year_match.group(1)) if year_match else None
     payload = {
         "case_name": case_name,
-        "debtor_name": debtor_name,
-        "case_type": case_type,
-        "debtor_uscc": str(command.get("debtor_uscc") or "").strip()
+        "entity_name": entity_name,
+        "case_type": DEFAULT_ENGAGEMENT_TYPE,
+        "entity_uscc": str(command.get("entity_uscc") or "").strip()
         or _labeled_value(query, "统一社会信用代码", "USCC"),
-        "asset_purchaser_name": str(command.get("asset_purchaser_name") or "").strip()
-        or _labeled_value(query, "资产购买方", "受让方"),
+        "fiscal_year": fiscal_year,
     }
-    missing = [field for field in ("case_name", "debtor_name") if not payload[field]]
+    missing = [field for field in ("case_name", "entity_name", "fiscal_year") if not payload[field]]
     return payload, missing
 
 
@@ -124,8 +124,9 @@ def resolve_task_write_command(
 
 def write_clarification(capability: str, missing: list[str]) -> str:
     labels = {
-        "case_name": "案件名称",
-        "debtor_name": "债务人名称",
+        "case_name": "项目名称",
+        "entity_name": "被审计单位",
+        "fiscal_year": "会计年度",
         "task_action": "任务动作",
         "task_title": "任务内容",
         "task_id": "任务编号",
@@ -133,5 +134,5 @@ def write_clarification(capability: str, missing: list[str]) -> str:
         "new_status": "目标状态",
     }
     rendered = "、".join(labels.get(field, field) for field in missing)
-    prefix = "创建案件" if capability == "case.create" else "执行任务操作"
+    prefix = "创建年审项目" if capability == "case.create" else "执行任务操作"
     return f"{prefix}前请补充：{rendered}。"

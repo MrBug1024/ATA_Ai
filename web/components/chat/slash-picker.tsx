@@ -1,4 +1,4 @@
-import { Loader2, Scale, SlashIcon } from "lucide-react";
+import { ClipboardCheck, Loader2, SlashIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Case } from "@/lib/hooks/use-cases";
 import type { SlashCommandDef } from "@/lib/utils/slash-commands";
@@ -82,14 +82,14 @@ export function CasePickerDropdown({
   onPick: (c: Case) => void;
 }) {
   return (
-    <PickerShell title="选择案件 · ↑↓ Enter 确认 · Esc 取消">
+    <PickerShell title="选择年审项目 · ↑↓ Enter 确认 · Esc 取消">
       {isLoading && cases.length === 0 ? (
         <div className="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted-foreground/60">
           <Loader2 className="size-3 animate-spin" /> 加载中…
         </div>
       ) : cases.length === 0 ? (
         <div className="px-3 py-6 text-center text-xs text-muted-foreground/60">
-          无匹配案件
+          无匹配年审项目
         </div>
       ) : (
         cases.map((c, idx) => (
@@ -109,7 +109,7 @@ export function CasePickerDropdown({
             )}
           >
             <div className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/30 bg-muted/50">
-              <Scale className="size-3.5 text-muted-foreground/60" />
+              <ClipboardCheck className="size-3.5 text-muted-foreground/60" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -117,7 +117,7 @@ export function CasePickerDropdown({
                 <span className="shrink-0 font-mono text-[10px] text-muted-foreground/50">#{c.case_id}</span>
               </div>
               <p className="truncate text-[11px] text-muted-foreground/55">
-                {c.debtor_names ?? "—"} · {c.case_type}
+                {c.entity_name || "—"} · {c.case_type}
               </p>
             </div>
           </button>

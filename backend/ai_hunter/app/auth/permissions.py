@@ -1,10 +1,10 @@
 """授权层（Tier 3）：角色 → 可见报告段落 audience + 可访问模块。
 
-角色是**用户中心**的全局概念（来自 JWT），但「角色能在不良资产里看什么」这套**映射归本项目**。
+角色是用户中心的全局概念（来自 JWT），年度审计模块映射由本项目维护。
 默认映射写代码常量，可用 env `AUTH_ROLE_PERMISSIONS`（JSON）整体覆盖，业务口径回来再调。
 
 - 报告段落分权：audience 层级 field ⊂ expert ⊂ management（高层级看全）。
-- 模块级分权：report/drilldown/review/progress/corrections/deadline/graph/admin。
+- 模块级分权：report/drilldown/materials/tasks/corrections/graph/admin。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 AUDIENCE_ORDER = ["field", "expert", "management"]
 
 # 模块码（与路由分组对应）
-MODULES = {"report", "drilldown", "review", "progress", "corrections", "deadline", "graph", "admin"}
+MODULES = {"report", "drilldown", "materials", "tasks", "corrections", "graph", "admin"}
 _ALL = sorted(MODULES)
 
 # 进程内缓存（授权每请求都查，避免每次打库）。改角色权限后调 clear_role_permissions_cache()。

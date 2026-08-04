@@ -9,21 +9,13 @@ const pageMocks = vi.hoisted(() => ({
   }>,
   conversationsLoading: false,
   conversationArgs: vi.fn(),
-  progressCaseId: vi.fn(),
   getThreadDetail: vi.fn(),
-  reviewProps: vi.fn(),
-  allowedModules: [
-    "corrections",
-    "deadline",
-    "graph",
-    "progress",
-    "review",
-  ] as string[],
+  allowedModules: ["corrections", "graph"] as string[],
 }));
 
 vi.mock("@/lib/hooks/use-cases", () => ({
   useCases: () => ({
-    cases: [{ case_id: 116, case_name: "测试案件116", case_type: "破产", debtor_names: "晨光煤矿", status: "active" }],
+    cases: [{ case_id: 116, case_name: "测试年审项目", case_type: "年度财务报表审计", entity_name: "测试科技有限公司", status: "planning" }],
     isLoading: false, error: null, total: 1, page: 1, setPage: vi.fn(), keyword: "", setKeyword: vi.fn(), retry: vi.fn(), refresh: vi.fn(),
   }),
 }));
@@ -36,23 +28,15 @@ vi.mock("@/lib/hooks/use-evolution-items", () => ({
 vi.mock("@/lib/hooks/use-unresolved-items", () => ({
   useUnresolvedItems: () => ({ data: null, isLoading: false, error: null, refresh: vi.fn() }),
 }));
+vi.mock("@/lib/hooks/use-case-doc-categories", () => ({
+  useCaseDocCategories: () => ({ caseDocCategories: null, isLoading: false, error: null }),
+}));
 vi.mock("@/lib/hooks/use-conversations", () => ({
   useConversations: (args: unknown, enabled: boolean) => {
     pageMocks.conversationArgs(args, enabled);
     return {
       conversations: pageMocks.conversations,
       isLoading: pageMocks.conversationsLoading,
-      error: null,
-      refresh: vi.fn(),
-    };
-  },
-}));
-vi.mock("@/lib/hooks/use-case-progress", () => ({
-  useCaseProgress: (caseId: number | null) => {
-    pageMocks.progressCaseId(caseId);
-    return {
-      progress: null,
-      isLoading: false,
       error: null,
       refresh: vi.fn(),
     };
@@ -95,17 +79,8 @@ vi.mock("@/components/knowledge-graph/evolution-timeline", () => ({
 vi.mock("@/components/knowledge-graph/unresolved-items-panel", () => ({
   UnresolvedItemsPanel: () => <div data-testid="unresolved" />,
 }));
-vi.mock("@/components/cases/deadline-board", () => ({
-  DeadlineBoard: () => <div data-testid="deadline-board" />,
-}));
 vi.mock("@/components/cases/corrections-panel", () => ({
   CorrectionsPanel: () => <div data-testid="corrections-panel" />,
-}));
-vi.mock("@/components/cases/review-dialog", () => ({
-  ReviewDialog: (props: unknown) => {
-    pageMocks.reviewProps(props);
-    return <button type="button">AI 复盘</button>;
-  },
 }));
 vi.mock("@/components/ui/sidebar", () => ({
   SidebarTrigger: () => null,
@@ -116,30 +91,25 @@ describe("CaseDetailPage", () => {
     vi.clearAllMocks();
     pageMocks.conversations = [];
     pageMocks.conversationsLoading = false;
-    pageMocks.allowedModules = [
-      "corrections",
-      "deadline",
-      "graph",
-      "progress",
-      "review",
-    ];
+    pageMocks.allowedModules = ["corrections", "graph"];
     pageMocks.getThreadDetail.mockResolvedValue({ final_report_ref: "" });
   });
 
   it("renders case name in header", async () => {
     const { default: Page } = await import("@/app/(main)/cases/[id]/page");
     render(<Page />);
-    expect(screen.getByText("测试案件116")).toBeTruthy();
+    expect(screen.getByText("测试年审项目")).toBeTruthy();
   });
 
   it("renders the analysis and governance tabs", async () => {
     const { default: Page } = await import("@/app/(main)/cases/[id]/page");
     render(<Page />);
-    expect(screen.getByText("材料事件")).toBeTruthy();
-    expect(screen.getByText("结论演进")).toBeTruthy();
-    expect(screen.getByText("未决补件")).toBeTruthy();
-    expect(screen.getByText("时效看板")).toBeTruthy();
-    expect(screen.getByText("权威订正")).toBeTruthy();
+    expect(screen.getByText("资料处理记录")).toBeTruthy();
+    expect(screen.getByText("审计结论演进")).toBeTruthy();
+    expect(screen.getByText("待补资料")).toBeTruthy();
+    expect(screen.getByText("审计调整")).toBeTruthy();
+    expect(screen.queryByText("回款管理")).toBeNull();
+    expect(screen.queryByText("时效看板")).toBeNull();
   });
 
   it("renders MaterialEventTimeline in default tab", async () => {
@@ -148,17 +118,11 @@ describe("CaseDetailPage", () => {
     expect(screen.getByTestId("material-events")).toBeTruthy();
   });
 
-  it("opens the deadline and correction panels from their tabs", async () => {
+  it("opens the annual correction panel from its tab", async () => {
     const { default: Page } = await import("@/app/(main)/cases/[id]/page");
     render(<Page />);
 
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "时效看板" }), {
-      button: 0,
-      ctrlKey: false,
-    });
-    expect(screen.getByTestId("deadline-board")).toBeTruthy();
-
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "权威订正" }), {
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "审计调整" }), {
       button: 0,
       ctrlKey: false,
     });
@@ -177,12 +141,7 @@ describe("CaseDetailPage", () => {
       { caseId: 116, limit: 200 },
       true
     );
-    await waitFor(() =>
-      expect(pageMocks.reviewProps).toHaveBeenLastCalledWith(
-        { caseId: 116 }
-      )
-    );
-    expect(pageMocks.getThreadDetail).toHaveBeenCalledWith("newer");
+    await waitFor(() => expect(pageMocks.getThreadDetail).toHaveBeenCalledWith("newer"));
   });
 
   it("按 allowed_modules 隐藏受限功能并停止对应数据请求", async () => {
@@ -190,12 +149,8 @@ describe("CaseDetailPage", () => {
     const { default: Page } = await import("@/app/(main)/cases/[id]/page");
     render(<Page />);
 
-    expect(screen.queryByText("AI 复盘")).toBeNull();
     expect(screen.queryByText("查看图谱")).toBeNull();
-    expect(screen.queryByRole("tab", { name: "进度看板" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "时效看板" })).toBeNull();
-    expect(screen.queryByRole("tab", { name: "权威订正" })).toBeNull();
-    expect(pageMocks.progressCaseId).toHaveBeenLastCalledWith(null);
+    expect(screen.queryByRole("tab", { name: "审计调整" })).toBeNull();
     expect(pageMocks.conversationArgs).toHaveBeenLastCalledWith(
       { caseId: 116, limit: 200 },
       false

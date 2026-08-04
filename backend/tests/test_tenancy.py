@@ -158,7 +158,7 @@ def test_require_case_access_raises_403_when_denied(monkeypatch):
         require_case_access(116, identity=_identity())
     except HTTPException as exc:
         assert exc.status_code == 403
-        assert exc.detail == "无权限访问该案件"
+        assert exc.detail == "无权限访问该年审项目"
     else:
         raise AssertionError("expected HTTPException")
 

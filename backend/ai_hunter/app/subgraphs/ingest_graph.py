@@ -1,21 +1,26 @@
-"""File ingestion subgraph: OCR documents, infer debtor, and ingest parsed text."""
+"""Annual-audit ingestion: structured import, OCR, evidence, and graph enrichment."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
 from ..graph.context_loader import resolve_aggregated_text, resolve_ingest_payload
 from ..graph.heavy_state import put_heavy_payload
-from ..graph.schemas import ParseDocumentResultModel
 from ..graph.state import AuditGraphState
-from ..services.audit_api import get_audit_api_client
-from ..services.doc_category_api import get_doc_category_api_client, get_mock_doc_category_service
 from ..services.ocr_service import get_ocr_service
 from ..settings import get_settings
+from ...annual_audit.document_repository import (
+    get_case_doc_categories,
+    list_doc_categories,
+    validate_doc_category,
+)
 from .build_knowledge_graph_graph import build_knowledge_graph_graph
 
 
@@ -23,6 +28,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".
 TEXT_EXTENSIONS = {".txt"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 CSV_EXTENSIONS = {".csv"}
+SPREADSHEET_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 DOCUMENT_OCR_EXTENSIONS = {
     ".pdf",
     ".doc",
@@ -35,14 +41,55 @@ DOCUMENT_OCR_EXTENSIONS = {
 }
 def _build_ingest_payload_summary(payload: dict) -> str:
     """Build a compact summary for persisted ingest source payloads."""
+    spreadsheet_file_count, spreadsheet_sheet_count, spreadsheet_row_count = (
+        _spreadsheet_layout_counts(payload)
+    )
     return (
         f"txt={len(payload.get('txt_contents', []))}, "
         f"csv={len(payload.get('csv_contents', []))}, "
         f"md={len(payload.get('md_contents', []))}, "
         f"document={len(payload.get('document_ocr_contents', []))}, "
         f"image={len(payload.get('image_ocr_contents', []))}, "
-        f"layout={len(payload.get('ocr_layout_results', []))}"
+        f"layout={len(payload.get('ocr_layout_results', []))}, "
+        f"spreadsheet_files={spreadsheet_file_count}, "
+        f"spreadsheet_sheets={spreadsheet_sheet_count}, "
+        f"spreadsheet_rows={spreadsheet_row_count}"
     )
+
+
+def _spreadsheet_layout_counts(payload: dict) -> tuple[int, int, int]:
+    """Read local-spreadsheet extraction totals from cached layout payloads."""
+    file_count = 0
+    sheet_count = 0
+    row_count = 0
+    for item in payload.get("ocr_layout_results", []) or []:
+        if not isinstance(item, dict):
+            continue
+        layout_result = item.get("layout_result")
+        if not isinstance(layout_result, dict):
+            continue
+        raw_response = layout_result.get("raw_response")
+        if not isinstance(raw_response, dict):
+            continue
+        if raw_response.get("parser") != "annual-spreadsheet-local-v1":
+            continue
+        file_count += 1
+        sheet_count += int(raw_response.get("sheet_count") or 0)
+        row_count += int(raw_response.get("nonempty_row_count") or 0)
+    return file_count, sheet_count, row_count
+
+
+def import_annual_structured_files(state: AuditGraphState) -> AuditGraphState:
+    """Project supported annual-audit spreadsheets before normal OCR ingestion."""
+
+    from ai_hunter.annual_audit.import_service import import_uploaded_files
+
+    summary = import_uploaded_files(
+        engagement_id=int(state.get("current_case_id") or 0),
+        files=state.get("uploaded_files") or [],
+        actor=str(state.get("operator_id") or state.get("user_id") or "ai_agent"),
+    )
+    return {"annual_import_summary": summary}
 
 
 def filter_files(state: AuditGraphState) -> AuditGraphState:
@@ -110,6 +157,8 @@ def filter_files(state: AuditGraphState) -> AuditGraphState:
 
 def _classify_ocr_target(file_type: str, extension: str, content_type: str) -> str:
     """Classify whether one uploaded file should go through image or document OCR mode."""
+    if extension in SPREADSHEET_EXTENSIONS:
+        return "spreadsheet"
     if (
         file_type == "image"
         or extension in IMAGE_EXTENSIONS
@@ -161,20 +210,21 @@ def _run_one_ocr(index: int, target: str, file_item: dict) -> tuple[int, str, st
     2. ``url`` (http(s)://) → pass as ``file_url`` for OCR backend to fetch.
     3. ``content`` (legacy base64 or text) → pass as ``file_content``.
     """
-    from ..services.minio_service import get_minio_service
+    if target == "spreadsheet":
+        result = _extract_spreadsheet_with_layout(file_item)
+        text = str(result.get("text") or "").strip()
+        cache_key = _build_file_cache_key(file_item)
+        if text:
+            return index, target, text, cache_key, result
+        return index, target, _build_ocr_error_text(
+            file_item, result.get("message", "表格未返回内容")
+        ), cache_key, result
 
     service = get_ocr_service()
-    storage_ref = (file_item.get("storage_ref") or "").strip()
+    raw_bytes = _resolve_file_bytes(file_item)
     content = file_item.get("content", "")
     file_url = file_item.get("url", "")
-
-    if storage_ref.startswith("minio://"):
-        try:
-            raw_bytes = get_minio_service().get_object_bytes(storage_ref)
-        except Exception as exc:
-            raise RuntimeError(
-                f"MinIO 拉取失败 {file_item.get('name', 'unknown-file')}: {exc}"
-            ) from exc
+    if raw_bytes is not None:
         content = base64.b64encode(raw_bytes).decode("ascii")
         file_url = ""
 
@@ -201,10 +251,134 @@ def _build_file_cache_key(file_item: dict) -> str:
     raw_content = str(file_item.get("content", "") or "")
     if raw_content.strip():
         return hashlib.sha256(_decode_file_bytes(file_item)).hexdigest()
+    file_hash = str(file_item.get("file_hash", "") or "").strip()
+    if file_hash:
+        return file_hash
     url = str(file_item.get("url", "") or "").strip()
     if url:
         return f"url:{url}"
     return f"name:{str(file_item.get('name', '') or '').strip()}"
+
+
+def _resolve_file_bytes(file_item: dict) -> bytes | None:
+    """Resolve uploaded bytes locally when MinIO or inline content is available."""
+    from ..services.minio_service import get_minio_service
+
+    storage_ref = str(file_item.get("storage_ref", "") or "").strip()
+    if storage_ref.startswith("minio://"):
+        try:
+            return get_minio_service().get_object_bytes(storage_ref)
+        except Exception as exc:
+            raise RuntimeError(
+                f"MinIO 拉取失败 {file_item.get('name', 'unknown-file')}: {exc}"
+            ) from exc
+    content = str(file_item.get("content", "") or "").strip()
+    if content:
+        return _decode_file_bytes(file_item)
+    return None
+
+
+def _spreadsheet_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    return " ".join(str(value).replace("\r", "\n").replace("\t", " ").splitlines()).strip()
+
+
+def _spreadsheet_sheet_blocks(
+    *,
+    sheet_name: str,
+    sheet_index: int,
+    rows: list[list[Any]],
+    max_chars: int = 6000,
+) -> list[dict[str, Any]]:
+    """Turn one worksheet into bounded, traceable text blocks without dropping rows."""
+    header = f"## 工作表：{sheet_name}"
+    lines: list[str] = []
+    for row_number, row in enumerate(rows, start=1):
+        values = [_spreadsheet_cell_text(value) for value in row]
+        while values and not values[-1]:
+            values.pop()
+        if not any(values):
+            continue
+        lines.append(f"[第{row_number}行] " + " | ".join(values))
+    if not lines:
+        lines = ["（空工作表）"]
+
+    chunks: list[str] = []
+    current = header
+    for line in lines:
+        candidate = f"{current}\n{line}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current != header:
+            chunks.append(current)
+            current = header
+        while len(line) > max_chars - len(header) - 1:
+            take = max_chars - len(header) - 1
+            chunks.append(f"{header}\n{line[:take]}")
+            line = line[take:]
+        current = f"{header}\n{line}"
+    if current != header:
+        chunks.append(current)
+
+    return [
+        {
+            "type": "spreadsheet",
+            "text": chunk,
+            "text_level": 1,
+            "bbox": [],
+            "page_idx": sheet_index,
+            "sheet_name": sheet_name,
+        }
+        for chunk in chunks
+    ]
+
+
+def _extract_spreadsheet_with_layout(file_item: dict) -> dict[str, Any]:
+    """Read every worksheet locally and expose one evidence page per sheet."""
+    from ai_hunter.annual_audit.import_service import read_tabular_sheets
+
+    file_name = str(file_item.get("name") or "uploaded-workbook.xlsx")
+    raw_bytes = _resolve_file_bytes(file_item)
+    if raw_bytes is None:
+        raise ValueError(f"表格缺少可读取的本地内容: {file_name}")
+    sheets = read_tabular_sheets(file_name, raw_bytes)
+    if not sheets:
+        raise ValueError(f"未读取到工作表: {file_name}")
+
+    pages: list[dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = []
+    nonempty_row_count = 0
+    for sheet_index, sheet in enumerate(sheets):
+        sheet_blocks = _spreadsheet_sheet_blocks(
+            sheet_name=sheet.name,
+            sheet_index=sheet_index,
+            rows=sheet.rows,
+        )
+        blocks.extend(sheet_blocks)
+        nonempty_row_count += sum(1 for row in sheet.rows if any(value not in (None, "") for value in row))
+        pages.append({"width": 0, "height": 0, "sheet_name": sheet.name})
+
+    text = "\n\n".join(str(block["text"]) for block in blocks)
+    return {
+        "text": text,
+        "message": "spreadsheet-local-read",
+        "pages": pages,
+        "blocks": blocks,
+        "page_width": 0,
+        "page_height": 0,
+        "raw_response": {
+            "parser": "annual-spreadsheet-local-v1",
+            "sheet_count": len(sheets),
+            "nonempty_row_count": nonempty_row_count,
+            "block_count": len(blocks),
+        },
+    }
 
 
 def _decode_file_bytes(file_item: dict) -> bytes:
@@ -248,108 +422,83 @@ def merge_texts(state: AuditGraphState) -> AuditGraphState:
     }
 
 
-def infer_debtor_name(state: AuditGraphState) -> AuditGraphState:
-    """Require case master data instead of inferring a debtor from document text."""
+def require_engagement_context(state: AuditGraphState) -> AuditGraphState:
+    """Require a selected annual-audit engagement before ingesting evidence."""
     if int(state.get("current_case_id", 0) or 0) > 0:
         return {}
-    raise ValueError("卷宗摄入前必须先建案并确认债务人，禁止从材料文本自动创建债务人")
+    raise ValueError("审计资料摄入前必须先创建并选择年审项目")
 
 
 def load_doc_category_context(state: AuditGraphState) -> AuditGraphState:
-    """Hydrate doc-category catalog and case coverage so upload flows can guide operators."""
+    """Load the annual-audit material catalog and engagement coverage."""
     settings = get_settings()
     case_id = int(state.get("current_case_id", 0) or 0)
     doc_category = str(state.get("doc_category", "") or "").strip()
-    if settings.enable_doc_category_api_mock:
-        mock_service = get_mock_doc_category_service()
-        catalog = mock_service.get_doc_categories().model_dump()
-        case_status = mock_service.get_case_doc_categories(case_id).model_dump() if case_id > 0 else {}
-        validation = (
-            mock_service.validate_doc_category(
-                {
-                    "case_id": case_id,
-                    "doc_category": doc_category,
-                    "file_names": [str(item.get("name", "") or "") for item in state.get("uploaded_files") or []],
-                    "text_preview": "",
-                }
-            ).model_dump()
-            if doc_category
-            else {}
-        )
-        return {
-            "doc_category_catalog": catalog,
-            "case_doc_category_status": case_status,
-            "missing_categories": case_status.get("missing_categories", []) if isinstance(case_status, dict) else [],
-            "doc_category_validation": validation or state.get("doc_category_validation", {}),
-        }
-
-    updates: dict[str, object] = {}
-    try:
-        updates["doc_category_catalog"] = get_doc_category_api_client().get_doc_categories_sync()
-    except Exception:
-        updates["doc_category_catalog"] = {}
+    updates: dict[str, object] = {"doc_category_catalog": list_doc_categories(settings=settings)}
     if case_id > 0:
-        try:
-            case_status = get_doc_category_api_client().get_case_doc_categories_sync(case_id)
-            updates["case_doc_category_status"] = case_status
-            updates["missing_categories"] = case_status.get("missing_categories", [])
-        except Exception:
-            pass
+        case_status = get_case_doc_categories(case_id, settings=settings)
+        updates["case_doc_category_status"] = case_status
+        updates["missing_categories"] = case_status.get("missing_categories", [])
     if doc_category:
-        try:
-            updates["doc_category_validation"] = get_doc_category_api_client().validate_doc_category_sync(
-                {
-                    "case_id": case_id,
-                    "doc_category": doc_category,
-                    "file_names": [str(item.get("name", "") or "") for item in state.get("uploaded_files") or []],
-                    "text_preview": "",
-                }
-            )
-        except Exception:
-            pass
+        updates["doc_category_validation"] = validate_doc_category(
+            {
+                "case_id": case_id,
+                "doc_category": doc_category,
+                "file_names": [str(item.get("name", "") or "") for item in state.get("uploaded_files") or []],
+                "text_preview": "",
+            },
+            settings=settings,
+        )
     return updates
 
 
-def parse_document_and_ingest(state: AuditGraphState) -> AuditGraphState:
-    """Send aggregated text into the live parse-document API."""
-    aggregated_text = resolve_aggregated_text(state)
-    if not aggregated_text.strip():
-        return {}
-    upload_batch_summary = _mark_upload_batch_summary(state, status="processing", stage="parsing")
-    payload = {
-        "case_id": state.get("current_case_id") or None,
-        "debtor_id": state.get("current_debtor_id") or None,
-        "debtor_name": state.get("current_debtor_name") or None,
-        "text": aggregated_text,
-        "source_filename": state.get("current_debtor_name") or "uploaded-material",
+def finalize_annual_ingest(state: AuditGraphState) -> AuditGraphState:
+    """Finalize annual structured imports before graph enrichment."""
+
+    summary = dict(state.get("annual_import_summary") or {})
+    dataset_categories = {
+        "account_balance": "trial_balance",
+        "journal_entry": "journal_entries",
+        "receivable_item": "receivables",
+        "bank_transaction": "bank_statements",
     }
-    try:
-        response = ParseDocumentResultModel.model_validate(
-            get_audit_api_client().parse_document_sync(payload)
+    categories = [
+        dataset_categories[item]
+        for item in summary.get("recognized_datasets") or []
+        if item in dataset_categories
+    ]
+    records_inserted = int(summary.get("new_row_count") or 0)
+    errors = summary.get("errors") or []
+    skipped = summary.get("skipped") or []
+    status = "partial" if errors else "processing"
+    message_parts = [f"年度审计结构化导入新增 {records_inserted} 行"]
+    spreadsheet_file_count, spreadsheet_sheet_count, spreadsheet_row_count = (
+        _spreadsheet_layout_counts(resolve_ingest_payload(state))
+    )
+    if spreadsheet_file_count:
+        message_parts.append(
+            f"本地完整读取 {spreadsheet_file_count} 个工作簿、"
+            f"{spreadsheet_sheet_count} 个工作表、{spreadsheet_row_count} 行非空数据"
         )
-        response_payload = response.model_dump()
-        response_ref = put_heavy_payload("parse_document_result", response_payload)
-        return {
-            "parse_document_result_ref": response_ref,
-            "parse_document_result": {},
-            "parse_summary": response.message or "补充材料已入库。",
-            "categories_found": response.categories_found,
-            "recognized_categories": response.categories_found,
-            "records_inserted": response.records_inserted,
-            "current_case_id": response.case_id or state.get("current_case_id", 0),
-            "current_debtor_id": response.debtor_id or state.get("current_debtor_id", 0),
-            "current_debtor_name": response.debtor_name
-            or state.get("current_debtor_name", ""),
-            "upload_batch_summary": _mark_upload_batch_summary(
-                state,
-                status="processing",
-                stage="parsed",
-                records_inserted=response.records_inserted,
-                categories_found=response.categories_found,
-            ),
-        }
-    except Exception as exc:
-        raise RuntimeError(f"parse-document 摄入失败: {exc}") from exc
+    if categories:
+        message_parts.append(f"识别资料类别：{', '.join(categories)}")
+    if skipped:
+        message_parts.append(f"另有 {len(skipped)} 个文件继续进入证据与知识图谱链路")
+    if errors:
+        message_parts.append(f"{len(errors)} 个文件结构化导入失败，但不阻断证据链路")
+    return {
+        "parse_summary": "；".join(message_parts) + "。",
+        "categories_found": categories,
+        "recognized_categories": categories,
+        "records_inserted": records_inserted,
+        "upload_batch_summary": _mark_upload_batch_summary(
+            state,
+            status=status,
+            stage="annual_structured_imported",
+            records_inserted=records_inserted,
+            categories_found=categories,
+        ),
+    }
 
 
 def _mark_upload_batch_summary(
@@ -397,16 +546,18 @@ def build_ingest_graph():
 def build_upload_parse_graph():
     """Build the upload-parse stage graph used before knowledge-graph enrichment."""
     graph = StateGraph(AuditGraphState)
+    graph.add_node("annual_structured_import", import_annual_structured_files)
     graph.add_node("filter_files", filter_files)
     graph.add_node("merge_texts", merge_texts)
-    graph.add_node("infer_debtor_name", infer_debtor_name)
+    graph.add_node("require_engagement_context", require_engagement_context)
     graph.add_node("load_doc_category_context", load_doc_category_context)
-    graph.add_node("parse_document_and_ingest", parse_document_and_ingest)
+    graph.add_node("finalize_annual_ingest", finalize_annual_ingest)
 
-    graph.add_edge(START, "filter_files")
+    graph.add_edge(START, "annual_structured_import")
+    graph.add_edge("annual_structured_import", "filter_files")
     graph.add_edge("filter_files", "merge_texts")
-    graph.add_edge("merge_texts", "infer_debtor_name")
-    graph.add_edge("infer_debtor_name", "load_doc_category_context")
-    graph.add_edge("load_doc_category_context", "parse_document_and_ingest")
-    graph.add_edge("parse_document_and_ingest", END)
+    graph.add_edge("merge_texts", "require_engagement_context")
+    graph.add_edge("require_engagement_context", "load_doc_category_context")
+    graph.add_edge("load_doc_category_context", "finalize_annual_ingest")
+    graph.add_edge("finalize_annual_ingest", END)
     return graph.compile()

@@ -20,7 +20,7 @@ def build_material_event_id(upload_batch_id: str) -> str:
 def mark_upload_ingest_progress(
     *,
     case_id: int,
-    debtor_id: int,
+    entity_id: int,
     batch_name: str,
     doc_category: str,
     operator_id: str,
@@ -160,7 +160,7 @@ def mark_upload_ingest_progress(
             {
                 "material_event_id": material_event_id,
                 "case_id": int(case_id or 0),
-                "debtor_id": int(debtor_id or 0),
+                "entity_id": int(entity_id or 0),
                 "upload_batch_id": upload_batch_id,
                 "event_type": MATERIAL_EVENT_TYPE,
                 "status": status,
@@ -187,7 +187,7 @@ def mark_upload_ingest_progress(
             {
                 "upload_batch_id": upload_batch_id,
                 "case_id": int(case_id or 0),
-                "debtor_id": int(debtor_id or 0),
+                "entity_id": int(entity_id or 0),
                 "batch_name": batch_name,
                 "doc_category": doc_category,
                 "operator_id": operator_id,

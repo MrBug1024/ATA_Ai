@@ -8,13 +8,13 @@ def test_normalize_input_clears_case_bound_state_when_query_switches_case():
     result = normalize_input(
         {
             "thread_id": "t-case-switch",
-            "query": "案件210重新审计",
-            "current_case_id": 116,
-            "messages": [HumanMessage(content="案件116")],
-            "memory_context": "user: 案件116",
-            "full_context_json": '{"case_id": 116}',
-            "report_part_b": "旧案件报告",
-            "user_corrections": ["旧修正"],
+            "query": "年审项目210重新审计",
+            "current_case_id": 7,
+            "messages": [HumanMessage(content="年审项目7")],
+            "memory_context": "user: 年审项目7",
+            "full_context_json": '{"case_id": 7}',
+            "report_part_b": "上一版年度审计报告",
+            "user_corrections": ["上一版事实更正"],
         }
     )
 
@@ -33,10 +33,10 @@ def test_normalize_input_keeps_state_when_case_does_not_change():
         {
             "thread_id": "t-no-switch",
             "query": "查看任务",
-            "current_case_id": 116,
-            "messages": [HumanMessage(content="案件116")],
+            "current_case_id": 7,
+            "messages": [HumanMessage(content="年审项目7")],
         }
     )
 
     assert result["case_switched"] is False
-    assert result["messages"][0].content == "案件116"
+    assert result["messages"][0].content == "年审项目7"

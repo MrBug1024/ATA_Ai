@@ -3,9 +3,8 @@
 from langgraph.graph import END, START, StateGraph
 
 from .checkpointer import get_checkpointer
-from .nodes.corrections import extract_correction
 from .nodes.clarify_route import clarify_route
-from .nodes.create_tasks import create_tasks, should_create_tasks
+from .nodes.create_tasks import create_tasks
 from .nodes.finalize_answer import finalize_answer
 from .nodes.hydrate_case_graph import hydrate_case_graph_context
 from .nodes.ingest_files import should_ingest_files, summarize_ingest_result
@@ -13,16 +12,14 @@ from .nodes.memory import hydrate_memory_context, persist_conversation_memory
 from .nodes.normalize_input import normalize_input
 from .nodes.resolve_case import resolve_case_context
 from .nodes.route_intent import classify_intent, execution_route_edge
-from .nodes.run_drilldown_agent import build_drilldown_agent_node
 from .state import AuditGraphState
-from ..subgraphs.full_audit_graph import build_full_audit_graph
 from ..subgraphs.ingest_graph import build_ingest_graph
-from ..subgraphs.review_graph import build_review_graph
 from ..subgraphs.business_line_graphs import audit_analysis_completion_edge, build_business_line_subgraphs
 
 
 def build_audit_orchestrator_graph(checkpointer=None):
-    """Compose the top-level graph with ingestion, drilldown, and re-audit branches."""
+    """Compose the annual-audit chat graph and its four business lines."""
+
     graph = StateGraph(AuditGraphState)
     graph.add_node("normalize_input", normalize_input)
     graph.add_node("hydrate_memory_context", hydrate_memory_context)
@@ -32,11 +29,7 @@ def build_audit_orchestrator_graph(checkpointer=None):
     graph.add_node("summarize_ingest_result", summarize_ingest_result)
     graph.add_node("classify_intent", classify_intent)
     graph.add_node("clarify_route", clarify_route)
-    graph.add_node("extract_correction", extract_correction)
-    graph.add_node("full_audit_graph", build_full_audit_graph())
-    graph.add_node("review_graph", build_review_graph())
     graph.add_node("create_tasks", create_tasks)
-    graph.add_node("drilldown_agent_graph", build_drilldown_agent_node())
     business_line_subgraphs = build_business_line_subgraphs()
     graph.add_node("operator_subgraph", business_line_subgraphs["operator"])
     graph.add_node("audit_analysis_subgraph", business_line_subgraphs["audit_analysis"])
@@ -63,30 +56,14 @@ def build_audit_orchestrator_graph(checkpointer=None):
         "classify_intent",
         execution_route_edge,
         {
-            "full_audit": "full_audit_graph",
-            "drilldown": "drilldown_agent_graph",
-            "re_audit": "extract_correction",
-            "review": "review_graph",
             "clarify": "clarify_route",
-            "finalize": "finalize_answer",
             "operator_subgraph": "operator_subgraph",
             "audit_analysis_subgraph": "audit_analysis_subgraph",
             "supervision_subgraph": "supervision_subgraph",
             "common_subgraph": "common_subgraph",
         },
     )
-    graph.add_edge("extract_correction", "full_audit_graph")
-    graph.add_edge("review_graph", "finalize_answer")
-    graph.add_conditional_edges(
-        "full_audit_graph",
-        should_create_tasks,
-        {
-            "create": "create_tasks",
-            "skip": "finalize_answer",
-        },
-    )
     graph.add_edge("create_tasks", "finalize_answer")
-    graph.add_edge("drilldown_agent_graph", "finalize_answer")
     graph.add_edge("operator_subgraph", "finalize_answer")
     graph.add_conditional_edges(
         "audit_analysis_subgraph",

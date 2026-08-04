@@ -7,7 +7,15 @@ import { caseMaterialEventsKey, listCaseMaterialEvents } from "@/lib/backend/lan
 export function useCaseMaterialEvents(caseId: number | null) {
   const { data, error, isLoading, mutate } = useSWR<CaseMaterialEventItem[]>(
     caseId !== null ? caseMaterialEventsKey(caseId) : null,
-    () => listCaseMaterialEvents(caseId as number)
+    () => listCaseMaterialEvents(caseId as number),
+    {
+      refreshInterval: (latestEvents) =>
+        latestEvents?.some(
+          (event) => event.status === "received" || event.status === "processing"
+        )
+          ? 3000
+          : 0,
+    }
   );
 
   return {

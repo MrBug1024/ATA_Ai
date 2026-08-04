@@ -1,7 +1,7 @@
 [project]
 name = "ai-hunter-langgraph"
 version = "0.1.0"
-description = "Unified AI Hunter orchestration and deterministic NPA domain service"
+description = "Unified AI accountant orchestration and deterministic annual-audit service"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
@@ -12,8 +12,11 @@ dependencies = [
   "langgraph>=0.2.0",
   "langgraph-checkpoint-postgres>=2.0.0",
   "minio>=7.2.7",
+  "openpyxl>=3.1.5",
   "pydantic>=2.9.0",
   "pydantic-settings>=2.5.0",
+  "PyMySQL>=1.1.1",
+  "xlrd>=2.0.1",
   "pypdf>=6.0.0",
   "psycopg2-binary>=2.9.9",
   "psycopg-binary>=3.3.0",

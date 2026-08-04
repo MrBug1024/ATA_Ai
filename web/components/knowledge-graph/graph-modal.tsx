@@ -197,14 +197,14 @@ export function GraphModal() {
           className="fixed inset-0 z-50 flex flex-col bg-background outline-none"
         >
           <DialogPrimitive.Title className="sr-only">
-            知识图谱 · 案件 {caseId}
+            审计关系图谱 · 年审项目 {caseId}
           </DialogPrimitive.Title>
       {/* Toolbar */}
       <div className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         <div className="flex shrink-0 items-center gap-2 text-sm font-medium">
           <Network className="size-4 text-primary" />
           <span>知识图谱</span>
-          <span className="hidden text-muted-foreground sm:inline">案件 {caseId}</span>
+          <span className="hidden text-muted-foreground sm:inline">年审项目 {caseId}</span>
         </div>
         {center !== undefined && (
           <>
@@ -425,7 +425,7 @@ function EntityPicker({ entities, isLoading, onPick }: EntityPickerProps) {
   if (entities.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        该案件暂无可展示的实体
+        该年审项目暂无可展示的实体
       </div>
     );
   }

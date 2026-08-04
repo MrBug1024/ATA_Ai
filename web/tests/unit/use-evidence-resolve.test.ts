@@ -8,7 +8,7 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 // Stub env so langgraphUrl resolves to http://test
-vi.stubEnv("NEXT_PUBLIC_LANGGRAPH_API_BASE_URL", "http://test");
+vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://test");
 
 beforeEach(() => { mockFetch.mockReset(); });
 

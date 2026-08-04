@@ -29,7 +29,7 @@ vi.mock("sonner", () => ({
 const mockEvent: CaseMaterialEventItem = {
   material_event_id: "m1",
   case_id: 116,
-  debtor_id: 1,
+  entity_id: 1,
   upload_batch_id: "b1",
   event_type: "supplement_upload",
   status: "completed",
@@ -75,7 +75,33 @@ describe("MaterialEventTimeline", () => {
   it("shows empty state when no events", async () => {
     const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
     render(<MaterialEventTimeline events={[]} isLoading={false} />);
-    expect(screen.getByText(/暂无材料事件/)).toBeTruthy();
+    expect(screen.getByText(/暂无资料处理记录/)).toBeTruthy();
+  });
+
+  it("shows the load error instead of a false empty state", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    render(
+      <MaterialEventTimeline events={[]} isLoading={false} error="后端暂时不可用" />
+    );
+    expect(screen.getByText("资料处理记录加载失败")).toBeTruthy();
+    expect(screen.getByText("后端暂时不可用")).toBeTruthy();
+    expect(screen.queryByText(/暂无资料处理记录/)).toBeNull();
+  });
+
+  it("shows the persisted parse summary", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    render(
+      <MaterialEventTimeline
+        events={[
+          {
+            ...mockEvent,
+            event_payload: { parse_summary: "本地完整读取 296 个工作表" },
+          },
+        ]}
+        isLoading={false}
+      />
+    );
+    expect(screen.getByText("本地完整读取 296 个工作表")).toBeTruthy();
   });
 
   it("shows loading state", async () => {
@@ -90,6 +116,19 @@ describe("MaterialEventTimeline", () => {
     render(<MaterialEventTimeline events={[failedEvent]} isLoading={false} />);
     fireEvent.click(screen.getByRole("button", { name: "查看错误" }));
     expect(screen.getByText("OCR超时")).toBeTruthy();
+  });
+
+  it("failed status overrides an in-progress stage label", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    const failedEvent: CaseMaterialEventItem = {
+      ...mockEvent,
+      status: "failed",
+      stage: "ocr_running",
+      error_message: "OCR超时",
+    };
+    render(<MaterialEventTimeline events={[failedEvent]} isLoading={false} />);
+    expect(screen.getByText("失败")).toBeTruthy();
+    expect(screen.queryByText("OCR进行中")).toBeNull();
   });
 
   it("only offers retry for failed events and refreshes after acceptance", async () => {

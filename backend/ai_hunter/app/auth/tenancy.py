@@ -1,8 +1,4 @@
-"""Tenant and object-level access control for v2-B.
-
-This module is intentionally independent from route wiring.  The shared DDL
-must be applied before routes start enforcing these checks in production.
-"""
+"""Tenant and engagement-level access control for annual audits."""
 
 from __future__ import annotations
 
@@ -107,34 +103,16 @@ class TenancyService:
     def get_case_access_record(self, identity: Identity, case_id: int) -> CaseAccessRecord | None:
         if int(case_id or 0) <= 0:
             return None
-        with self.connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    c.case_id,
-                    c.company_id,
-                    c.owner_id,
-                    EXISTS (
-                        SELECT 1
-                        FROM public.case_member cm
-                        WHERE cm.case_id = c.case_id
-                          AND cm.company_id = c.company_id
-                          AND cm.user_id = %s
-                          AND cm.status = 'active'
-                    ) AS is_member
-                FROM public.cases c
-                WHERE c.case_id = %s
-                """,
-                (identity.user_id or "", case_id),
-            )
-            row = cur.fetchone()
+        from ai_hunter.annual_audit.access_control import get_engagement_access_record
+
+        row = get_engagement_access_record(identity, case_id)
         if not row:
             return None
         return CaseAccessRecord(
             case_id=int(row["case_id"]),
-            company_id=str(row["company_id"] or ""),
-            owner_id=str(row["owner_id"] or ""),
-            is_member=bool(row["is_member"]),
+            company_id=str(row.get("company_id") or ""),
+            owner_id=str(row.get("owner_id") or ""),
+            is_member=bool(row.get("is_member")),
         )
 
     def can_access_case(self, identity: Identity, case_id: int) -> bool:
@@ -192,7 +170,7 @@ class TenancyService:
         existing = self.get_thread_access_record(tid)
         if existing is not None:
             if requested_case_id > 0 and existing.case_id not in (None, requested_case_id):
-                raise HTTPException(status_code=409, detail="会话已绑定其他案件，不能重新绑定")
+                raise HTTPException(status_code=409, detail="会话已绑定其他年审项目，不能重新绑定")
             if not self.can_manage_thread(identity, tid):
                 raise HTTPException(status_code=403, detail="无权限继续运行该会话")
             if requested_case_id > 0 and existing.case_id is None:
@@ -205,7 +183,7 @@ class TenancyService:
         if requested_case_id > 0:
             case_record = self.get_case_access_record(identity, requested_case_id)
             if not can_access_case_record(identity, case_record):
-                raise HTTPException(status_code=403, detail="无权限访问该案件")
+                raise HTTPException(status_code=403, detail="无权限访问该年审项目")
         if not identity.user_id:
             raise HTTPException(status_code=403, detail="当前身份缺少 user_id，不能创建会话")
         if not identity.company_id and not identity.is_super_admin:
@@ -232,7 +210,7 @@ class TenancyService:
         if created is None:
             raise HTTPException(status_code=503, detail="会话租户信息写入失败")
         if requested_case_id > 0 and created.case_id != requested_case_id:
-            raise HTTPException(status_code=409, detail="会话已绑定其他案件，不能重新绑定")
+            raise HTTPException(status_code=409, detail="会话已绑定其他年审项目，不能重新绑定")
         created_case = self.get_case_access_record(identity, created.case_id) if created.case_id else None
         if not can_manage_thread_record(identity, created, case_record=created_case):
             raise HTTPException(status_code=403, detail="无权限继续运行该会话")
@@ -243,15 +221,15 @@ class TenancyService:
         tid = str(thread_id or "").strip()
         target_case_id = int(case_id or 0)
         if not tid or target_case_id <= 0:
-            raise HTTPException(status_code=400, detail="会话和案件编号必须有效")
+            raise HTTPException(status_code=400, detail="会话和年审项目编号必须有效")
         existing = self.get_thread_access_record(tid)
         if existing is None or not can_manage_thread_record(identity, existing):
             raise HTTPException(status_code=403, detail="无权限绑定该会话")
         if existing.case_id not in (None, target_case_id):
-            raise HTTPException(status_code=409, detail="会话已绑定其他案件，不能重新绑定")
+            raise HTTPException(status_code=409, detail="会话已绑定其他年审项目，不能重新绑定")
         case_record = self.get_case_access_record(identity, target_case_id)
         if not can_access_case_record(identity, case_record):
-            raise HTTPException(status_code=403, detail="无权限绑定新建案件")
+            raise HTTPException(status_code=403, detail="无权限绑定新建年审项目")
         if existing.case_id is None:
             with self.connect() as conn, conn.cursor() as cur:
                 cur.execute(
@@ -265,7 +243,7 @@ class TenancyService:
                 conn.commit()
         bound = self.get_thread_access_record(tid)
         if bound is None or bound.case_id != target_case_id:
-            raise HTTPException(status_code=409, detail="会话案件绑定失败")
+            raise HTTPException(status_code=409, detail="会话年审项目绑定失败")
         return bound
 
     def update_thread_metadata(self, thread_id: str, *, last_intent: str = "", title: str = "") -> None:
@@ -284,42 +262,34 @@ class TenancyService:
             conn.commit()
 
     def list_accessible_thread_ids(self, identity: Identity, *, case_id: int | None = None) -> list[str]:
-        """Return active thread ids visible to identity under the shared case ACL."""
-        params: list[object] = []
-        clauses = ["tm.status = 'active'"]
-        if case_id is not None:
-            clauses.append("tm.case_id = %s")
-            params.append(case_id)
+        """Return active thread ids visible under the annual engagement ACL."""
+        from ai_hunter.annual_audit.access_control import list_accessible_engagement_ids
 
+        accessible_ids = list_accessible_engagement_ids(identity)
+        if case_id is not None:
+            accessible_ids = [item for item in accessible_ids if item == case_id]
+        params: list[object] = []
+        clauses = ["status = 'active'"]
         if not identity.is_super_admin:
-            clauses.append("tm.company_id = %s")
+            clauses.append("company_id = %s")
             params.append(identity.company_id)
             if not identity.is_company_admin:
-                clauses.append(
-                    """
-                    (
-                        tm.created_by = %s
-                        OR c.owner_id = %s
-                        OR EXISTS (
-                            SELECT 1 FROM public.case_member cm
-                            WHERE cm.case_id = tm.case_id
-                              AND cm.company_id = tm.company_id
-                              AND cm.user_id = %s
-                              AND cm.status = 'active'
-                        )
-                    )
-                    """
-                )
-                params.extend([identity.user_id, identity.user_id, identity.user_id])
-
+                if accessible_ids:
+                    placeholders = ", ".join(["%s"] * len(accessible_ids))
+                    clauses.append(f"(created_by = %s OR case_id IN ({placeholders}))")
+                    params.extend([identity.user_id, *accessible_ids])
+                else:
+                    clauses.append("created_by = %s")
+                    params.append(identity.user_id)
+        if case_id is not None:
+            clauses.append("case_id = %s")
+            params.append(case_id)
         with self.connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT tm.thread_id
-                FROM public.thread_metadata tm
-                LEFT JOIN public.cases c ON c.case_id = tm.case_id
+                SELECT thread_id FROM public.thread_metadata
                 WHERE {' AND '.join(clauses)}
-                ORDER BY tm.updated_at DESC, tm.thread_id
+                ORDER BY updated_at DESC, thread_id
                 """,
                 params,
             )
@@ -330,8 +300,7 @@ def _raise_tenancy_unavailable(exc: Exception) -> None:
     raise HTTPException(
         status_code=503,
         detail=(
-            "租户隔离数据表尚不可用，请先执行 v2-B 共享 DDL："
-            "sql/auth_v2_tenancy_shared.sql"
+            "年度审计租户数据表尚不可用，请初始化 deploy/annual-audit 本地存储。"
         ),
     ) from exc
 
@@ -350,7 +319,7 @@ def require_case_access(case_id: int, identity: Identity = Depends(get_current_i
     except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
         _raise_tenancy_unavailable(exc)
     if not allowed:
-        raise HTTPException(status_code=403, detail="无权限访问该案件")
+        raise HTTPException(status_code=403, detail="无权限访问该年审项目")
     return identity
 
 

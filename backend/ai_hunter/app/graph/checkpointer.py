@@ -114,7 +114,11 @@ async def get_async_checkpointer():
                         "prepare_threshold": 0,
                     },
                 )
-                await _ASYNC_POOL.open()
+                # ``open()`` starts background workers but does not wait for a
+                # usable connection by default.  Waiting here makes event-loop
+                # or DSN failures visible during initialization instead of
+                # surfacing later as a misleading 30-second getconn timeout.
+                await _ASYNC_POOL.open(wait=True)
                 saver = AsyncPostgresSaver(_ASYNC_POOL)
                 if settings.langgraph_checkpointer_auto_setup:
                     await saver.setup()

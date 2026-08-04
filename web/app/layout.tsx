@@ -4,8 +4,8 @@ import { Providers } from "./providers";
 import { AuthGuard } from "@/components/auth/auth-guard";
 
 export const metadata: Metadata = {
-  title: "AI Hunter",
-  description: "AI 文档分析与对话平台",
+  title: "AI 会计师",
+  description: "年度财务报表审计智能工作平台",
 };
 
 export default function RootLayout({

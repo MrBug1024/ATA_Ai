@@ -1,4 +1,4 @@
-"""Registry-driven business-line graphs with phased executor migration."""
+"""Registry-driven annual-audit business-line graphs."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from .business_line_executors import (
 
 
 INVALID_ROUTE = "__invalid__"
-BUSINESS_LINE_PHASE = "2.5.4"
+EXECUTION_VERSION = "annual-audit-v1"
 
 
 def _read_route_decision(state: AuditGraphState) -> dict:
@@ -59,13 +59,12 @@ def _plan_node(business_line: BusinessLine, capability: str) -> Callable[[AuditG
     def plan(_state: AuditGraphState) -> dict:
         return {
             "business_line_plan": {
-                "phase": BUSINESS_LINE_PHASE,
+                "execution_version": EXECUTION_VERSION,
                 "business_line": business_line,
                 "capability": capability,
                 "capability_node": capability_node_name(capability),
-                "planned_executor": spec.executor,
+                "planned_executor": spec.business_line_executor or "clarify_route",
                 "access_mode": spec.access_mode,
-                "shadow_only": True,
                 "business_logic_executed": False,
             }
         }
@@ -77,10 +76,9 @@ def _invalid_route_node(state: AuditGraphState) -> dict:
     decision = _read_route_decision(state)
     return {
         "business_line_plan": {
-            "phase": BUSINESS_LINE_PHASE,
+            "execution_version": EXECUTION_VERSION,
             "business_line": str(decision.get("business_line") or ""),
             "capability": str(decision.get("capability") or ""),
-            "shadow_only": True,
             "business_logic_executed": False,
             "error": "capability does not belong to this business line",
         }
@@ -104,7 +102,7 @@ def _record_execution_node(business_line: BusinessLine, capability: str) -> Call
         existing = state.get("business_line_result") or {}
         result = dict(existing) if isinstance(existing, dict) else {}
         if "ok" not in result:
-            if capability in {"audit.full", "audit.reaudit", "recovery.review"}:
+            if capability in {"audit.full", "audit.reaudit"}:
                 result["ok"] = bool(
                     state.get("final_report_ref")
                     or state.get("final_report_summary")
@@ -114,7 +112,7 @@ def _record_execution_node(business_line: BusinessLine, capability: str) -> Call
                 result["ok"] = bool(state.get("agent_output"))
         result = {
             **result,
-            "phase": BUSINESS_LINE_PHASE,
+            "execution_version": EXECUTION_VERSION,
             "business_line": business_line,
             "capability": capability,
             "executor": spec.business_line_executor,
@@ -129,7 +127,7 @@ def _record_execution_node(business_line: BusinessLine, capability: str) -> Call
             or ""
         )[:600]
         context = {
-            "phase": BUSINESS_LINE_PHASE,
+            "execution_version": EXECUTION_VERSION,
             "business_line": business_line,
             "capability": capability,
             "executor": spec.business_line_executor,

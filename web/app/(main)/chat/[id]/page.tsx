@@ -145,7 +145,7 @@ export default function ChatDetailPage({ params }: ChatDetailPageProps) {
 
   const attachmentDisabled = caseId == null;
   const attachmentDisabledReason = attachmentDisabled
-    ? "需从案件页进入对话才能上传文件"
+    ? "需先选择年审项目才能上传文件"
     : undefined;
 
   return (

@@ -41,9 +41,9 @@ export default function LoginPage() {
             A
           </div>
           <h1 className="text-base font-semibold tracking-tight text-foreground">
-            AI Hunter
+            AI 会计师
           </h1>
-          <p className="mt-1 text-xs text-muted-foreground">AI 文档分析与对话平台</p>
+          <p className="mt-1 text-xs text-muted-foreground">年度财务报表审计智能工作平台</p>
         </div>
 
         <Card className="border-border/50 bg-card/60 shadow-xl shadow-black/20 backdrop-blur-sm">

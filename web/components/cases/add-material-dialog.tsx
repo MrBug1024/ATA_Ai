@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -52,7 +53,17 @@ interface Props {
 
 export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
   const [flow, dispatch] = useReducer(flowReducer, initialFlowState);
-  const { step, files, selectedCategory, batchName, validationResult, materialEventId, uploadResult, uploadBatchId } = flow;
+  const {
+    step,
+    files,
+    selectedCategory,
+    batchName,
+    validationResult,
+    materialEventId,
+    uploadResult,
+    uploadBatchId,
+    failureMessage,
+  } = flow;
   const inputRef = useRef<HTMLInputElement>(null);
   const currentTaskIdRef = useRef<string | null>(null);
 
@@ -83,7 +94,10 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
         });
       }
     } else if (materialEvent.status === "failed") {
-      dispatch({ type: "PROCESSING_FAILED" });
+      dispatch({
+        type: "PROCESSING_FAILED",
+        message: materialEvent.error_message || "材料解析失败，请重试。",
+      });
       if (currentTaskIdRef.current) {
         updateTask(currentTaskIdRef.current, {
           status: "failed",
@@ -106,6 +120,10 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
     caseDocCategories?.categories.forEach((c) => map.set(c.code, c));
     return map;
   }, [caseDocCategories]);
+  const uploadedCategoryCount = useMemo(
+    () => categories.filter((category) => categoryMap.get(category.code)?.uploaded).length,
+    [categories, categoryMap]
+  );
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = Array.from(e.target.files ?? []);
@@ -216,8 +234,9 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
         toast.warning("上传已受理，但后端未返回材料事件 ID，无法自动跟踪处理状态");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "上传失败");
-      dispatch({ type: "UPLOAD_FAILED" });
+      const message = err instanceof Error ? err.message : "上传失败";
+      toast.error(message);
+      dispatch({ type: "UPLOAD_FAILED", message });
       updateTask(taskId, { status: "failed" });
     }
   };
@@ -229,16 +248,23 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle className="text-base">上传卷宗</DialogTitle>
-          <p className="text-xs text-muted-foreground">
-            案件 <span className="font-mono">#{caseItem.case_id}</span>{" "}
+          <DialogTitle className="text-base">上传年审资料</DialogTitle>
+          <DialogDescription className="text-xs text-muted-foreground">
+            年审项目 <span className="font-mono">#{caseItem.case_id}</span>{" "}
             <span className="truncate">{caseItem.case_name}</span>
-          </p>
+          </DialogDescription>
         </DialogHeader>
 
         {/* Coverage Grid */}
         <div className="flex flex-col gap-2">
-          <p className="text-xs font-medium text-muted-foreground">卷宗覆盖情况</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs font-medium text-muted-foreground">审计资料覆盖情况</p>
+            {!isLoading && (
+              <p className="text-[10px] text-muted-foreground">
+                已有 {uploadedCategoryCount} 类 · 缺失 {Math.max(categories.length - uploadedCategoryCount, 0)} 类
+              </p>
+            )}
+          </div>
           {isLoading ? (
             <div className="flex items-center justify-center py-4">
               <Loader2 className="size-4 animate-spin text-muted-foreground/30" />
@@ -276,7 +302,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
 
         {/* Category Select */}
         <div className="flex flex-col gap-2">
-          <label className="text-xs font-medium text-muted-foreground">卷宗类别</label>
+          <label className="text-xs font-medium text-muted-foreground">资料类别</label>
           <Select
             value={selectedCategory}
             onValueChange={(code) => {
@@ -286,7 +312,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
             disabled={categoriesLoading}
           >
             <SelectTrigger className="w-full">
-              <SelectValue placeholder="选择卷宗类别" />
+              <SelectValue placeholder="选择年审资料类别" />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
@@ -459,7 +485,9 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
               <AlertTriangle className="size-4" />
               <span className="font-medium">上传失败</span>
             </div>
-            <p className="text-red-600/80">请检查网络后重试</p>
+            <p className="break-words text-red-600/80">
+              {failureMessage || "材料解析失败，请重试。"}
+            </p>
           </div>
         )}
 

@@ -1,1 +1,1 @@
-"""AI Hunter unified AI orchestration and NPA domain backend."""
+"""Unified annual-audit AI orchestration backend."""
