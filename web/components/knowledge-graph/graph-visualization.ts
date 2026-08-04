@@ -86,6 +86,17 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   public_security: "公安机关",
 };
 
+const LEGACY_NPA_ENTITY_TYPES = new Set([
+  "mine",
+  "mine_right",
+  "mining_right",
+  "court",
+  "procuratorate",
+  "public_security",
+  "law_firm",
+  "legal_provision",
+]);
+
 function compareText(left: string, right: string): number {
   if (left < right) return -1;
   if (left > right) return 1;
@@ -158,6 +169,7 @@ export function truncateGraphLabel(value: unknown, maxLength: number): string {
 /** 后端 entity_type 可能中英混用；已知英文类型本地化，其余做稳定格式化。 */
 export function graphEntityTypeLabel(entityType: unknown): string {
   const normalized = normalizeEntityType(entityType);
+  if (LEGACY_NPA_ENTITY_TYPES.has(normalized)) return "审计资料";
   if (!normalized || normalized === "unknown") return "未分类";
   const localized = ENTITY_TYPE_LABELS[normalized];
   if (localized) return localized;

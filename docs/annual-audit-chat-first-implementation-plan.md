@@ -33,11 +33,11 @@
 | 存储 | 本地地址 | 职责 |
 |---|---|---|
 | PostgreSQL | `127.0.0.1:55432/ata_agent_platform` | 会话、checkpoint、身份权限、证据、关系图谱 |
-| MySQL | `127.0.0.1:53306/ata_agent` | 年审项目、财务结构化数据、发现、底稿、报告、任务 |
+| MySQL | `127.0.0.1:53306/ata_ai` | 年审项目、财务结构化数据、发现、底稿、报告、任务 |
 | Redis | `127.0.0.1:56379` | 大对象缓存和任务状态 |
 | MinIO | `127.0.0.1:61000` | 原始资料、解析产物、报告文件 |
 
-四类存储均使用 `ata-agent-local` Docker Compose 和独立命名卷。配置层固定年度审计业务域、MySQL 数据库名和后端端口，拒绝回退到其他项目数据库。
+四类存储均使用 `ata-annual-audit-local` Docker Compose 和独立命名卷。配置层固定年度审计业务域、MySQL 数据库名和后端端口，拒绝回退到其他项目数据库。
 
 ## 单服务接口
 
@@ -84,5 +84,5 @@
 - OpenAPI 不暴露历史业务专属路由。
 - 代码、提示词、测试样本和运行文档不包含历史业务数据。
 - 所有浏览器请求只指向 `localhost:8080`。
-- 年审数据只写入 `ata_agent_platform`、`ata_agent`、年度 Redis 命名空间和年度 MinIO bucket。
+- 年审数据只写入 `ata_agent_platform` 平台库、`ata_ai` 年审事务库、年度 Redis 命名空间和年度 MinIO bucket。
 - 年度审计主链路具备自动化测试，并完成浏览器端到端回归。

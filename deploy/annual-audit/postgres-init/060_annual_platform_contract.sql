@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS public.thread_metadata (
 COMMENT ON TABLE public.thread_metadata IS
 '年审 LangGraph 会话权限入口；case_id 表示 MySQL audit_engagement.id。';
 COMMENT ON COLUMN public.thread_metadata.case_id IS
-'年审项目兼容 ID，权威项目与成员关系存储于 MySQL ata_agent。';
+'年审项目兼容 ID，权威项目与成员关系存储于 MySQL ata_ai。';
 
 CREATE INDEX IF NOT EXISTS idx_thread_metadata_company_created
     ON public.thread_metadata(company_id, created_at DESC);

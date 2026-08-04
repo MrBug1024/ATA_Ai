@@ -1,7 +1,5 @@
 -- AI 会计师·年审智能体 MySQL V1 基础数据模型
 -- Target database is deliberately fixed to the isolated annual-audit database.
-USE `ata_agent`;
-
 CREATE TABLE IF NOT EXISTS `ata_schema_migration` (
   `version` VARCHAR(64) NOT NULL,
   `description` VARCHAR(255) NOT NULL,

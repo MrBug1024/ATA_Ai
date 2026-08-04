@@ -1,13 +1,13 @@
-name: ata-agent-local
+name: ata-annual-audit-local
 
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: ata-agent-postgres
+    container_name: ata-annual-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${ANNUAL_POSTGRES_DATABASE:-ata_agent_platform}
-      POSTGRES_USER: ${ANNUAL_POSTGRES_USER:-ata_agent_app}
+      POSTGRES_USER: ${ANNUAL_POSTGRES_USER:-ata_annual_app}
       POSTGRES_PASSWORD: ${ANNUAL_POSTGRES_PASSWORD:?ANNUAL_POSTGRES_PASSWORD is required}
       TZ: Asia/Shanghai
       PGTZ: Asia/Shanghai
@@ -38,11 +38,11 @@ services:
 
   mysql:
     image: mysql:8.4
-    container_name: ata-agent-mysql
+    container_name: ata-annual-mysql
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${ANNUAL_MYSQL_DATABASE:-ata_agent}
-      MYSQL_USER: ${ANNUAL_MYSQL_USER:-ata_agent_app}
+      MYSQL_DATABASE: ${ANNUAL_MYSQL_DATABASE:-ata_ai}
+      MYSQL_USER: ${ANNUAL_MYSQL_USER:-ata_ai_app}
       MYSQL_PASSWORD: ${ANNUAL_MYSQL_PASSWORD:?ANNUAL_MYSQL_PASSWORD is required}
       MYSQL_ROOT_PASSWORD: ${ANNUAL_MYSQL_ROOT_PASSWORD:?ANNUAL_MYSQL_ROOT_PASSWORD is required}
       TZ: Asia/Shanghai
@@ -59,7 +59,9 @@ services:
       - ../../backend/sql/annual_audit_mysql_v4.sql:/docker-entrypoint-initdb.d/004_remove_mysql_source_graph_tables.sql:ro
       - ../../backend/sql/annual_audit_mysql_v5.sql:/docker-entrypoint-initdb.d/005_structured_annual_data.sql:ro
       - ../../backend/sql/annual_audit_mysql_v6.sql:/docker-entrypoint-initdb.d/006_annual_tasks.sql:ro
-      - ./mysql-init/006_record_migrations.sql:/docker-entrypoint-initdb.d/007_record_migrations.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v7.sql:/docker-entrypoint-initdb.d/007_evidence_bindings.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v8.sql:/docker-entrypoint-initdb.d/008_artifact_refs.sql:ro
+      - ./mysql-init/009_record_migrations.sql:/docker-entrypoint-initdb.d/009_record_migrations.sql:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -71,7 +73,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    container_name: ata-agent-redis
+    container_name: ata-annual-redis
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${ANNUAL_REDIS_PASSWORD:?ANNUAL_REDIS_PASSWORD is required}
@@ -97,7 +99,7 @@ services:
 
   minio:
     image: quay.io/minio/minio:latest
-    container_name: ata-agent-minio
+    container_name: ata-annual-minio
     restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${ANNUAL_MINIO_ACCESS_KEY:?ANNUAL_MINIO_ACCESS_KEY is required}
@@ -124,7 +126,7 @@ services:
 
   minio-init:
     image: quay.io/minio/mc:latest
-    container_name: ata-agent-minio-init
+    container_name: ata-annual-minio-init
     restart: "no"
     depends_on:
       minio:
@@ -146,10 +148,10 @@ services:
 
 volumes:
   annual_postgres_data:
-    name: ata-agent-postgres-data
+    name: ata-annual-postgres-data
   annual_mysql_data:
-    name: ata-agent-mysql-data
+    name: ata-annual-mysql-data
   annual_redis_data:
-    name: ata-agent-redis-data
+    name: ata-annual-redis-data
   annual_minio_data:
-    name: ata-agent-minio-data
+    name: ata-annual-minio-data

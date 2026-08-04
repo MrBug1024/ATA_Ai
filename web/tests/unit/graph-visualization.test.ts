@@ -207,7 +207,7 @@ describe("graph label helpers", () => {
   });
 
   it("本地化已知类型并规范化未知英文类型", () => {
-    expect(graphEntityTypeLabel("law-firm")).toBe("律师事务所");
+    expect(graphEntityTypeLabel("law-firm")).toBe("审计资料");
     expect(graphEntityTypeLabel("Custom Entity")).toBe("custom entity");
     expect(graphEntityTypeLabel("未知类型")).toBe("未知类型");
     expect(graphEntityTypeLabel(undefined)).toBe("未分类");

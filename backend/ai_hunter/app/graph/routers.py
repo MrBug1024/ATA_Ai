@@ -218,8 +218,6 @@ def _rule_route(state: AuditGraphState) -> RouteDecisionModel | None:
     case_id = extract_case_id(query) or _positive_case_id(state.get("current_case_id"))
     explicit_write = explicit_write_capability(state)
 
-    if state.get("uploaded_files"):
-        return _decision("operator", "material.upload", confidence=1.0, source="context", case_id=case_id, action="upload")
     if explicit_write == "case.create":
         return _case_create_decision(state, source="context")
     if explicit_write == "material.upload":
@@ -243,6 +241,8 @@ def _rule_route(state: AuditGraphState) -> RouteDecisionModel | None:
         return _decision("audit_analysis", "audit.reaudit", confidence=0.99, source="rule", case_id=case_id, action="reaudit")
     if any(keyword in query for keyword in FULL_AUDIT_KEYWORDS):
         return _decision("audit_analysis", "audit.full", confidence=0.99, source="rule", case_id=case_id, action="generate")
+    if state.get("uploaded_files"):
+        return _decision("operator", "material.upload", confidence=1.0, source="context", case_id=case_id, action="upload")
     for action, phrases in TASK_WRITE_ACTIONS.items():
         if any(phrase in query for phrase in phrases):
             return _task_write_decision(state, action=action, source="rule")

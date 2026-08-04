@@ -3,7 +3,7 @@
 该目录为年审项目提供完全独立的本地开发存储：
 
 - PostgreSQL + pgvector：`127.0.0.1:55432/ata_agent_platform`，承载会话、权限、LangGraph、heavy payload、证据和知识图谱能力。
-- MySQL：`127.0.0.1:53306/ata_agent`，只承载年审项目和结构化财务明细、分析、底稿、报告版本。
+- MySQL：`127.0.0.1:53306/ata_ai`，只承载年审项目和结构化财务明细、分析、底稿、报告版本。
 - Redis：`127.0.0.1:56379`，作为可选热点缓存；持久化事实仍在 PostgreSQL/MySQL。
 - MinIO：API `127.0.0.1:61000`、控制台 `127.0.0.1:61001`，独立保存原始资料、派生文件和报告附件。
 
@@ -42,9 +42,9 @@ powershell -ExecutionPolicy Bypass -File scripts/annual-audit-local.ps1 down
 
 ## 数据卷
 
-- `ata-agent-postgres-data`
-- `ata-agent-mysql-data`
-- `ata-agent-redis-data`
-- `ata-agent-minio-data`
+- `ata-annual-postgres-data`
+- `ata-annual-mysql-data`
+- `ata-annual-redis-data`
+- `ata-annual-minio-data`
 
 `down` 不删除数据卷。删除卷会永久清空本地年审数据，必须在确认备份和目标卷名后单独执行。

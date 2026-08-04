@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from ...platform_core import scoped_object_key, validate_domain
 from ..settings import get_settings
 
 
@@ -38,11 +39,19 @@ class MinioService:
             from minio import Minio
         except ModuleNotFoundError as exc:
             raise RuntimeError("minio package is not installed") from exc
+        endpoint_text = settings.ai_hunter_minio_endpoint.strip().rstrip("/")
+        endpoint_parts = urlsplit(
+            endpoint_text if "://" in endpoint_text else f"//{endpoint_text}"
+        )
+        endpoint = endpoint_parts.netloc or endpoint_parts.path
+        secure = settings.ai_hunter_minio_use_ssl or endpoint_parts.scheme.lower() == "https"
+        if not endpoint:
+            raise RuntimeError("AI Hunter MinIO endpoint is not configured")
         self.client = Minio(
-            settings.ai_hunter_minio_endpoint,
+            endpoint,
             access_key=settings.ai_hunter_minio_access_key,
             secret_key=settings.ai_hunter_minio_secret_key,
-            secure=settings.ai_hunter_minio_use_ssl,
+            secure=secure,
         )
 
     def upload_raw_file(
@@ -56,6 +65,7 @@ class MinioService:
         entity_name: str = "",
     ) -> MinioUploadResult:
         """Upload one raw case file to the configured raw bucket."""
+        settings = get_settings()
         if not self.enabled:
             raise RuntimeError("AI Hunter MinIO is disabled")
         if not self.bucket_raw:
@@ -66,7 +76,9 @@ class MinioService:
             entity_id=entity_id,
             file_name=file_name,
             entity_name=entity_name,
+            settings=settings,
         )
+        self._ensure_bucket(self.bucket_raw)
         result = self.client.put_object(
             self.bucket_raw,
             object_key,
@@ -81,6 +93,51 @@ class MinioService:
             storage_etag=result.etag or "",
             storage_version=result.version_id or "",
         )
+
+    def upload_artifact(
+        self,
+        *,
+        project_id: int,
+        file_name: str,
+        content_type: str,
+        file_bytes: bytes,
+    ) -> MinioUploadResult:
+        """Upload a generated annual-audit artifact into the isolated bucket."""
+
+        if not self.enabled:
+            raise RuntimeError("AI Hunter MinIO is disabled")
+        if not self.bucket_artifacts:
+            raise RuntimeError("AI Hunter MinIO artifact bucket is not configured")
+        object_key = scoped_object_key(
+            get_settings(),
+            project_id=project_id,
+            category="artifacts",
+            parts=(Path(file_name).name,),
+        )
+        self._ensure_bucket(self.bucket_artifacts)
+        result = self.client.put_object(
+            self.bucket_artifacts,
+            object_key,
+            data=BytesIO(file_bytes),
+            length=len(file_bytes),
+            content_type=content_type or "application/octet-stream",
+        )
+        return MinioUploadResult(
+            storage_provider="minio",
+            storage_bucket=self.bucket_artifacts,
+            storage_key=object_key,
+            storage_etag=result.etag or "",
+            storage_version=result.version_id or "",
+        )
+
+    def _ensure_bucket(self, bucket: str) -> None:
+        """Create the configured bucket when an online project is bootstrapped."""
+
+        try:
+            if not self.client.bucket_exists(bucket):
+                self.client.make_bucket(bucket)
+        except Exception as exc:
+            raise RuntimeError(f"MinIO bucket is not available: {bucket}") from exc
 
     def get_object_bytes(self, storage_ref: str) -> bytes:
         """Fetch raw object bytes by minio://bucket/key ref."""
@@ -128,6 +185,7 @@ def build_raw_object_key(
     entity_id: int,
     file_name: str,
     entity_name: str = "",
+    settings=None,
 ) -> str:
     """Build a stable raw-case-file object key.
 
@@ -142,6 +200,14 @@ def build_raw_object_key(
         entity_segment = f"entity-{quote(entity_name.strip(), safe='')}"
     else:
         entity_segment = "entity-unknown"
+    if settings is not None:
+        validate_domain(settings.business_domain, expected="annual_audit")
+        return scoped_object_key(
+            settings,
+            project_id=case_id,
+            category="raw",
+            parts=(entity_segment, encoded_name),
+        )
     return f"{case_segment}/{entity_segment}/raw/{encoded_name}"
 
 
@@ -169,11 +235,17 @@ def resolve_minio_reference_url(storage_ref: str) -> str:
         return normalized_ref
 
     settings = get_settings()
-    endpoint = settings.ai_hunter_minio_endpoint.strip().rstrip("/")
-    if not endpoint:
+    endpoint_text = settings.ai_hunter_minio_endpoint.strip().rstrip("/")
+    if not endpoint_text:
         return normalized_ref
 
-    scheme = "https" if settings.ai_hunter_minio_use_ssl else "http"
+    endpoint_parts = urlsplit(
+        endpoint_text if "://" in endpoint_text else f"//{endpoint_text}"
+    )
+    endpoint = endpoint_parts.netloc or endpoint_parts.path
+    scheme = endpoint_parts.scheme or ("https" if settings.ai_hunter_minio_use_ssl else "http")
+    if not endpoint:
+        return normalized_ref
     encoded_key = quote(object_key, safe="/")
     return f"{scheme}://{endpoint}/{bucket}/{encoded_key}"
 

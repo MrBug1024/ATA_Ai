@@ -11,7 +11,7 @@ from ...services.chunking import build_chunks_from_pages, build_page_records_fro
 from ...services.kg_service import get_kg_service
 from ...services.ocr_service import get_ocr_service
 from ..context_loader import resolve_ingest_payload
-from ..heavy_state import put_heavy_payload
+from ..heavy_state import get_heavy_payload, put_heavy_payload
 from ..state import AuditGraphState
 
 
@@ -158,6 +158,24 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         "upload_batch_summary": _merge_batch_summary(state.get("upload_batch_summary", {}), batch_row),
         "source_chunks": [],
     }
+
+
+def bind_annual_evidence_anchors(state: AuditGraphState) -> AuditGraphState:
+    """Connect structured annual rows to the source records just ingested."""
+
+    from ....annual_audit.import_service import bind_structured_source_refs
+
+    batch_ref = str(state.get("chunk_batch_ref") or "").strip()
+    if not batch_ref:
+        return {"annual_evidence_binding_summary": {"status": "no_chunk_batch"}}
+    payload = get_heavy_payload(batch_ref)
+    if not isinstance(payload, dict):
+        return {"annual_evidence_binding_summary": {"status": "chunk_batch_not_found"}}
+    result = bind_structured_source_refs(
+        engagement_id=int(state.get("current_case_id") or 0),
+        chunk_batch=payload,
+    )
+    return {"annual_evidence_binding_summary": result}
 
 
 def _persist_upload_batch_context(

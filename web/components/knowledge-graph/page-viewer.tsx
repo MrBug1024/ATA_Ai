@@ -30,12 +30,19 @@ interface PageViewerProps {
   selectedEvidence: EvidenceItem | null;
 }
 
-type RenderMode = "image" | "pdf" | "text" | "none";
+type RenderMode = "image" | "pdf" | "spreadsheet" | "text" | "none";
 
 function resolveMode(contentType: string | undefined, url: string | undefined, fileName: string): RenderMode {
   const mime = contentType ?? "";
   const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
   if (mime.startsWith("text/")) return "text";
+  if (
+    mime.includes("spreadsheet") ||
+    mime.includes("excel") ||
+    /^(xlsx?|xlsm|csv)$/.test(ext)
+  ) {
+    return "spreadsheet";
+  }
   if (mime === "application/pdf" || ext === "pdf") return url ? "pdf" : "none";
   if (mime.startsWith("image/") || /^(png|jpe?g|gif|webp|svg|bmp)$/.test(ext)) return url ? "image" : "none";
   return url ? "image" : "none";
@@ -79,6 +86,30 @@ function ZoomedPdfPage({ url, pageNumber, bboxes }: { url: string; pageNumber: n
   return (
     <div ref={ref} className="flex h-full items-start justify-center overflow-auto p-2">
       <PdfPageView url={url} pageNumber={pageNumber} height={Math.max(200, height - 16)} bboxes={bboxes} />
+    </div>
+  );
+}
+
+function SpreadsheetEvidenceView({ evidence, fileName }: { evidence: EvidenceItem | null; fileName: string }) {
+  return (
+    <div className="flex h-full w-full max-w-3xl flex-col gap-3 overflow-auto rounded-md border bg-background p-4 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b pb-3 text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">{fileName}</span>
+        {evidence?.sheet_name && <span>工作表：{evidence.sheet_name}</span>}
+        {(evidence?.row_start ?? 0) > 0 && (
+          <span>
+            行：{evidence?.row_start}
+            {evidence?.row_end && evidence.row_end !== evidence.row_start ? `-${evidence.row_end}` : ""}
+          </span>
+        )}
+        {evidence?.cell_range && <span>单元格：{evidence.cell_range}</span>}
+      </div>
+      <div className="whitespace-pre-wrap rounded bg-muted/30 p-3 font-mono text-xs leading-6">
+        {evidence?.quote_text || "当前表格定位暂无原文片段"}
+      </div>
+      <div className="text-xs text-muted-foreground">
+        这是按工作表、行和单元格定位的表格证据，不将 Excel 行号冒充 PDF 页码。
+      </div>
     </div>
   );
 }
@@ -161,6 +192,10 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
           </div>
         )}
 
+        {mode === "spreadsheet" && (
+          <SpreadsheetEvidenceView evidence={selectedEvidence} fileName={fileName} />
+        )}
+
         {mode === "none" && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <ImageOff className="h-5 w-5 opacity-50" />
@@ -206,7 +241,7 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
         )}
       </div>
 
-      {mode !== "text" && (
+      {mode !== "text" && mode !== "spreadsheet" && (
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <Button
             variant="ghost"

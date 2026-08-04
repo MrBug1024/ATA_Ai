@@ -26,4 +26,9 @@ def build_graph_summary(state: AuditGraphState) -> AuditGraphState:
             f" 本次增量对账软失效旧断言{len(superseded_claim_ids)}条，"
             f"旧关系{len(superseded_relation_ids)}条。"
         )
-    return {"kg_summary": summary}
+    return {
+        "kg_summary": summary,
+        # Preserve the source-anchor binding result when the knowledge-graph
+        # subgraph returns to the outer chat graph.
+        "annual_evidence_binding_summary": state.get("annual_evidence_binding_summary", {}),
+    }

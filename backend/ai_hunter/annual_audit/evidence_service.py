@@ -8,6 +8,7 @@ from typing import Any
 from ai_hunter.app.graph.context_loader import get_heavy_payload
 from ai_hunter.app.graph.heavy_state import put_heavy_payload
 from ai_hunter.app.settings import Settings, get_settings
+from ai_hunter.app.services.minio_service import resolve_minio_reference_url
 
 from .storage import mysql_connection
 
@@ -28,18 +29,38 @@ def _evidence_item(reference: dict[str, Any], ordinal: int) -> dict[str, Any] | 
     file_name = str(locator.get("file_name") or "年审结构化附件")
     sheet_name = str(locator.get("sheet_name") or "")
     display_name = f"{file_name} · {sheet_name}!{row_number}" if sheet_name else file_name
+    source_file_id = int(locator.get("source_file_id") or 0)
+    source_page_id = int(locator.get("source_page_id") or 0)
+    source_chunk_id = str(locator.get("source_chunk_id") or "")
+    bound_page_no = int(locator.get("page_no") or 0)
+    content_type = str(locator.get("content_type") or "")
+    source_file_ref = str(locator.get("source_file_ref") or "")
+    page_image_ref = str(locator.get("page_image_ref") or "")
+    row_start = int(locator.get("row_start") or row_number)
+    row_end = int(locator.get("row_end") or row_start)
+    locator_kind = str(locator.get("locator_kind") or ("sheet_row" if sheet_name else "unknown"))
     return {
-        "chunk_id": f"annual:{domain_row_type}:{domain_row_id}:{ordinal}",
-        "file_id": domain_row_id or ordinal,
+        # Do not fabricate an annual:* chunk ID.  Unbound legacy rows remain
+        # visible as unresolved evidence until the binding pass completes.
+        "chunk_id": source_chunk_id,
+        "file_id": source_file_id,
         "file_name": display_name,
-        "page_no": row_number,
+        "page_no": bound_page_no,
         "quote_text": str(locator.get("quote_text") or ""),
-        "bbox_list": [],
-        "page_image_ref": "",
-        "source_page_id": 0,
-        "source_file_url": "",
-        # The existing drawer intentionally uses quote_text-only mode for text/*.
-        "content_type": "text/plain",
+        "bbox_list": list(locator.get("bbox_list") or []),
+        "page_image_ref": resolve_minio_reference_url(page_image_ref),
+        "source_page_id": source_page_id,
+        "source_file_url": resolve_minio_reference_url(source_file_ref),
+        "content_type": content_type,
+        "locator_kind": locator_kind,
+        "sheet_name": sheet_name,
+        "row_start": row_start,
+        "row_end": row_end,
+        "cell_range": str(locator.get("cell_range") or ""),
+        "preview_ref": resolve_minio_reference_url(str(locator.get("preview_ref") or "")),
+        "preview_available": bool(locator.get("preview_available") or source_chunk_id),
+        "page_width": int(locator.get("page_width") or 0),
+        "page_height": int(locator.get("page_height") or 0),
         "entity_id": 0,
     }
 
@@ -206,11 +227,13 @@ def resolve_report_evidence(
         primary_page = {
             "file_id": int(primary.get("file_id") or 0),
             "page_no": int(primary.get("page_no") or 0),
-            "page_width": 0,
-            "page_height": 0,
-            "page_image_ref": "",
-            "source_file_url": "",
-            "content_type": "text/plain",
+            "page_width": int(primary.get("page_width") or 0),
+            "page_height": int(primary.get("page_height") or 0),
+            "page_image_ref": str(primary.get("page_image_ref") or ""),
+            "source_file_url": str(primary.get("source_file_url") or ""),
+            "content_type": str(primary.get("content_type") or ""),
+            "locator_kind": str(primary.get("locator_kind") or "unknown"),
+            "sheet_name": str(primary.get("sheet_name") or ""),
             "anchors": [primary],
         }
     return {

@@ -1,7 +1,5 @@
 -- Annual engagement fields required by the unchanged case API contract.
 -- Applied once and recorded as migration 002 by the migration runner.
-USE `ata_agent`;
-
 ALTER TABLE `audit_engagement`
   ADD COLUMN `engagement_type` VARCHAR(64) NOT NULL DEFAULT 'annual_financial_statement_audit' AFTER `name`,
   ADD COLUMN `entity_uscc` VARCHAR(32) NULL AFTER `entity_name`,

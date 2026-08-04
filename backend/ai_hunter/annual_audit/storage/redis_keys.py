@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ai_hunter.app.settings import Settings, get_settings
+from ai_hunter.platform_core import scoped_redis_key
 
 from .mysql import AnnualAuditStorageError
 
@@ -13,11 +14,10 @@ def annual_redis_key(*parts: object, settings: Settings | None = None) -> str:
         raise AnnualAuditStorageError(
             "annual-audit Redis access requires BUSINESS_DOMAIN=annual_audit"
         )
-    namespace = resolved.annual_redis_namespace.strip()
-    if not namespace.startswith("ata:") or not namespace.endswith(":"):
-        raise AnnualAuditStorageError("invalid annual-audit Redis namespace")
     normalized = [str(part).strip(":") for part in parts if str(part).strip(":")]
     if not normalized:
         raise ValueError("at least one Redis key part is required")
-    return namespace + ":".join(normalized)
-
+    try:
+        return scoped_redis_key(resolved, normalized[0], *normalized[1:])
+    except ValueError as exc:
+        raise AnnualAuditStorageError(str(exc)) from exc

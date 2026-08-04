@@ -4,7 +4,7 @@ from ai_hunter.app.settings import Settings
 def _settings(dsn: str) -> Settings:
     return Settings(
         _env_file=None,
-        annual_mysql_database="ata_agent",
+        annual_mysql_database="ata_ai",
         annual_postgres_database="ata_agent_platform",
         annual_postgres_dsn=dsn,
         annual_redis_password="",

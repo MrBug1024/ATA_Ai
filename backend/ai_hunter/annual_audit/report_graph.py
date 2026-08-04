@@ -30,12 +30,19 @@ def generate_annual_report_node(state: AuditGraphState) -> AuditGraphState:
     workpaper_versions = ", ".join(
         f"{item.get('code')} v{item.get('version')}" for item in workpapers
     )
+    artifact_status = str(artifacts.get("status") or "not_published")
+    task_result = artifacts.get("tasks") or {}
     artifact_note = (
         f"\n\n---\n已保存报告草稿 v{report.get('version', '-')}；"
         f"工作底稿版本：{workpaper_versions or '-'}。"
     )
+    artifact_note += (
+        f"\nartifact_status={artifact_status}; "
+        f"followup_tasks={int(task_result.get('created_count') or 0)}"
+    )
     return {
         "agent_output": str(result.get("report_text") or "") + artifact_note,
+        "artifacts": artifacts,
         "extracted_tasks": [],
     }
 

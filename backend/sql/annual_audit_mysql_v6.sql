@@ -1,6 +1,4 @@
 -- Annual engagement task management.
-USE `ata_agent`;
-
 CREATE TABLE IF NOT EXISTS `annual_task` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `engagement_id` BIGINT UNSIGNED NOT NULL,

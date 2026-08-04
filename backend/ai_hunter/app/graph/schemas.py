@@ -373,6 +373,17 @@ class EvidenceItemModel(BaseModel):
     entity_id: int = Field(default=0, description="该证据所属 claim 关联的实体 ID，可直接传给 /graph/subgraph 的 center_entity_id。")
 
 
+    locator_kind: str = Field(default="unknown", description="evidence locator kind")
+    sheet_name: str = Field(default="", description="spreadsheet sheet name")
+    row_start: int = Field(default=0, description="spreadsheet source row start")
+    row_end: int = Field(default=0, description="spreadsheet source row end")
+    cell_range: str = Field(default="", description="spreadsheet cell range")
+    preview_ref: str = Field(default="", description="derived preview reference")
+    preview_available: bool = Field(default=False, description="whether a page/table preview exists")
+    page_width: int = Field(default=0, description="source page width")
+    page_height: int = Field(default=0, description="source page height")
+
+
 class TraceItemModel(BaseModel):
     citation_id: str = Field(default="", description="报告内可点击的稳定引用 ID。")
     claim_id: int = Field(description="断言 ID。")
@@ -509,6 +520,8 @@ class CaseEntityListResponse(BaseModel):
 
 
 class PageAnchorsResponseModel(BaseModel):
+    locator_kind: str = Field(default="unknown", description="page locator kind")
+    sheet_name: str = Field(default="", description="spreadsheet sheet name")
     file_id: int = Field(description="文件 ID。")
     file_name: str = Field(default="", description="该文件的原始文件名，前端可直接用于『文件名 — 第 N 页』展示。")
     page_no: int = Field(description="页码。")

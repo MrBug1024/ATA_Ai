@@ -52,3 +52,4 @@ public/pdf.worker.min.mjs
 .serena/
 
 new_docs/
+.runtime/

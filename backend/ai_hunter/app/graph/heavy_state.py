@@ -11,6 +11,7 @@ import psycopg
 
 from ..settings import get_settings
 from .json_utils import json_dumps_safe, make_json_safe
+from ...platform_core import scoped_redis_key
 
 
 MAX_HEAVY_STATE_ITEMS = 256
@@ -27,7 +28,9 @@ def _get_redis_client():
     try:
         from redis import Redis
 
-        return Redis.from_url(settings.redis_url, decode_responses=True)
+        # The current online Redis is compatible with RESP2 but does not
+        # implement the RESP3 HELLO handshake used by newer redis-py defaults.
+        return Redis.from_url(settings.redis_url, decode_responses=True, protocol=2)
     except Exception as exc:
         _LOGGER.warning("Redis heavy-payload cache unavailable: %s", exc)
         return None
@@ -120,7 +123,7 @@ def _delete_postgres_payload(key: str) -> None:
 def put_heavy_payload(prefix: str, payload: object) -> str:
     """Store a large payload out of band and return its lightweight reference key."""
     settings = get_settings()
-    key = f"{prefix}:{uuid4().hex}"
+    key = scoped_redis_key(settings, "heavy", prefix, uuid4().hex)
     normalized_payload = make_json_safe(payload)
     _HEAVY_STATE[key] = normalized_payload
     _evict_if_needed()
@@ -139,6 +142,12 @@ def put_heavy_payload(prefix: str, payload: object) -> str:
 def get_heavy_payload(key: str | None) -> object | None:
     """Fetch a heavy payload with local-memory, Redis, then PostgreSQL fallback."""
     if not key:
+        return None
+
+    settings = get_settings()
+    if f":{settings.business_domain}:heavy:" not in str(key):
+        # Do not resolve a reference minted by another domain or by the
+        # legacy project, even when Redis/PostgreSQL is physically shared.
         return None
 
     payload = _HEAVY_STATE.get(key)
@@ -178,6 +187,9 @@ def get_heavy_payload(key: str | None) -> object | None:
 def clear_heavy_payload(key: str | None) -> None:
     """Delete one heavy payload from memory, Redis, and PostgreSQL."""
     if not key:
+        return
+    settings = get_settings()
+    if f":{settings.business_domain}:heavy:" not in str(key):
         return
     _HEAVY_STATE.pop(key, None)
     redis_client = _get_redis_client()

@@ -25,6 +25,7 @@ SPECIALIZED_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "graph_query_agent": (
         "get_annual_engagement",
         "get_annual_audit_context",
+        "search_annual_evidence",
     ),
 }
 

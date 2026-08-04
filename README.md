@@ -17,7 +17,7 @@ scripts/   本地环境管理脚本
 年度审计使用独立的本地存储：
 
 - PostgreSQL：`127.0.0.1:55432/ata_agent_platform`
-- MySQL：`127.0.0.1:53306/ata_agent`
+- MySQL：`127.0.0.1:53306/ata_ai`
 - Redis：`127.0.0.1:56379`
 - MinIO API：`127.0.0.1:61000`
 

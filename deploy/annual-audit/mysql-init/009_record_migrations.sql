@@ -1,5 +1,5 @@
 -- Docker entrypoint executes the reviewed SQL files directly instead of the
--- Python migration runner.  Record 002-008 only after all preceding scripts
+-- Python migration runner. Record all compatibility migrations after they
 -- have completed successfully.
 INSERT INTO `ata_schema_migration` (`version`, `description`) VALUES
   ('002', 'annual engagement compatibility and tenancy fields'),

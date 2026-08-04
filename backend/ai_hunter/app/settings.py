@@ -2,20 +2,45 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-ANNUAL_LOCAL_ENV = BACKEND_DIR.parent / "deploy" / "annual-audit" / ".env.local"
+
+# These names belong to the legacy projects and must never be selected by the
+# annual-audit service.  The active database name is supplied by backend/.env.
+ANNUAL_AUDIT_LEGACY_MYSQL_DATABASES = frozenset(
+    {
+        "ata_agent",
+        "ai_hunter",
+        "cpwsdata",
+        "npa",
+        "npa_lang",
+        "bad_assets",
+    }
+)
+ANNUAL_AUDIT_LEGACY_POSTGRES_DATABASES = frozenset(
+    {
+        "ai_hunter",
+        "npa",
+        "npa_lang",
+        "bad_assets",
+        "cpwsdata",
+    }
+)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(BACKEND_DIR / ".env", ANNUAL_LOCAL_ENV),
+        # Runtime configuration lives in backend/.env.  The local Docker
+        # stack is imported by scripts/annual-audit-local.ps1 into the process
+        # environment, so its .env.local must not override online settings.
+        env_file=(BACKEND_DIR / ".env",),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_env: str = "dev"
@@ -38,32 +63,118 @@ class Settings(BaseSettings):
     llm_provider_report_a: str | None = None
     llm_provider_report_b: str | None = None
     llm_provider_agent: str | None = None
+    router_execution_mode: str = "legacy"
 
     # This service has one business domain and one HTTP entrypoint.
     business_domain: str = "annual_audit"
+    platform_project_code: str = "ata_ai"
 
     # Annual-audit storage credentials are supplied by the deployment env.
-    annual_mysql_host: str = "127.0.0.1"
-    annual_mysql_port: int = 3306
-    annual_mysql_user: str = "root"
-    annual_mysql_password: str = ""
-    annual_mysql_database: str = "ata_agent"
+    annual_mysql_host: str = Field(
+        "127.0.0.1",
+        validation_alias=AliasChoices("ANNUAL_MYSQL_HOST", "MYSQL_HOST"),
+    )
+    annual_mysql_port: int = Field(
+        3306,
+        validation_alias=AliasChoices("ANNUAL_MYSQL_PORT", "MYSQL_PORT"),
+    )
+    annual_mysql_user: str = Field(
+        "root",
+        validation_alias=AliasChoices("ANNUAL_MYSQL_USER", "MYSQL_USER"),
+    )
+    annual_mysql_password: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_MYSQL_PASSWORD", "MYSQL_PASSWORD"),
+    )
+    annual_mysql_database: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_MYSQL_DATABASE", "MYSQL_DATABASE"),
+    )
     annual_mysql_connect_timeout_seconds: int = 10
-    annual_redis_namespace: str = "ata:dev:"
-    annual_postgres_dsn: str = ""
-    annual_postgres_port: int = 55432
-    annual_postgres_database: str = "ata_agent_platform"
-    annual_postgres_user: str = "ata_agent_app"
-    annual_postgres_password: str = ""
-    annual_redis_port: int = 56379
-    annual_redis_password: str = ""
-    annual_minio_api_port: int = 61000
-    annual_minio_access_key: str = "ata_annual_local"
-    annual_minio_secret_key: str = ""
-    annual_minio_bucket_raw: str = "ata-annual-raw"
-    annual_minio_bucket_derived: str = "ata-annual-derived"
-    annual_minio_bucket_artifacts: str = "ata-annual-artifacts"
-    annual_auth_local_jwt_secret: str = ""
+    annual_redis_host: str = Field(
+        "127.0.0.1",
+        validation_alias=AliasChoices("ANNUAL_REDIS_HOST", "REDIS_HOST"),
+    )
+    annual_redis_namespace: str = Field(
+        "ata:dev:",
+        validation_alias=AliasChoices("ANNUAL_REDIS_NAMESPACE", "REDIS_NAMESPACE"),
+    )
+    annual_postgres_host: str = Field(
+        "127.0.0.1",
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_HOST", "POSTGRES_HOST"),
+    )
+    annual_postgres_dsn: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_DSN", "POSTGRES_DSN"),
+    )
+    annual_postgres_port: int = Field(
+        55432,
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_PORT", "POSTGRES_PORT"),
+    )
+    annual_postgres_database: str = Field(
+        "ata_agent_platform",
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_DATABASE", "POSTGRES_DATABASE"),
+    )
+    annual_postgres_user: str = Field(
+        "ata_agent_app",
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_USER", "POSTGRES_USER"),
+    )
+    annual_postgres_password: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_POSTGRES_PASSWORD", "POSTGRES_PASSWORD"),
+    )
+    annual_redis_port: int = Field(
+        56379,
+        validation_alias=AliasChoices("ANNUAL_REDIS_PORT", "REDIS_PORT"),
+    )
+    annual_redis_password: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_REDIS_PASSWORD", "REDIS_PASSWORD"),
+    )
+    annual_minio_endpoint: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_MINIO_ENDPOINT", "AI_HUNTER_MINIO_ENDPOINT"),
+    )
+    annual_minio_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("ANNUAL_MINIO_ENABLED", "AI_HUNTER_MINIO_ENABLED"),
+    )
+    annual_minio_use_ssl: bool = Field(
+        False,
+        validation_alias=AliasChoices("ANNUAL_MINIO_USE_SSL", "AI_HUNTER_MINIO_USE_SSL"),
+    )
+    annual_minio_api_port: int = Field(
+        61000,
+        validation_alias=AliasChoices("ANNUAL_MINIO_API_PORT", "MINIO_API_PORT"),
+    )
+    annual_minio_access_key: str = Field(
+        "ata_annual_local",
+        validation_alias=AliasChoices("ANNUAL_MINIO_ACCESS_KEY", "AI_HUNTER_MINIO_ACCESS_KEY"),
+    )
+    annual_minio_secret_key: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_MINIO_SECRET_KEY", "AI_HUNTER_MINIO_SECRET_KEY"),
+    )
+    annual_minio_bucket_raw: str = Field(
+        "ata-annual-raw",
+        validation_alias=AliasChoices("ANNUAL_MINIO_BUCKET_RAW", "AI_HUNTER_MINIO_BUCKET_RAW"),
+    )
+    annual_minio_bucket_derived: str = Field(
+        "ata-annual-derived",
+        validation_alias=AliasChoices("ANNUAL_MINIO_BUCKET_DERIVED", "AI_HUNTER_MINIO_BUCKET_DERIVED"),
+    )
+    annual_minio_bucket_artifacts: str = Field(
+        "ata-annual-artifacts",
+        validation_alias=AliasChoices("ANNUAL_MINIO_BUCKET_ARTIFACTS", "AI_HUNTER_MINIO_BUCKET_ARTIFACTS"),
+    )
+    annual_minio_prefix: str = "annual_audit"
+    annual_vector_collection_prefix: str = "ata_annual_audit"
+    annual_embedding_model: str = ""
+    annual_embedding_dimension: int = 1024
+    annual_auth_local_jwt_secret: str = Field(
+        "",
+        validation_alias=AliasChoices("ANNUAL_AUTH_LOCAL_JWT_SECRET", "AUTH_LOCAL_JWT_SECRET"),
+    )
 
     openai_api_key: str = ""
     openai_base_url: str | None = ""
@@ -171,6 +282,34 @@ class Settings(BaseSettings):
     enable_reasoning_trace: bool = False
     agent_recursion_limit: int = 8
     report_section_max_completion_tokens_kimi: int = 12288
+    report_section_provider_1: str = ""
+    report_section_provider_2: str = ""
+    report_section_provider_3: str = ""
+    report_section_provider_4: str = ""
+    report_section_provider_5: str = ""
+    report_section_provider_6: str = ""
+    report_section_provider_7: str = ""
+    report_section_provider_8: str = ""
+    report_section_timeout_seconds: int = 300
+    report_section_concurrency: int = 3
+    report_section_concurrency_kimi: int = 3
+    report_section_concurrency_minimax: int = 3
+    audit_api_base_url: str = ""
+    audit_api_timeout_seconds: int = 600
+    audit_api_token: str = ""
+    task_api_base_url: str = ""
+    case_api_base_url: str = ""
+    knowledge_api_base_url: str = ""
+    enterprise_api_base_url: str = ""
+    doc_category_api_base_url: str = ""
+    metrics_amount_decimals: str = ""
+    metrics_currency: str = ""
+    metrics_materiality_ruleset_version: str = ""
+    metrics_sampling_ruleset_version: str = ""
+    metrics_confirmation_ruleset_version: str = ""
+    deadline_red_days: str = ""
+    deadline_yellow_days: str = ""
+    enable_doc_category_api_mock: bool = False
 
     @model_validator(mode="after")
     def _guard_annual_audit_database(self):
@@ -178,30 +317,60 @@ class Settings(BaseSettings):
 
         self.business_domain = "annual_audit"
         self.app_port = 8080
+        if self.platform_project_code.strip().lower() in {"ai_hunter", "npa", "npa_lang", "bad_assets"}:
+            raise ValueError("annual audit refuses a legacy project code")
+        if not self.platform_project_code.strip():
+            raise ValueError("annual audit requires PLATFORM_PROJECT_CODE")
+        self.auth_project_code = "annual_audit"
         database = self.annual_mysql_database.strip().lower()
-        if database != "ata_agent":
-            raise ValueError("annual audit requires ANNUAL_MYSQL_DATABASE=ata_agent")
+        if not database:
+            raise ValueError(
+                "annual audit requires MYSQL_DATABASE/ANNUAL_MYSQL_DATABASE"
+            )
+        if database in ANNUAL_AUDIT_LEGACY_MYSQL_DATABASES:
+            raise ValueError(
+                "annual audit refuses legacy MySQL database "
+                f"{self.annual_mysql_database!r}; configure the new project's empty database"
+            )
+        postgres_database = self.annual_postgres_database.strip().lower()
+        if postgres_database in ANNUAL_AUDIT_LEGACY_POSTGRES_DATABASES:
+            raise ValueError(
+                "annual audit refuses legacy PostgreSQL database "
+                f"{self.annual_postgres_database!r}; configure the new project's platform database"
+            )
 
         if not self.annual_postgres_dsn.strip():
             password = self.annual_postgres_password
             self.annual_postgres_dsn = (
                 f"postgresql+psycopg://{self.annual_postgres_user}:{password}"
-                f"@127.0.0.1:{self.annual_postgres_port}/{self.annual_postgres_database}"
+                f"@{self.annual_postgres_host}:{self.annual_postgres_port}/{self.annual_postgres_database}"
             )
 
-        self.redis_url = (
-            f"redis://:{self.annual_redis_password}@127.0.0.1:{self.annual_redis_port}/0"
-            if self.annual_redis_password
-            else None
+        if self.annual_redis_password:
+            self.redis_url = (
+                f"redis://:{self.annual_redis_password}@{self.annual_redis_host}:"
+                f"{self.annual_redis_port}/0"
+            )
+        elif self.redis_url:
+            self.redis_url = self.redis_url.strip()
+            if "://" not in self.redis_url:
+                self.redis_url = (
+                    f"redis://{self.redis_url}:{self.annual_redis_port}/0"
+                )
+        else:
+            self.redis_url = None
+
+        self.ai_hunter_minio_enabled = bool(self.annual_minio_enabled)
+        self.ai_hunter_minio_endpoint = (
+            self.annual_minio_endpoint.strip()
+            or f"127.0.0.1:{self.annual_minio_api_port}"
         )
-        self.ai_hunter_minio_enabled = True
-        self.ai_hunter_minio_endpoint = f"127.0.0.1:{self.annual_minio_api_port}"
         self.ai_hunter_minio_access_key = self.annual_minio_access_key
         self.ai_hunter_minio_secret_key = self.annual_minio_secret_key
         self.ai_hunter_minio_bucket_raw = self.annual_minio_bucket_raw
         self.ai_hunter_minio_bucket_derived = self.annual_minio_bucket_derived
         self.ai_hunter_minio_bucket_artifacts = self.annual_minio_bucket_artifacts
-        self.ai_hunter_minio_use_ssl = False
+        self.ai_hunter_minio_use_ssl = self.annual_minio_use_ssl
         if self.annual_auth_local_jwt_secret:
             self.auth_local_jwt_secret = self.annual_auth_local_jwt_secret
             self.user_center_jwt_secret = self.annual_auth_local_jwt_secret

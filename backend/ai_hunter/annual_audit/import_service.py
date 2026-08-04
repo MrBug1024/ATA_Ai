@@ -24,7 +24,7 @@ from ai_hunter.app.services.minio_service import get_minio_service
 from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
-from .storage import mysql_connection
+from .storage import mysql_connection, postgres_connection
 
 
 DatasetType = Literal[
@@ -33,6 +33,17 @@ DatasetType = Literal[
     "receivable_item",
     "bank_transaction",
 ]
+
+
+def _loads(value: Any) -> Any:
+    """Decode JSON columns from either dict-row strings or native objects."""
+
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value
 
 
 @dataclass(frozen=True)
@@ -345,6 +356,7 @@ def _source_locator(
     *,
     source_ref: str,
     file_name: str,
+    source_sha256: str = "",
     sheet_name: str,
     row_number: int,
     raw_row: list[Any],
@@ -353,6 +365,7 @@ def _source_locator(
     return {
         "source_ref": source_ref,
         "file_name": file_name,
+        "source_sha256": source_sha256,
         "sheet_name": sheet_name,
         "row_number": row_number,
         "cell_range": f"A{row_number}:XFD{row_number}",
@@ -365,6 +378,7 @@ def normalize_sheet_rows(
     *,
     source_ref: str,
     file_name: str,
+    source_sha256: str = "",
     source_hint: str = "",
     default_period_end: date | None = None,
 ) -> tuple[DatasetType, list[dict[str, Any]]] | None:
@@ -381,6 +395,7 @@ def normalize_sheet_rows(
         locator = _source_locator(
             source_ref=source_ref,
             file_name=file_name,
+            source_sha256=source_sha256,
             sheet_name=sheet.name,
             row_number=row_index,
             raw_row=raw_row,
@@ -631,8 +646,9 @@ def _persist_dataset(
                     INSERT INTO annual_account_balance (
                       engagement_id, import_batch_id, period_end, account_code, account_name,
                       opening_debit, opening_credit, period_debit, period_credit,
-                      closing_debit, closing_credit, currency, source_locator_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      closing_debit, closing_credit, currency, source_locator_json,
+                      source_file_id, source_page_id, source_chunk_id, locator_kind
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'sheet_row')
                 """
                 values = [
                     (
@@ -648,8 +664,9 @@ def _persist_dataset(
                     INSERT INTO annual_journal_entry_line (
                       engagement_id, import_batch_id, voucher_date, voucher_no, line_no,
                       account_code, account_name, debit_amount, credit_amount,
-                      counterparty, description, source_locator_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      counterparty, description, source_locator_json,
+                      source_file_id, source_page_id, source_chunk_id, locator_kind
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'sheet_row')
                 """
                 values = [
                     (
@@ -664,8 +681,8 @@ def _persist_dataset(
                     INSERT INTO annual_receivable_item (
                       engagement_id, import_batch_id, customer_name, document_no,
                       occurrence_date, due_date, balance, currency, is_related_party,
-                      source_locator_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      source_locator_json, source_file_id, source_page_id, source_chunk_id, locator_kind
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'sheet_row')
                 """
                 values = [
                     (
@@ -680,8 +697,9 @@ def _persist_dataset(
                     INSERT INTO annual_bank_transaction (
                       engagement_id, import_batch_id, bank_account, transaction_date,
                       amount, direction, counterparty, transaction_ref, description,
-                      running_balance, source_locator_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      running_balance, source_locator_json,
+                      source_file_id, source_page_id, source_chunk_id, locator_kind
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'sheet_row')
                 """
                 values = [
                     (
@@ -745,6 +763,7 @@ def import_uploaded_files(
                     sheet,
                     source_ref=source_ref,
                     file_name=file_name,
+                    source_sha256=source_sha256,
                     source_hint=str(file_item.get("doc_category") or ""),
                     default_period_end=engagement["period_end"],
                 )
@@ -793,10 +812,178 @@ def import_uploaded_files(
     }
 
 
+def bind_structured_source_refs(
+    *,
+    engagement_id: int,
+    chunk_batch: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Bind MySQL structured rows to real PostgreSQL source anchors.
+
+    Structured import intentionally happens before the normal graph ingest.
+    This second pass runs after ``load_chunks`` has created source files,
+    pages and chunks.  It replaces the old ``annual:*`` synthetic references
+    with real platform IDs and preserves spreadsheet row/sheet coordinates.
+    """
+
+    resolved = settings or get_settings()
+    if int(engagement_id or 0) <= 0:
+        return {"bound_count": 0, "unbound_count": 0, "status": "no_engagement"}
+
+    file_rows = [row for row in chunk_batch.get("files", []) if isinstance(row, dict)]
+    page_rows = [row for row in chunk_batch.get("pages", []) if isinstance(row, dict)]
+    chunk_rows = [row for row in chunk_batch.get("chunks", []) if isinstance(row, dict)]
+    if not file_rows:
+        return {"bound_count": 0, "unbound_count": 0, "status": "no_source_files"}
+
+    platform_files: dict[str, dict[str, Any]] = {}
+    platform_files_by_name: dict[str, dict[str, Any]] = {}
+    for row in file_rows:
+        file_id = int(row.get("id") or 0)
+        if file_id <= 0:
+            continue
+        normalized = {
+            "id": file_id,
+            "file_name": str(row.get("file_name") or ""),
+            "file_sha256": str(row.get("file_sha256") or ""),
+            "content_type": str(row.get("content_type") or ""),
+            "storage_ref": str(row.get("storage_ref") or ""),
+        }
+        platform_files[normalized["file_sha256"]] = normalized
+        platform_files_by_name[normalized["file_name"]] = normalized
+
+    page_by_file: dict[int, list[dict[str, Any]]] = {}
+    for row in page_rows:
+        page_by_file.setdefault(int(row.get("file_id") or 0), []).append(row)
+    chunk_by_page: dict[int, list[dict[str, Any]]] = {}
+    for row in chunk_rows:
+        chunk_by_page.setdefault(int(row.get("page_id") or 0), []).append(row)
+
+    table_map = {
+        "account_balance": "annual_account_balance",
+        "journal_entry": "annual_journal_entry_line",
+        "receivable_item": "annual_receivable_item",
+        "bank_transaction": "annual_bank_transaction",
+    }
+    bound = 0
+    unbound = 0
+    with mysql_connection(resolved) as mysql_conn, postgres_connection(resolved) as pg_conn:
+        with mysql_conn.cursor() as mysql_cursor, pg_conn.cursor() as pg_cursor:
+            for dataset, table_name in table_map.items():
+                mysql_cursor.execute(
+                    f"""
+                    SELECT id, source_locator_json
+                    FROM {table_name}
+                    WHERE engagement_id = %s AND source_file_id IS NULL
+                    ORDER BY id
+                    """,
+                    (engagement_id,),
+                )
+                rows = list(mysql_cursor.fetchall())
+                for row in rows:
+                    locator = _loads(row.get("source_locator_json")) or {}
+                    if not isinstance(locator, dict):
+                        unbound += 1
+                        continue
+                    file_row = platform_files.get(str(locator.get("source_sha256") or ""))
+                    if file_row is None:
+                        file_row = platform_files_by_name.get(str(locator.get("file_name") or ""))
+                    if file_row is None:
+                        unbound += 1
+                        continue
+
+                    file_id = int(file_row["id"])
+                    candidate_pages = page_by_file.get(file_id, [])
+                    sheet_name = str(locator.get("sheet_name") or "")
+                    page = next(
+                        (
+                            item
+                            for item in candidate_pages
+                            if sheet_name and sheet_name in str(item.get("page_text") or "")
+                        ),
+                        None,
+                    )
+                    if page is None and candidate_pages:
+                        page = candidate_pages[0]
+                    if page is None:
+                        unbound += 1
+                        continue
+
+                    page_id = int(page.get("id") or 0)
+                    candidates = chunk_by_page.get(page_id, [])
+                    quote = str(locator.get("quote_text") or "").strip()
+                    chunk = next(
+                        (
+                            item
+                            for item in candidates
+                            if quote and quote[:80] in str(item.get("chunk_text") or "")
+                        ),
+                        candidates[0] if candidates else None,
+                    )
+                    chunk_id = str(chunk.get("chunk_id") or "") if chunk else ""
+
+                    pg_cursor.execute(
+                        """
+                        SELECT page_image_ref, page_width, page_height
+                        FROM public.source_page
+                        WHERE id = %s
+                        """,
+                        (page_id,),
+                    )
+                    page_meta = dict(pg_cursor.fetchone() or {})
+                    locator.update(
+                        {
+                            "domain_code": "annual_audit",
+                            "project_id": int(engagement_id),
+                            "source_file_id": file_id,
+                            "source_page_id": page_id,
+                            "source_chunk_id": chunk_id,
+                            "locator_kind": "sheet_row" if sheet_name else "csv_row",
+                            "page_no": int(page.get("page_no") or 0),
+                            "content_type": file_row["content_type"],
+                            "source_file_ref": file_row["storage_ref"],
+                            "page_image_ref": str(page_meta.get("page_image_ref") or ""),
+                            "page_width": int(page_meta.get("page_width") or 0),
+                            "page_height": int(page_meta.get("page_height") or 0),
+                            "preview_available": bool(chunk_id),
+                        }
+                    )
+                    mysql_cursor.execute(
+                        f"""
+                        UPDATE {table_name}
+                        SET source_file_id = %s,
+                            source_page_id = %s,
+                            source_chunk_id = %s,
+                            locator_kind = %s,
+                            source_locator_json = %s
+                        WHERE id = %s AND engagement_id = %s
+                        """,
+                        (
+                            file_id,
+                            page_id,
+                            chunk_id or None,
+                            str(locator["locator_kind"]),
+                            _json(locator),
+                            int(row["id"]),
+                            engagement_id,
+                        ),
+                    )
+                    bound += 1
+        mysql_conn.commit()
+        pg_conn.commit()
+    return {
+        "status": "completed" if unbound == 0 else "partial",
+        "bound_count": bound,
+        "unbound_count": unbound,
+        "source_file_count": len(platform_files),
+    }
+
+
 __all__ = [
     "TabularSheet",
     "detect_sheet_schema",
     "import_uploaded_files",
+    "bind_structured_source_refs",
     "is_audit_workpaper_workbook",
     "normalize_sheet_rows",
     "read_tabular_sheets",

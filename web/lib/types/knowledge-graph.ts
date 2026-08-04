@@ -18,6 +18,15 @@ export interface EvidenceItem {
   source_file_url?: string;
   // 源文件 MIME，前端据此切换渲染模式（text/* 纯文本，application/pdf、image/* 页面模式）
   content_type?: string;
+  locator_kind?: string;
+  sheet_name?: string;
+  row_start?: number;
+  row_end?: number;
+  cell_range?: string;
+  preview_ref?: string;
+  preview_available?: boolean;
+  page_width?: number;
+  page_height?: number;
   // 该证据关联的实体（用于「在图谱中查看」），无关联时为 0
   entity_id?: number;
 }
@@ -33,6 +42,8 @@ export interface PageAnchorsResponse {
   file_name?: string;
   source_file_url?: string;
   content_type?: string;
+  locator_kind?: string;
+  sheet_name?: string;
 }
 
 export interface EvidenceResolveRequest {

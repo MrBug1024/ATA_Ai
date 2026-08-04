@@ -6,7 +6,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-from ai_hunter.app.settings import Settings, get_settings
+from ai_hunter.app.settings import (
+    ANNUAL_AUDIT_LEGACY_MYSQL_DATABASES,
+    Settings,
+    get_settings,
+)
 
 if TYPE_CHECKING:
     import pymysql
@@ -21,9 +25,14 @@ def _validate_settings(settings: Settings) -> None:
         raise AnnualAuditStorageError(
             "annual-audit MySQL access requires BUSINESS_DOMAIN=annual_audit"
         )
-    if settings.annual_mysql_database.strip().lower() != "ata_agent":
+    database = settings.annual_mysql_database.strip().lower()
+    if not database:
         raise AnnualAuditStorageError(
-            "refusing annual-audit MySQL access outside database ata_agent"
+            "annual-audit MySQL requires MYSQL_DATABASE/ANNUAL_MYSQL_DATABASE"
+        )
+    if database in ANNUAL_AUDIT_LEGACY_MYSQL_DATABASES:
+        raise AnnualAuditStorageError(
+            "refusing annual-audit MySQL access to a legacy project database"
         )
 
 

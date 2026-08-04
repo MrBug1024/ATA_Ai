@@ -16,6 +16,7 @@ from typing import Any
 from ai_hunter.app.settings import Settings, get_settings
 
 from .analysis_service import data_readiness, run_cash_and_bank, run_sales_receivables
+from .artifact_service import publish_annual_artifacts
 from .engagement_repository import get_engagement
 from .storage import mysql_connection
 
@@ -341,7 +342,13 @@ def _persist_draft_artifacts(
                     latest_facts = json.loads(latest_facts)
                 if latest and (latest_facts or {}).get("generation_key") == generation_key:
                     persisted.append(
-                        {"code": code, "id": int(latest["id"]), "version": int(latest["workpaper_version"]), "reused": True}
+                        {
+                            "code": code,
+                            "name": name,
+                            "id": int(latest["id"]),
+                            "version": int(latest["workpaper_version"]),
+                            "reused": True,
+                        }
                     )
                     continue
                 version = int(latest["workpaper_version"] if latest else 0) + 1
@@ -364,7 +371,9 @@ def _persist_draft_artifacts(
                         created_by,
                     ),
                 )
-                persisted.append({"code": code, "id": int(cursor.lastrowid), "version": version, "reused": False})
+                persisted.append(
+                    {"code": code, "name": name, "id": int(cursor.lastrowid), "version": version, "reused": False}
+                )
 
             cursor.execute(
                 """
@@ -407,6 +416,79 @@ def _persist_draft_artifacts(
     return {"workpapers": persisted, "report": report}
 
 
+def _persist_published_artifact_refs(
+    *,
+    engagement_id: int,
+    artifacts: dict[str, Any],
+    settings: Settings,
+) -> None:
+    """Persist generated object references after the render/upload transaction."""
+
+    published = list(artifacts.get("artifacts") or [])
+    report_refs = [
+        item
+        for item in published
+        if str(item.get("artifact_type") or "").startswith("annual_report_")
+    ]
+    report_id = int((artifacts.get("report") or {}).get("id") or 0)
+    with mysql_connection(settings) as connection:
+        with connection.cursor() as cursor:
+            if report_id and report_refs:
+                cursor.execute(
+                    """
+                    UPDATE audit_report
+                    SET artifact_ref = %s
+                    WHERE id = %s AND engagement_id = %s
+                    """,
+                    (json.dumps(report_refs, ensure_ascii=False), report_id, engagement_id),
+                )
+            for workpaper in artifacts.get("workpapers") or []:
+                workpaper_id = int(workpaper.get("id") or 0)
+                code = str(workpaper.get("code") or "")
+                refs = [item for item in published if item.get("artifact_type") == f"workpaper_{code}"]
+                if workpaper_id and refs:
+                    cursor.execute(
+                        """
+                        UPDATE annual_workpaper
+                        SET artifact_ref = %s
+                        WHERE id = %s AND engagement_id = %s
+                        """,
+                        (json.dumps(refs, ensure_ascii=False), workpaper_id, engagement_id),
+                    )
+        connection.commit()
+
+
+def _build_followup_tasks(snapshot: dict[str, Any], *, period_end: Any) -> list[dict[str, Any]]:
+    """Turn deterministic findings into deduplicated auditor follow-up tasks."""
+
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for analysis_type, result_key in (
+        ("sales_receivables", "sales_receivables"),
+        ("cash_and_bank", "cash_and_bank"),
+    ):
+        result = snapshot.get(result_key) or {}
+        for finding in result.get("findings") or []:
+            title = str(finding.get("title") or "待复核审计发现").strip()
+            action = f"复核{title}并补充审计证据"
+            if action in seen:
+                continue
+            seen.add(action)
+            tasks.append(
+                {
+                    "task_no": f"AUTO-{len(tasks) + 1:03d}",
+                    "action": action,
+                    "detail": str(finding.get("description") or "")[:2000],
+                    "assigned_role": "项目主审",
+                    "deadline": period_end,
+                    "deliverable": "复核记录、支持性证据和处理结论",
+                    "priority": str(finding.get("risk_level") or "中"),
+                    "source_engine": f"annual_{analysis_type}",
+                }
+            )
+    return tasks
+
+
 def generate_annual_report_draft(
     case_id: int,
     *,
@@ -434,6 +516,11 @@ def generate_annual_report_draft(
         "material_sources": list(material_sources or []),
         "sales_receivables": sales,
         "cash_and_bank": cash,
+        "workpaper_facts": {
+            "F1-2": sales.get("revenue") or {},
+            "C5-2": sales.get("receivables") or {},
+            "C1-2": cash,
+        },
     }
     snapshot["generation_key"] = _generation_key(snapshot)
     report_text = render_annual_report_draft(
@@ -451,6 +538,26 @@ def generate_annual_report_draft(
         created_by=created_by or "ai_agent",
         settings=resolved,
     )
+    published = publish_annual_artifacts(
+        engagement_id=case_id,
+        report_text=report_text,
+        snapshot=snapshot,
+        report_version=int((artifacts.get("report") or {}).get("version") or 1),
+        workpapers=list(artifacts.get("workpapers") or []),
+    )
+    _persist_published_artifact_refs(
+        engagement_id=case_id,
+        artifacts={**artifacts, **published},
+        settings=resolved,
+    )
+    from .task_repository import create_task_batch
+
+    task_result = create_task_batch(
+        case_id,
+        _build_followup_tasks(snapshot, period_end=engagement["period_end"]),
+        settings=resolved,
+    )
+    artifacts = {**artifacts, **published, "tasks": task_result}
     return {"report_text": report_text, "artifacts": artifacts, "generation_key": snapshot["generation_key"]}
 
 

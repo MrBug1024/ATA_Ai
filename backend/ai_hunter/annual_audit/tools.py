@@ -8,6 +8,7 @@ from .analysis_service import data_readiness, run_cash_and_bank, run_sales_recei
 from .document_repository import get_case_doc_categories, list_doc_categories
 from .engagement_repository import get_engagement_profile
 from .task_repository import manage_tasks
+from ai_hunter.app.services.vector_search import search_source_chunks
 
 
 @tool
@@ -119,6 +120,19 @@ def analyze_cash_and_bank(case_id: int) -> str:
         return build_tool_error("analyze_cash_and_bank", exc)
 
 
+@tool
+def search_annual_evidence(case_id: int, query: str, limit: int = 8) -> str:
+    """Search only the selected annual-audit project's source chunks."""
+
+    try:
+        return build_tool_result(
+            "search_annual_evidence",
+            search_source_chunks(project_id=case_id, query=query, limit=limit),
+        )
+    except Exception as exc:
+        return build_tool_error("search_annual_evidence", exc)
+
+
 ANNUAL_CAPABILITY_TOOLSETS = {
     "case.profile": [get_annual_engagement],
     "material.status": [get_annual_material_status],
@@ -135,7 +149,7 @@ ANNUAL_CAPABILITY_TOOLSETS = {
         analyze_sales_receivables,
         analyze_cash_and_bank,
     ],
-    "graph.query": [get_annual_engagement, get_annual_audit_context],
+    "graph.query": [get_annual_engagement, get_annual_audit_context, search_annual_evidence],
     "task.query": [list_annual_tasks],
 }
 

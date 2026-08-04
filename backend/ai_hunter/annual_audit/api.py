@@ -13,6 +13,7 @@ from . import document_repository as documents
 from . import engagement_repository as engagements
 from . import task_repository as tasks
 from .analysis_service import data_readiness, run_cash_and_bank, run_sales_receivables
+from .report_service import generate_annual_report_draft
 from .storage import AnnualAuditStorageError, mysql_connection
 
 
@@ -43,6 +44,11 @@ class AnnualAnalysisRequest(BaseModel):
 
 class CashAnalysisRequest(AnnualAnalysisRequest):
     large_amount_threshold: float = Field(default=1_000_000, gt=0)
+
+
+class AnnualReportRequest(AnnualAnalysisRequest):
+    corrections: list[str] = Field(default_factory=list)
+    created_by: str = "ai_agent"
 
 
 class ValidateDocCategoryRequest(BaseModel):
@@ -237,6 +243,64 @@ def analyze_cash_and_bank(request: CashAnalysisRequest) -> dict[str, Any]:
             large_amount_threshold=Decimal(str(request.large_amount_threshold)),
             recompute=request.recompute,
         )
+    except engagements.EngagementNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.post("/api/annual-audit/report", tags=["骞村鎶ュ憡"])
+def generate_report(request: AnnualReportRequest) -> dict[str, Any]:
+    """Run all deterministic annual cycles and publish versioned artifacts."""
+
+    try:
+        return generate_annual_report_draft(
+            request.case_id,
+            recompute=request.recompute,
+            corrections=request.corrections,
+            created_by=request.created_by or "ai_agent",
+        )
+    except engagements.EngagementNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.get("/api/annual-audit/{case_id}/artifacts", tags=["骞村鎶ュ憡"])
+def list_report_artifacts(case_id: int) -> dict[str, Any]:
+    """Return the latest report/workpaper artifact references for one engagement."""
+
+    try:
+        engagements.get_engagement(case_id)
+        with mysql_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, report_version, template_version, status, artifact_ref, created_at
+                    FROM audit_report
+                    WHERE engagement_id = %s AND report_type = 'annual_audit_draft'
+                    ORDER BY report_version DESC LIMIT 1
+                    """,
+                    (case_id,),
+                )
+                report = dict(cursor.fetchone() or {})
+                cursor.execute(
+                    """
+                    SELECT id, workpaper_code, workpaper_name, template_version,
+                           workpaper_version, status, artifact_ref, created_at
+                    FROM annual_workpaper
+                    WHERE engagement_id = %s
+                    ORDER BY workpaper_code, workpaper_version DESC
+                    """,
+                    (case_id,),
+                )
+                workpapers = [dict(row) for row in cursor.fetchall()]
+        return {
+            "case_id": case_id,
+            "report": report,
+            "workpapers": workpapers,
+            "artifact_status": "published" if report.get("artifact_ref") else "not_published",
+        }
     except engagements.EngagementNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AnnualAuditStorageError as exc:

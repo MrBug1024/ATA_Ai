@@ -180,7 +180,7 @@ _CAPABILITY_SPEC_LIST = (
         business_executor="graph_query_agent",
         permission="graph",
         requires_case=True,
-        tools=("get_annual_engagement", "get_annual_audit_context"),
+        tools=("get_annual_engagement", "get_annual_audit_context", "search_annual_evidence"),
     ),
     _spec(
         "task.query",

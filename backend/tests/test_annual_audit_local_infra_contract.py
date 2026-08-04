@@ -9,19 +9,20 @@ def test_local_compose_uses_dedicated_annual_audit_stores():
         REPO_ROOT / "deploy" / "annual-audit" / "docker-compose.yml"
     ).read_text(encoding="utf-8")
 
-    assert "name: ata-agent-local" in compose
-    assert "container_name: ata-agent-postgres" in compose
-    assert "container_name: ata-agent-mysql" in compose
-    assert "container_name: ata-agent-redis" in compose
-    assert "container_name: ata-agent-minio" in compose
-    assert "container_name: ata-agent-minio-init" in compose
+    assert "name: ata-annual-audit-local" in compose
+    assert "container_name: ata-annual-postgres" in compose
+    assert "container_name: ata-annual-mysql" in compose
+    assert "container_name: ata-annual-redis" in compose
+    assert "container_name: ata-annual-minio" in compose
+    assert "container_name: ata-annual-minio-init" in compose
     assert "${ANNUAL_POSTGRES_PORT:-55432}:5432" in compose
     assert "${ANNUAL_MYSQL_PORT:-53306}:3306" in compose
     assert "${ANNUAL_REDIS_PORT:-56379}:6379" in compose
     assert "${ANNUAL_MINIO_API_PORT:-61000}:9000" in compose
     assert "${ANNUAL_MINIO_CONSOLE_PORT:-61001}:9001" in compose
-    assert "name: ata-agent-minio-data" in compose
-    assert "annual_audit_mysql_v6.sql:/docker-entrypoint-initdb.d/006_annual_tasks.sql:ro" in compose
+    assert "name: ata-annual-minio-data" in compose
+    assert "annual_audit_mysql_v7.sql:/docker-entrypoint-initdb.d/007_evidence_bindings.sql:ro" in compose
+    assert "annual_audit_mysql_v8.sql:/docker-entrypoint-initdb.d/008_artifact_refs.sql:ro" in compose
 
 
 def test_annual_postgres_contract_uses_isolated_platform_schema():
@@ -56,7 +57,7 @@ def test_local_launcher_forces_annual_mode_on_the_single_backend_port():
     assert "Invoke-AnnualMigrations" in launcher
     assert "up -d --wait postgres mysql redis minio" in launcher
     assert "run --rm minio-init" in launcher
-    assert "ANNUAL_MYSQL_DATABASE=ata_agent" in env_example
+    assert "ANNUAL_MYSQL_DATABASE=ata_ai" in env_example
     assert "ANNUAL_MINIO_BUCKET_RAW=ata-annual-raw" in env_example
 
 

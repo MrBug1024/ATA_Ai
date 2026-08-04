@@ -128,7 +128,7 @@ function entityCategory(entityType: string): EntityCategory {
     return "professional";
   }
   if (
-    ["asset", "money", "mine", "mine_right", "mining_right", "资产", "矿业权"].includes(
+    ["account", "bank_transaction", "receivable", "voucher", "invoice", "money", "asset"].includes(
       type
     )
   ) {

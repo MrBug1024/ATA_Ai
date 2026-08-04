@@ -81,17 +81,27 @@ def main() -> None:
     missing_mysql = sorted(REQUIRED_MYSQL_TABLES - mysql_tables)
     if missing_mysql:
         raise RuntimeError(f"missing MySQL tables: {missing_mysql}")
-    if migrations != ["001", "002", "003", "004", "005", "006"]:
+    if migrations != ["001", "002", "003", "004", "005", "006", "007", "008"]:
         raise RuntimeError(f"unexpected MySQL migrations: {migrations}")
 
     if not settings.redis_url:
         redis_status = "disabled"
     else:
-        redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
-        redis_status = "ok" if redis_client.ping() else "failed"
-        redis_client.close()
+        redis_client = Redis.from_url(settings.redis_url, decode_responses=True, protocol=2)
+        try:
+            redis_status = "ok" if redis_client.ping() else "failed"
+        except Exception as exc:
+            if not settings.annual_redis_password:
+                raise RuntimeError(
+                    "Redis ping failed: the configured Redis server requires authentication; "
+                    "set ANNUAL_REDIS_PASSWORD (or REDIS_PASSWORD) for the annual-audit Redis "
+                    "account. Do not reuse the legacy NPA secret."
+                ) from exc
+            raise RuntimeError("Redis ping failed; verify the annual-audit Redis endpoint and credentials") from exc
+        finally:
+            redis_client.close()
         if redis_status != "ok":
-            raise RuntimeError("Redis ping failed")
+            raise RuntimeError("Redis ping failed; verify the annual-audit Redis endpoint and credentials")
 
     if not settings.ai_hunter_minio_enabled:
         raise RuntimeError("annual object storage must be enabled")

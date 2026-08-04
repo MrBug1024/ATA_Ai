@@ -25,7 +25,7 @@ Only `tests/` is collected by pytest. Runtime data services come from `deploy/an
 - `ai_hunter/app/tools/registry.py`: annual drilldown tool registry.
 - `sql/annual_audit_*`: annual storage migrations.
 
-The browser and all internal operations use one FastAPI process on `8080`. PostgreSQL must be the isolated `ata_agent_platform` database; MySQL must be `ata_agent`; Redis keys must use the annual namespace; MinIO must use annual buckets.
+The browser and all internal operations use one FastAPI process on `8080`. PostgreSQL must point to the configured ATA platform database; MySQL must point to the new project's isolated database (currently `ata_ai`); Redis keys must use the annual namespace; MinIO must use annual buckets. Never fall back to an NPA database, bucket, collection or key prefix.
 
 ## Engineering Rules
 

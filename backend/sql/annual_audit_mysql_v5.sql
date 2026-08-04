@@ -1,8 +1,6 @@
 -- Structured annual-audit domain data for the first sales/receivables and
 -- cash/bank demonstration cycles. Raw files and evidence anchors stay in the
 -- isolated platform PostgreSQL/MinIO stores and are referenced by source_ref.
-USE `ata_agent`;
-
 CREATE TABLE IF NOT EXISTS `annual_import_batch` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `engagement_id` BIGINT UNSIGNED NOT NULL,

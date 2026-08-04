@@ -82,12 +82,52 @@ def configure_logging() -> None:
     app_log_file = log_dir / settings.log_app_file_name
     access_log_file = log_dir / settings.log_access_file_name
 
+    def can_write(path: Path) -> bool:
+        """Return whether a file handler can be opened in this runtime."""
+
+        try:
+            with path.open("a", encoding="utf-8"):
+                pass
+            return True
+        except OSError:
+            return False
+
     formatter = (
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
         if not settings.log_include_request_fields
         else "%(asctime)s | %(levelname)s | %(name)s | %(message)s | "
         "request_id=%(request_id)s | thread_id=%(thread_id)s | case_id=%(case_id)s"
     )
+
+    handlers: dict[str, dict[str, Any]] = {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "filters": ["request_context"],
+        }
+    }
+    root_handlers = ["console"]
+    access_handlers = ["console"]
+    if can_write(app_log_file):
+        handlers["app_file"] = {
+            "()": DailySuffixFileHandler,
+            "formatter": "default",
+            "filters": ["request_context"],
+            "filename": str(app_log_file),
+            "backup_count": settings.log_file_backup_count,
+            "encoding": "utf-8",
+        }
+        root_handlers.append("app_file")
+    if can_write(access_log_file):
+        handlers["access_file"] = {
+            "()": DailySuffixFileHandler,
+            "formatter": "default",
+            "filters": ["request_context"],
+            "filename": str(access_log_file),
+            "backup_count": settings.log_file_backup_count,
+            "encoding": "utf-8",
+        }
+        access_handlers.append("access_file")
 
     dictConfig(
         {
@@ -104,37 +144,15 @@ def configure_logging() -> None:
                     "()": RequestContextFilter,
                 }
             },
-            "handlers": {
-                "console": {
-                    "class": "logging.StreamHandler",
-                    "formatter": "default",
-                    "filters": ["request_context"],
-                },
-                "app_file": {
-                    "()": DailySuffixFileHandler,
-                    "formatter": "default",
-                    "filters": ["request_context"],
-                    "filename": str(app_log_file),
-                    "backup_count": settings.log_file_backup_count,
-                    "encoding": "utf-8",
-                },
-                "access_file": {
-                    "()": DailySuffixFileHandler,
-                    "formatter": "default",
-                    "filters": ["request_context"],
-                    "filename": str(access_log_file),
-                    "backup_count": settings.log_file_backup_count,
-                    "encoding": "utf-8",
-                },
-            },
+            "handlers": handlers,
             "root": {
                 "level": settings.log_level.upper(),
-                "handlers": ["console", "app_file"],
+                "handlers": root_handlers,
             },
             "loggers": {
                 "ai_hunter.access": {
                     "level": settings.log_level.upper(),
-                    "handlers": ["console", "access_file"],
+                    "handlers": access_handlers,
                     "propagate": False,
                 }
             },

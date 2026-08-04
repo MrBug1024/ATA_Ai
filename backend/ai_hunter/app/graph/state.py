@@ -169,6 +169,7 @@ class AuditGraphState(TypedDict, total=False):
     chunk_batch_ref: str
     chunk_batch_summary: str
     chunk_ids: list[str]
+    annual_evidence_binding_summary: dict[str, Any]
 
     intent: Intent
     route_decision: dict[str, Any] | RouteDecisionModel
@@ -219,6 +220,7 @@ class AuditGraphState(TypedDict, total=False):
     unresolved_claims: list[dict[str, Any] | UnresolvedClaimItemModel]
     source_chunks: list[dict[str, Any] | SourceChunkModel]
     task_create_result: dict[str, Any]
+    artifacts: dict[str, Any]
     agent_output: str
 
     errors: list[str]

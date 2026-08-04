@@ -16,11 +16,11 @@ Windows 上请始终通过上述入口启动；该入口会为 psycopg 异步连
 运行参数优先读取仓库根目录 `deploy/annual-audit/.env.local`。默认本地数据源为：
 
 - PostgreSQL：会话、LangGraph checkpoint、权限、证据与知识图谱
-- MySQL `ata_agent`：年度审计项目、科目余额、凭证、应收、银行流水、底稿和报告
+- MySQL `ata_ai`：年度审计项目、科目余额、凭证、应收、银行流水、底稿和报告
 - Redis：大对象缓存与任务状态
 - MinIO：原始资料、解析产物和报告文件
 
-服务会拒绝连接名称不是 `ata_agent` 的 MySQL 业务库，避免误连其他项目。
+服务会拒绝连接名称为空或属于历史项目的 MySQL 业务库，避免误连其他项目。
 
 ## 核心接口
 

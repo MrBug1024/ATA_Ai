@@ -41,6 +41,16 @@ MIGRATIONS = (
         SQL_DIR / "annual_audit_mysql_v6.sql",
         "annual engagement task management",
     ),
+    (
+        "007",
+        SQL_DIR / "annual_audit_mysql_v7.sql",
+        "bind annual structured rows to platform evidence anchors",
+    ),
+    (
+        "008",
+        SQL_DIR / "annual_audit_mysql_v8.sql",
+        "allow versioned annual report and workpaper artifact manifests",
+    ),
 )
 
 POSTGRES_MIGRATION = SQL_DIR / "annual_audit_postgres_v1.sql"

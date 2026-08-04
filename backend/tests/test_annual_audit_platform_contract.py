@@ -14,7 +14,7 @@ from ai_hunter.app.tools.registry import tools_for_capability
 def annual_settings(**overrides) -> Settings:
     values = {
         "_env_file": None,
-        "annual_mysql_database": "ata_agent",
+        "annual_mysql_database": "ata_ai",
         "annual_mysql_password": "mysql-secret",
         "annual_postgres_password": "postgres-secret",
         "annual_redis_password": "redis-secret",
@@ -30,9 +30,16 @@ def test_settings_force_single_annual_domain_and_port():
     assert settings.app_port == 8080
 
 
-def test_settings_reject_non_annual_mysql_database():
-    with pytest.raises(ValidationError, match="ANNUAL_MYSQL_DATABASE=ata_agent"):
-        annual_settings(annual_mysql_database="other")
+def test_settings_reject_missing_or_legacy_mysql_database():
+    with pytest.raises(ValidationError, match="MYSQL_DATABASE/ANNUAL_MYSQL_DATABASE"):
+        annual_settings(annual_mysql_database="")
+    with pytest.raises(ValidationError, match="legacy MySQL database"):
+        annual_settings(annual_mysql_database="ata_agent")
+
+
+def test_settings_rejects_legacy_postgres_database():
+    with pytest.raises(ValidationError, match="legacy PostgreSQL database"):
+        annual_settings(annual_postgres_database="ai_hunter")
 
 
 def test_postgres_dsn_is_derived_only_from_annual_settings():
@@ -77,6 +84,8 @@ def test_registered_tools_are_annual_only():
         "analyze_sales_receivables",
         "analyze_cash_and_bank",
     }
+    graph_names = {tool.name for tool in tools_for_capability("graph.query")}
+    assert "search_annual_evidence" in graph_names
     assert tools_for_capability("unknown") == []
 
 
@@ -102,4 +111,4 @@ def test_redis_keys_are_namespaced_for_annual_project():
     from ai_hunter.annual_audit.storage.redis_keys import annual_redis_key
 
     settings = annual_settings(annual_redis_namespace="ata:test:")
-    assert annual_redis_key("engagement", 7, settings=settings) == "ata:test:engagement:7"
+    assert annual_redis_key("engagement", 7, settings=settings) == "ata:test:annual_audit:engagement:7"

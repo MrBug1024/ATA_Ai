@@ -2,13 +2,21 @@ from pathlib import Path
 import re
 
 from dotenv import dotenv_values
+from pydantic import AliasChoices
 
 from ai_hunter.app.settings import Settings
 
 
 def test_env_example_keys_are_declared_by_settings():
     example_keys = set(dotenv_values(".env.example"))
-    settings_keys = {name.upper() for name in Settings.model_fields}
+    settings_keys: set[str] = set()
+    for name, field in Settings.model_fields.items():
+        settings_keys.add(name.upper())
+        alias = field.validation_alias
+        if isinstance(alias, AliasChoices):
+            settings_keys.update(str(item).upper() for item in alias.choices)
+        elif alias:
+            settings_keys.add(str(alias).upper())
 
     assert example_keys - settings_keys == set()
 
@@ -34,8 +42,8 @@ def test_ocr_pdf_settings_load_with_standalone_descriptions(monkeypatch):
     settings = Settings(_env_file=".env.example")
 
     assert settings.ocr_table_enable_pdf is True
-    assert settings.ocr_table_enable_image is False
-    assert settings.ocr_auto_rotate_pdf is False
+    assert settings.ocr_table_enable_image is True
+    assert settings.ocr_auto_rotate_pdf is True
     assert settings.ocr_auto_rotate_image is True
     assert settings.ocr_pdf_split_enabled is False
     assert settings.ocr_pdf_split_threshold_mb == 10
@@ -45,14 +53,14 @@ def test_ocr_pdf_settings_load_with_standalone_descriptions(monkeypatch):
     assert settings.ocr_pdf_chunk_concurrency == 1
     assert settings.ocr_pdf_chunk_timeout_seconds == 300
     assert settings.ocr_pdf_chunk_max_retries == 2
-    assert Settings(_env_file=None).ocr_pdf_split_enabled is False
+    assert Settings(_env_file=None, annual_mysql_database="ata_ai").ocr_pdf_split_enabled is False
 
 
 def test_agent_recursion_limit_loads_from_env_example(monkeypatch):
     monkeypatch.delenv("AGENT_RECURSION_LIMIT", raising=False)
 
     assert Settings(_env_file=".env.example").agent_recursion_limit == 8
-    assert Settings(_env_file=None).agent_recursion_limit == 8
+    assert Settings(_env_file=None, annual_mysql_database="ata_ai").agent_recursion_limit == 8
 
 
 def test_direct_environment_reads_are_limited_to_dynamic_admin_password_input():
