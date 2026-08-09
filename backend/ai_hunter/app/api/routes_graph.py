@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..graph.schemas import (
     DemoCaseTraceValidationRequestModel,
@@ -34,6 +34,25 @@ router = APIRouter(
 )
 
 
+def _attach_source_file_proxy_urls(payload, request: Request):
+    """Point evidence file URLs at the authorized API streaming endpoint."""
+    if isinstance(payload, list):
+        for item in payload:
+            _attach_source_file_proxy_urls(item, request)
+        return payload
+    if not isinstance(payload, dict):
+        return payload
+
+    file_id = int(payload.get("file_id") or 0)
+    if file_id > 0:
+        payload["source_file_url"] = str(
+            request.url_for("source_file_content", file_id=str(file_id))
+        )
+    for value in payload.values():
+        _attach_source_file_proxy_urls(value, request)
+    return payload
+
+
 @router.post(
     "/evidence/resolve",
     summary="按 claim 解析证据",
@@ -46,19 +65,21 @@ router = APIRouter(
 )
 async def resolve_evidence(
     payload: EvidenceResolveRequestModel,
+    request: Request,
     identity: Identity = Depends(get_current_identity),
 ) -> EvidenceResolveResponseModel:
     """Resolve one claim into concrete evidence anchors."""
     from ai_hunter.annual_audit.evidence_service import resolve_report_evidence
 
     require_case_access(payload.case_id, identity)
+    result = resolve_report_evidence(
+        engagement_id=payload.case_id,
+        report_ref=payload.report_ref,
+        citation_id=payload.citation_id,
+        claim_id=payload.claim_id,
+    )
     return EvidenceResolveResponseModel.model_validate(
-        resolve_report_evidence(
-            engagement_id=payload.case_id,
-            report_ref=payload.report_ref,
-            citation_id=payload.citation_id,
-            claim_id=payload.claim_id,
-        )
+        _attach_source_file_proxy_urls(result, request)
     )
 
 
@@ -74,6 +95,7 @@ async def resolve_evidence(
 )
 async def relation_evidence(
     payload: RelationEvidenceRequestModel,
+    request: Request,
     identity: Identity = Depends(get_current_identity),
 ) -> RelationEvidenceResponseModel:
     """Return grouped claim traces for one relation."""
@@ -98,21 +120,20 @@ async def relation_evidence(
         chunk_id = str(row.get("chunk_id", "") or "")
         if not chunk_id:
             continue
-        item["evidences"].append(
-            EvidenceItemModel(
-                chunk_id=chunk_id,
-                file_id=int(row.get("file_id", 0) or 0),
-                file_name=str(row.get("file_name", "") or ""),
-                page_no=int(row.get("page_no", 0) or 0),
-                quote_text=str(row.get("quote_text", "") or ""),
-                bbox_list=row.get("bbox_list") or [],
-                page_image_ref=resolve_minio_reference_url(str(row.get("page_image_ref", "") or "")),
-                source_page_id=int(row.get("source_page_id", 0) or 0),
-                source_file_url=resolve_minio_reference_url(str(row.get("storage_ref", "") or "")),
-                content_type=str(row.get("content_type", "") or ""),
-                entity_id=int(row.get("entity_id", 0) or 0),
-            ).model_dump()
-        )
+        evidence_item = EvidenceItemModel(
+            chunk_id=chunk_id,
+            file_id=int(row.get("file_id", 0) or 0),
+            file_name=str(row.get("file_name", "") or ""),
+            page_no=int(row.get("page_no", 0) or 0),
+            quote_text=str(row.get("quote_text", "") or ""),
+            bbox_list=row.get("bbox_list") or [],
+            page_image_ref=resolve_minio_reference_url(str(row.get("page_image_ref", "") or "")),
+            source_page_id=int(row.get("source_page_id", 0) or 0),
+            source_file_url=resolve_minio_reference_url(str(row.get("storage_ref", "") or "")),
+            content_type=str(row.get("content_type", "") or ""),
+            entity_id=int(row.get("entity_id", 0) or 0),
+        ).model_dump()
+        item["evidences"].append(_attach_source_file_proxy_urls(evidence_item, request))
     return RelationEvidenceResponseModel(
         case_id=payload.case_id,
         relation_id=payload.relation_id,
@@ -190,6 +211,7 @@ async def list_case_entities(
     response_description="返回该页可高亮的锚点列表、页尺寸与页图地址。",
 )
 async def page_anchors(
+    request: Request,
     file_id: int = Query(..., description="文件 ID"),
     page_no: int = Query(..., description="页码"),
     chunk_id: str | None = Query(None, description="可选 chunk_id 过滤"),
@@ -240,7 +262,7 @@ async def page_anchors(
         )
         for row in rows
     ]
-    return PageAnchorsResponseModel(
+    result = PageAnchorsResponseModel(
         file_id=file_id,
         file_name=str(first.get("file_name", "") or ""),
         page_no=page_no,
@@ -250,4 +272,7 @@ async def page_anchors(
         source_file_url=resolve_minio_reference_url(str(first.get("storage_ref", "") or "")),
         content_type=str(first.get("content_type", "") or ""),
         anchors=anchors,
+    )
+    return PageAnchorsResponseModel.model_validate(
+        _attach_source_file_proxy_urls(result.model_dump(), request)
     )

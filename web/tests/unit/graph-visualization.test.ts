@@ -211,5 +211,8 @@ describe("graph label helpers", () => {
     expect(graphEntityTypeLabel("Custom Entity")).toBe("custom entity");
     expect(graphEntityTypeLabel("未知类型")).toBe("未知类型");
     expect(graphEntityTypeLabel(undefined)).toBe("未分类");
+    expect(graphEntityTypeLabel("audited_entity")).toBe("公司");
+    expect(graphEntityTypeLabel("bank_account")).toBe("账户");
+    expect(graphEntityTypeLabel("unknown")).toBe("其他（待补标）");
   });
 });

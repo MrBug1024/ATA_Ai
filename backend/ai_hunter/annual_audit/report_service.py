@@ -482,7 +482,12 @@ def _build_followup_tasks(snapshot: dict[str, Any], *, period_end: Any) -> list[
                     "assigned_role": "项目主审",
                     "deadline": period_end,
                     "deliverable": "复核记录、支持性证据和处理结论",
-                    "priority": str(finding.get("risk_level") or "中"),
+                    "priority": {
+                        "urgent": "紧急",
+                        "high": "高",
+                        "medium": "中",
+                        "low": "低",
+                    }.get(str(finding.get("risk_level") or "").lower(), str(finding.get("risk_level") or "中")),
                     "source_engine": f"annual_{analysis_type}",
                 }
             )

@@ -61,6 +61,7 @@ const DEFAULT_MAX_EDGE_LABEL_LENGTH = 16;
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   address: "地址",
+  account: "账户",
   asset: "资产",
   bank: "银行",
   case: "案件",
@@ -73,6 +74,8 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   government: "政府机构",
   government_agency: "政府机构",
   individual: "个人",
+  invoice: "发票",
+  ledger_account: "会计科目",
   law: "法律法规",
   law_firm: "律师事务所",
   legal_provision: "法律条文",
@@ -84,6 +87,20 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   person: "个人",
   procuratorate: "检察院",
   public_security: "公安机关",
+  transaction: "交易",
+  voucher: "凭证",
+  other: "其他（待补标）",
+};
+
+const ANNUAL_AUDIT_ENTITY_TYPE_ALIASES: Record<string, string> = {
+  audited_entity: "company",
+  audited_company: "company",
+  bank_account: "account",
+  bankaccount: "account",
+  customer: "organization",
+  supplier: "organization",
+  related_party: "organization",
+  unknown: "other",
 };
 
 const LEGACY_NPA_ENTITY_TYPES = new Set([
@@ -168,9 +185,9 @@ export function truncateGraphLabel(value: unknown, maxLength: number): string {
 
 /** 后端 entity_type 可能中英混用；已知英文类型本地化，其余做稳定格式化。 */
 export function graphEntityTypeLabel(entityType: unknown): string {
-  const normalized = normalizeEntityType(entityType);
+  const normalized = ANNUAL_AUDIT_ENTITY_TYPE_ALIASES[normalizeEntityType(entityType)] ?? normalizeEntityType(entityType);
   if (LEGACY_NPA_ENTITY_TYPES.has(normalized)) return "审计资料";
-  if (!normalized || normalized === "unknown") return "未分类";
+  if (!normalized) return "未分类";
   const localized = ENTITY_TYPE_LABELS[normalized];
   if (localized) return localized;
 

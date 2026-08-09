@@ -1485,6 +1485,9 @@ class KnowledgeGraphService:
         JOIN public.kg_entity fe ON fe.id = r.from_entity_id
         JOIN public.kg_entity te ON te.id = r.to_entity_id
         WHERE r.case_id = %(case_id)s
+          AND COALESCE(r.status, 'active') = 'active'
+          AND COALESCE(fe.status, 'active') = 'active'
+          AND COALESCE(te.status, 'active') = 'active'
           AND (
                 r.from_entity_id = ANY(%(frontier)s::bigint[])
                 OR r.to_entity_id = ANY(%(frontier)s::bigint[])
@@ -1493,6 +1496,7 @@ class KnowledgeGraphService:
                 %(relation_types)s = '{}'::text[]
                 OR r.relation_type = ANY(%(relation_types)s)
           )
+        ORDER BY r.confidence DESC NULLS LAST, r.id ASC
         LIMIT %(limit)s
         """
         per_level_limit = 200 if depth > 1 else 100
@@ -1559,9 +1563,13 @@ class KnowledgeGraphService:
         FROM public.kg_entity e
         LEFT JOIN (
             SELECT eid, count(*) AS degree FROM (
-                SELECT from_entity_id AS eid FROM public.kg_relation WHERE case_id = %(case_id)s
+                SELECT from_entity_id AS eid
+                FROM public.kg_relation
+                WHERE case_id = %(case_id)s AND COALESCE(status, 'active') = 'active'
                 UNION ALL
-                SELECT to_entity_id AS eid FROM public.kg_relation WHERE case_id = %(case_id)s
+                SELECT to_entity_id AS eid
+                FROM public.kg_relation
+                WHERE case_id = %(case_id)s AND COALESCE(status, 'active') = 'active'
             ) t GROUP BY eid
         ) d ON d.eid = e.id
         WHERE e.case_id = %(case_id)s
@@ -1928,6 +1936,21 @@ class KnowledgeGraphService:
             cur.execute("SELECT case_id FROM public.source_file WHERE id = %s", (file_id,))
             row = cur.fetchone()
         return int(row["case_id"]) if row and row.get("case_id") is not None else None
+
+    def get_source_file(self, file_id: int) -> dict[str, Any] | None:
+        """Return metadata needed to securely stream one source file."""
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, case_id, file_name, content_type, storage_ref, status
+                FROM public.source_file
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (file_id,),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
 
     def fetch_candidate_conflicts_by_chunks(
         self,

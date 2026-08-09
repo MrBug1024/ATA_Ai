@@ -16,6 +16,7 @@ EXPECTED_CAPABILITIES = {
     "audit.full",
     "audit.reaudit",
     "audit.drilldown",
+    "audit.workflow",
     "evidence.resolve",
     "graph.query",
     "task.query",

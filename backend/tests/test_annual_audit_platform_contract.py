@@ -68,6 +68,8 @@ def test_app_mounts_only_platform_and_annual_routes():
         ("查看报告结论的证据原文", "evidence.resolve"),
         ("查看银行账户与对手方关系图谱", "graph.query"),
         ("还缺什么资料", "material.validate"),
+        ("我想知道年审最终应该有哪些产出结果", "audit.workflow"),
+        ("请处理年审项目、资料、审计循环、证据、底稿、报告、任务全部业务流程", "audit.workflow"),
     ],
 )
 def test_annual_language_routes_to_annual_capabilities(query, capability):

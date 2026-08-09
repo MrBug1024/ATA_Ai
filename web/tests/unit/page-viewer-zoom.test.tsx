@@ -64,6 +64,25 @@ describe("PageViewer 全屏查看", () => {
   });
 });
 
+describe("Spreadsheet evidence rendering", () => {
+  it("keeps spreadsheet mode when the display name has a locator suffix", () => {
+    render(
+      <PageViewer
+        initialPage={{
+          ...imagePage(),
+          file_name: "咨询费合同抽查表.xlsx · 咨询费合同抽查表!45",
+          source_file_url: undefined,
+          content_type: "",
+        }}
+        selectedEvidence={null}
+      />
+    );
+
+    expect(screen.getByText("咨询费合同抽查表.xlsx · 咨询费合同抽查表!45")).toBeTruthy();
+    expect(screen.queryByAltText("咨询费合同抽查表.xlsx · 咨询费合同抽查表!45 第 2 页")).toBeNull();
+  });
+});
+
 function pdfPrimaryPage(): PageAnchorsResponse {
   return {
     file_id: 9,

@@ -14,7 +14,6 @@ from ...services.kg_service import get_kg_service
 from ...services.graph_identity import (
     DEFAULT_GRAPH_STATUS,
     build_entity_key,
-    build_relation_key,
     normalize_entity_name,
 )
 from ...settings import get_settings
@@ -730,19 +729,11 @@ def _coerce_optional_str(value: Any) -> str | None:
 def _build_fallback_bundle(state: AuditGraphState, chunk_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     entity_name = state.get("current_entity_name", "")
     entity_temp_id = "entity_audited_1"
-    relation_temp_id = "relation_placeholder_1"
     first_chunk_id = chunk_ids[0]
     case_id = int(state.get("current_case_id", 0) or 0)
     canonical_name = entity_name or "未知被审计单位"
     normalized_name = normalize_entity_name(canonical_name)
     entity_key = build_entity_key(case_id=case_id, entity_type="company", normalized_name=normalized_name)
-    relation_key = build_relation_key(
-        case_id=case_id,
-        relation_type="audited_entity",
-        from_entity_key=entity_key,
-        to_entity_key=entity_key,
-        relation_label="被审计单位",
-    )
     return {
         "entities": [
             {
@@ -762,32 +753,14 @@ def _build_fallback_bundle(state: AuditGraphState, chunk_ids: list[str]) -> dict
                 "status": DEFAULT_GRAPH_STATUS,
             }
         ],
-        "relations": [
-            {
-                "relation_temp_id": relation_temp_id,
-                "relation_key": relation_key,
-                "from_entity_temp_id": entity_temp_id,
-                "to_entity_temp_id": entity_temp_id,
-                "relation_type": "audited_entity",
-                "relation_label": "被审计单位",
-                "direction": "directed",
-                "amount": None,
-                "amount_currency": "CNY",
-                "event_date": None,
-                "attributes": {"placeholder": True},
-                "evidence_chunk_ids": [first_chunk_id],
-                "confidence": 0.3,
-                "source_count": 1,
-                "human_verified": False,
-                "status": DEFAULT_GRAPH_STATUS,
-            }
-        ],
+        # 回退模式只建立可证据化的被审计单位锚点，不捏造“单位关联自身”的关系。
+        # 等待模型抽取或人工补录真实关系后再入图。
+        "relations": [],
         "claims": [
             {
                 "claim_type": "entity_fact",
                 "claim_text": f"当前资料对应被审计单位：{entity_name or '未知被审计单位'}",
                 "entity_temp_id": entity_temp_id,
-                "relation_temp_id": relation_temp_id,
                 "claim_value": {},
                 "evidence_chunk_ids": [first_chunk_id],
                 "confidence": 0.5,

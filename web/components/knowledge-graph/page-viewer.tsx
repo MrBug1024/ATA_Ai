@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { BboxOverlay } from "./bbox-overlay";
 import { usePageAnchors } from "@/lib/hooks/use-page-anchors";
 import { useElementSize } from "@/lib/hooks/use-element-size";
+import { apiFetch } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 import type { BBox, EvidenceItem, PageAnchorsResponse } from "@/lib/types/knowledge-graph";
 
@@ -32,9 +33,15 @@ interface PageViewerProps {
 
 type RenderMode = "image" | "pdf" | "spreadsheet" | "text" | "none";
 
+function resolveFileExtension(fileName: string): string {
+  const cleanName = fileName.split(/[?#]/, 1)[0];
+  const match = cleanName.match(/\.([a-z0-9]+)(?=\s|$)/i);
+  return match?.[1]?.toLowerCase() ?? "";
+}
+
 function resolveMode(contentType: string | undefined, url: string | undefined, fileName: string): RenderMode {
   const mime = contentType ?? "";
-  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  const ext = resolveFileExtension(fileName);
   if (mime.startsWith("text/")) return "text";
   if (
     mime.includes("spreadsheet") ||
@@ -90,7 +97,15 @@ function ZoomedPdfPage({ url, pageNumber, bboxes }: { url: string; pageNumber: n
   );
 }
 
-function SpreadsheetEvidenceView({ evidence, fileName }: { evidence: EvidenceItem | null; fileName: string }) {
+function SpreadsheetEvidenceView({
+  evidence,
+  fileName,
+  sourceUrl,
+}: {
+  evidence: EvidenceItem | null;
+  fileName: string;
+  sourceUrl?: string;
+}) {
   return (
     <div className="flex h-full w-full max-w-3xl flex-col gap-3 overflow-auto rounded-md border bg-background p-4 text-sm">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b pb-3 text-xs text-muted-foreground">
@@ -107,6 +122,17 @@ function SpreadsheetEvidenceView({ evidence, fileName }: { evidence: EvidenceIte
       <div className="whitespace-pre-wrap rounded bg-muted/30 p-3 font-mono text-xs leading-6">
         {evidence?.quote_text || "当前表格定位暂无原文片段"}
       </div>
+      {sourceUrl && (
+        <a
+          href={sourceUrl}
+          download={fileName.split(" 路 ")[0] || fileName}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex w-fit items-center rounded-md border px-2.5 py-1.5 text-xs text-primary hover:bg-primary/5"
+        >
+          打开原始文件
+        </a>
+      )}
       <div className="text-xs text-muted-foreground">
         这是按工作表、行和单元格定位的表格证据，不将 Excel 行号冒充 PDF 页码。
       </div>
@@ -143,10 +169,60 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
       ? navPage.file_id
       : selectedEvidence?.file_id ?? currentPage?.file_id ?? 0;
 
+  const sourceUrl =
+    navOverride && navPage
+      ? navPage.source_file_url ?? selectedEvidence?.source_file_url
+      : selectedEvidence?.source_file_url ?? currentPage?.source_file_url;
+  const contentType = selectedEvidence?.content_type ?? currentPage?.content_type;
+  const fileName = selectedEvidence?.file_name ?? currentPage?.file_name ?? `文件 ${fileId}`;
+  const mode = resolveMode(contentType, sourceUrl, fileName);
+
   useEffect(() => {
     setMediaError(false);
     setZoomOpen(false);
   }, [fileId, pageNo]);
+
+  // Object storage URLs are not guaranteed to be reachable from the browser
+  // and cannot carry the app's bearer token. Materialize the authorized API
+  // file route as a blob URL before handing it to img/PDF.js.
+  const [browserSourceUrl, setBrowserSourceUrl] = useState<string | undefined>(sourceUrl);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    const isApiFileUrl = /\/files\/source-files\/\d+\/content(?:[?#]|$)/.test(sourceUrl ?? "");
+
+    setSourceLoading(isApiFileUrl && !!sourceUrl);
+    if (!sourceUrl || !isApiFileUrl) {
+      setBrowserSourceUrl(sourceUrl);
+      return () => undefined;
+    }
+
+    setBrowserSourceUrl(undefined);
+    const controller = new AbortController();
+    apiFetch(sourceUrl, { signal: controller.signal }, { auth: true })
+      .then((response) => {
+        if (!response.ok) throw new Error(`file preview failed (${response.status})`);
+        return response.blob();
+      })
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setBrowserSourceUrl(objectUrl);
+        setSourceLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled || (error instanceof Error && error.name === "AbortError")) return;
+        setSourceLoading(false);
+        setMediaError(true);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [sourceUrl]);
 
   if (!currentPage) {
     return (
@@ -155,14 +231,6 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
       </div>
     );
   }
-
-  const sourceUrl =
-    navOverride && navPage
-      ? navPage.source_file_url ?? selectedEvidence?.source_file_url
-      : selectedEvidence?.source_file_url ?? currentPage.source_file_url;
-  const contentType = selectedEvidence?.content_type ?? currentPage.content_type;
-  const fileName = selectedEvidence?.file_name ?? currentPage.file_name ?? `文件 ${fileId}`;
-  const mode = resolveMode(contentType, sourceUrl, fileName);
 
   // bbox：浏览其它页时用该页 anchors，否则用选中证据自身的框
   const bboxes =
@@ -173,7 +241,7 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
         : currentPage.anchors.flatMap((a) => a.bbox_list);
 
   const pageAlt = `${fileName} 第 ${pageNo} 页`;
-  const zoomable = (mode === "image" || mode === "pdf") && !!sourceUrl && !mediaError;
+  const zoomable = (mode === "image" || mode === "pdf") && !!browserSourceUrl && !mediaError;
 
   function goToPage(delta: number) {
     setNavOverride({ fileId, pageNo: pageNo + delta });
@@ -186,14 +254,27 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
         className="flex flex-1 items-start justify-center overflow-auto rounded-md bg-muted/20 p-2"
       >
         {mode === "text" && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
             <FileText className="h-5 w-5 opacity-50" />
-            文本类材料无页面视图，请查看左侧引用的原文片段。
+            <p>文本类材料没有页面版式，以下为证据原文片段：</p>
+            <p className="max-w-xl whitespace-pre-wrap rounded bg-muted/40 p-3 text-left text-xs leading-6 text-foreground">
+              {selectedEvidence?.quote_text || currentPage.anchors[0]?.quote_text || "暂无原文片段"}
+            </p>
           </div>
         )}
 
-        {mode === "spreadsheet" && (
-          <SpreadsheetEvidenceView evidence={selectedEvidence} fileName={fileName} />
+        {sourceLoading && (
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> 加载原始文件中…
+          </div>
+        )}
+
+        {mode === "spreadsheet" && !sourceLoading && (
+          <SpreadsheetEvidenceView
+            evidence={selectedEvidence}
+            fileName={fileName}
+            sourceUrl={browserSourceUrl}
+          />
         )}
 
         {mode === "none" && (
@@ -203,13 +284,13 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
           </div>
         )}
 
-        {mode === "image" && sourceUrl && mediaError && (
+        {mode === "image" && !sourceLoading && mediaError && (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <ImageOff className="h-4 w-4" /> 图片加载失败
           </div>
         )}
 
-        {zoomable && (
+        {zoomable && browserSourceUrl && (
           <div
             role="button"
             tabIndex={0}
@@ -224,14 +305,14 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
             {mode === "image" ? (
               <ImageWithBboxes
                 key={`${fileId}-${pageNo}`}
-                src={sourceUrl as string}
+                src={browserSourceUrl}
                 alt={pageAlt}
                 bboxes={bboxes}
                 onError={() => setMediaError(true)}
               />
             ) : (
               <PdfPageView
-                url={sourceUrl as string}
+                url={browserSourceUrl}
                 pageNumber={pageNo}
                 width={containerWidth}
                 bboxes={bboxes}
@@ -260,7 +341,7 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
       )}
 
       {/* 全屏查看(z 高于 GraphModal 内的证据 Sheet) */}
-      {zoomable && (
+      {zoomable && browserSourceUrl && (
         <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
           <DialogContent className="z-[70] flex h-[92vh] w-[92vw] max-w-[92vw] flex-col gap-0 overflow-hidden p-0 sm:max-w-[92vw]">
             <DialogTitle className="shrink-0 truncate border-b px-4 py-2.5 pr-12 text-sm font-medium">
@@ -270,7 +351,7 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
               {mode === "image" ? (
                 <div className="flex h-full items-center justify-center p-4">
                   <ImageWithBboxes
-                    src={sourceUrl as string}
+                    src={browserSourceUrl}
                     alt={pageAlt}
                     bboxes={bboxes}
                     wrapperClassName="max-h-full"
@@ -279,7 +360,7 @@ export function PageViewer({ initialPage, selectedEvidence }: PageViewerProps) {
                 </div>
               ) : (
                 <ZoomedPdfPage
-                  url={sourceUrl as string}
+                  url={browserSourceUrl}
                   pageNumber={pageNo}
                   bboxes={bboxes}
                 />

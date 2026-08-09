@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "status": "blocked_missing_or_invalid_relations",
+  "source": "E:\\实验室\\ATA_AI\\outputs\\data-relations\\scenario-relationship.json",
+  "errors": [
+    "缺少文件：E:\\实验室\\ATA_AI\\outputs\\data-relations\\scenario-relationship.json"
+  ],
+  "next_action": "先运行或修复 discover-data-relations，直到 scenario-relationship.json 为 complete，relations.mmd 与 relation-report.md 存在且无 validation-errors.json；不得直接读取原始历史数据代替上游。"
+}

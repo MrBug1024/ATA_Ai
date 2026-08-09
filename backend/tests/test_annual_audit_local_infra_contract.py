@@ -40,7 +40,7 @@ def test_annual_postgres_contract_uses_isolated_platform_schema():
     assert "references public.cases" not in contract
 
 
-def test_local_launcher_forces_annual_mode_on_the_single_backend_port():
+def test_local_launcher_prefers_configured_company_minio_and_keeps_local_fallback():
     launcher = (
         REPO_ROOT / "scripts" / "annual-audit-local.ps1"
     ).read_text(encoding="utf-8")
@@ -52,10 +52,19 @@ def test_local_launcher_forces_annual_mode_on_the_single_backend_port():
     assert '$backendPort = "8080"' in launcher
     assert '$env:APP_PORT = $backendPort' in launcher
     assert '$env:ANNUAL_POSTGRES_DSN' in launcher
+    assert 'function Get-BackendSettingValue' in launcher
+    assert 'function Use-ConfiguredMySql' in launcher
+    assert 'function Use-ConfiguredRedis' in launcher
+    assert 'function Use-LocalMinio' in launcher
+    assert '(-not (Use-LocalMinio) -and $name -like "ANNUAL_MINIO_*")' in launcher
+    assert 'if (Use-LocalMinio) {' in launcher
     assert '$env:AI_HUNTER_MINIO_ENABLED = "true"' in launcher
+    assert 'Remove-Item -Path "Env:$name"' in launcher
+    assert '$upServices = @("postgres")' in launcher
+    assert '& $Docker @composeArgs run --rm minio-init' in launcher
     assert '[ValidateSet("up", "down", "status", "verify", "migrate", "seed", "backend")]' in launcher
     assert "Invoke-AnnualMigrations" in launcher
-    assert "up -d --wait postgres mysql redis minio" in launcher
+    assert '$upServices += "minio"' in launcher
     assert "run --rm minio-init" in launcher
     assert "ANNUAL_MYSQL_DATABASE=ata_ai" in env_example
     assert "ANNUAL_MINIO_BUCKET_RAW=ata-annual-raw" in env_example

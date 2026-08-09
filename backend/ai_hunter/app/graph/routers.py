@@ -83,6 +83,22 @@ DRILLDOWN_KEYWORDS = (
     "底稿",
 )
 TASK_KEYWORDS = ("任务", "审计程序", "待办", "督办")
+WORKFLOW_KEYWORDS = (
+    "全部业务流程",
+    "完整业务流程",
+    "完整流程",
+    "全流程",
+    "端到端",
+    "业务闭环",
+    "最终产出",
+    "最终成果",
+    "最终交付",
+    "交付物",
+    "应该有哪些产出",
+    "应该得到什么",
+    "年审最终要",
+    "年审最终应该",
+)
 TASK_WRITE_ACTIONS = {
     "create": ("创建任务", "新增任务", "新建任务"),
     "complete": ("标记完成", "完成任务", "设为完成"),
@@ -241,6 +257,8 @@ def _rule_route(state: AuditGraphState) -> RouteDecisionModel | None:
         return _decision("audit_analysis", "audit.reaudit", confidence=0.99, source="rule", case_id=case_id, action="reaudit")
     if any(keyword in query for keyword in FULL_AUDIT_KEYWORDS):
         return _decision("audit_analysis", "audit.full", confidence=0.99, source="rule", case_id=case_id, action="generate")
+    if any(keyword in query for keyword in WORKFLOW_KEYWORDS):
+        return _decision("audit_analysis", "audit.workflow", confidence=0.99, source="rule", case_id=case_id, action="guide")
     if state.get("uploaded_files"):
         return _decision("operator", "material.upload", confidence=1.0, source="context", case_id=case_id, action="upload")
     for action, phrases in TASK_WRITE_ACTIONS.items():

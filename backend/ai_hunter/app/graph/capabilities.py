@@ -166,6 +166,13 @@ _CAPABILITY_SPEC_LIST = (
         ),
     ),
     _spec(
+        "audit.workflow",
+        "说明完整年审业务流程、最终交付物和当前项目完成边界",
+        "audit_analysis",
+        business_executor="query_workflow_guide",
+        permission="report",
+    ),
+    _spec(
         "evidence.resolve",
         "查询当前年审项目的原始证据、引用与页锚点",
         "audit_analysis",

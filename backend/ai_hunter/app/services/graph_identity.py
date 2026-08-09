@@ -4,17 +4,65 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 
 DEFAULT_GRAPH_STATUS = "active"
 
+# 图谱的 entity_type 是实体本体类型，不是业务角色。模型经常把“客户、供应商、
+# 被审计单位”等角色直接当成类型输出，因此在进入稳定 key 和数据库前统一一次。
+# 这里保留 legacy alias，避免历史数据在前端继续显示为未分类。
+ENTITY_TYPE_ALIASES = {
+    "audited_entity": "company",
+    "audited_company": "company",
+    "enterprise": "company",
+    "企业": "company",
+    "被审计单位": "company",
+    "related_party": "organization",
+    "关联方": "organization",
+    "customer": "organization",
+    "客户": "organization",
+    "supplier": "organization",
+    "供应商": "organization",
+    "bank_account": "account",
+    "bankaccount": "account",
+    "银行账户": "account",
+    "ledger": "ledger_account",
+    "会计科目": "ledger_account",
+    "unknown": "other",
+    "未分类": "other",
+    "其他": "other",
+}
+
+RELATION_TYPE_ALIASES = {
+    "": "related_to",
+    "related": "related_to",
+    "关联": "related_to",
+    "相关": "related_to",
+}
+
 
 def normalize_entity_name(name: str) -> str:
     """Normalize entity names so trivial OCR punctuation and spacing noise does not churn keys."""
-    cleaned = re.sub(r"\s+", "", name or "")
+    cleaned = unicodedata.normalize("NFKC", str(name or ""))
+    cleaned = re.sub(r"\s+", "", cleaned)
     cleaned = cleaned.replace("（", "(").replace("）", ")")
     return cleaned.strip()
+
+
+def normalize_entity_type(entity_type: str | None) -> str:
+    """Return the canonical entity taxonomy used by extraction, persistence, and UI."""
+    normalized = unicodedata.normalize("NFKC", str(entity_type or "")).strip().lower()
+    normalized = re.sub(r"[\s-]+", "_", normalized)
+    return ENTITY_TYPE_ALIASES.get(normalized, normalized or "other")
+
+
+def normalize_relation_type(relation_type: str | None) -> str:
+    """Return a non-empty relation code while preserving domain-specific relation types."""
+    normalized = unicodedata.normalize("NFKC", str(relation_type or "")).strip().lower()
+    normalized = re.sub(r"[\s-]+", "_", normalized)
+    return RELATION_TYPE_ALIASES.get(normalized, normalized or "related_to")
 
 
 def build_entity_key(*, case_id: int, entity_type: str, normalized_name: str) -> str:

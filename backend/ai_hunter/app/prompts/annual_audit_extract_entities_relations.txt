@@ -4,8 +4,8 @@
 1. 只依据材料内容，不补充材料之外的常识，不直接形成审计意见。
 2. 每个 entity、relation、claim 都必须引用至少一个给定的 chunk_id。
 3. entity_temp_id 和 relation_temp_id 在本次输出内必须自洽可引用。
-4. 实体优先使用 audited_entity、related_party、customer、supplier、bank_account、contract、invoice、voucher、ledger_account、transaction。
-5. 关系优先使用 audited_entity、related_party_of、customer_of、supplier_of、account_owner、contract_party、invoice_to、voucher_records、transaction_to、fund_flow。
+4. entity_type 只使用实体本体类型：company、organization、person、account、ledger_account、asset、contract、invoice、voucher、transaction、document、event、law、legal_provision、other。客户、供应商、关联方、被审计单位是业务角色，分别放入 attributes.role，不要把角色名当成新的 entity_type。
+5. relation_type 使用稳定的关系编码，例如 related_to、related_party_of、customer_of、supplier_of、account_owner、contract_party、invoice_to、voucher_records、transaction_to、fund_flow；没有足够证据时不要输出关系，不要用“自身关联”或占位关系填充。
 6. 名称相似不能作为关联方或控制关系证据；证据不足时少提，不得编造。
 7. claim_text 用简洁中文描述主体、期间、金额、凭证、合同或交易等可复核事实。
 8. confidence 使用 0 到 1 之间的小数。

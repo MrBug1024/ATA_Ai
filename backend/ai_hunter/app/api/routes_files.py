@@ -8,7 +8,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from ..auth.identity import Identity, get_current_identity
@@ -21,7 +21,7 @@ from ..graph.state import FileItem
 from ..logging_utils import build_request_logger, preview_text
 from ..services.kg_service import get_kg_service
 from ..services.material_event_progress import build_material_event_id, mark_upload_ingest_progress
-from ..services.minio_service import resolve_minio_reference_url
+from ..services.minio_service import get_minio_service, resolve_minio_reference_url
 from ..services.upload_ingest_jobs import enqueue_upload_ingest_job
 from ..settings import get_settings
 from ..subgraphs.ingest_graph import (
@@ -39,6 +39,53 @@ router = APIRouter(prefix="/files", tags=["files"])
 upload_parse_graph = build_upload_parse_graph()
 knowledge_graph_graph = build_knowledge_graph_graph()
 LOGGER = logging.getLogger(__name__)
+
+
+@router.get(
+    "/source-files/{file_id}/content",
+    name="source_file_content",
+    summary="Serve one authorized source file for evidence preview",
+    response_class=Response,
+)
+async def source_file_content(
+    file_id: int,
+    identity: Identity = Depends(get_current_identity),
+) -> Response:
+    """Stream a source object through the API instead of exposing MinIO to browsers.
+
+    PDF.js and image elements cannot reliably attach the application's bearer
+    token to a raw object-storage URL.  Keeping the object lookup here also
+    gives the route one place to enforce the owning case ACL.
+    """
+    source_file = get_kg_service().get_source_file(file_id)
+    if not source_file or str(source_file.get("status") or "active") != "active":
+        raise HTTPException(status_code=404, detail="源文件不存在")
+
+    case_id = int(source_file.get("case_id") or 0)
+    require_case_access(case_id, identity)
+    storage_ref = str(source_file.get("storage_ref") or "").strip()
+    if not storage_ref:
+        raise HTTPException(status_code=404, detail="源文件没有可读取的存储引用")
+
+    try:
+        content = get_minio_service().get_object_bytes(storage_ref)
+    except Exception as exc:
+        LOGGER.exception("source_file_content_failed file_id=%s", file_id)
+        raise HTTPException(status_code=502, detail="源文件读取失败") from exc
+
+    file_name = Path(str(source_file.get("file_name") or "source-file")).name
+    content_type = str(source_file.get("content_type") or "application/octet-stream")
+    from urllib.parse import quote
+
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(file_name)}",
+            "Cache-Control": "private, max-age=300",
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 class UploadBatchFileResponse(BaseModel):

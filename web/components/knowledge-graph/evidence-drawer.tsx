@@ -87,7 +87,7 @@ export function EvidenceDrawer({ variant = "overlay" }: EvidenceDrawerProps) {
             )}
             {evidences.map((ev, i) => (
               <button
-                key={ev.chunk_id}
+                key={`${ev.chunk_id}-${ev.file_id}-${ev.page_no}-${i}`}
                 onClick={() => setSelectedIndex(i)}
                 className={cn(
                   "mb-1.5 w-full rounded-md p-2 text-left text-xs transition-colors",
