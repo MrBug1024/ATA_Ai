@@ -410,6 +410,18 @@ class CitationCoverageModel(BaseModel):
         default_factory=list,
         description="当前仍未在正文命中的关键断言列表。",
     )
+    unbound_count: int = Field(
+        default=0,
+        description="最新年审发现中缺少可回溯证据锚点的数量。",
+    )
+    evidence_blocked: bool = Field(
+        default=False,
+        description="是否因未绑定证据而阻断审计草稿的证据放行。",
+    )
+    blocking_status: str = Field(
+        default="ready",
+        description="证据门禁状态；evidence_blocked 表示不能据此放行。",
+    )
 
 
 class EvidenceResolveRequestModel(BaseModel):
@@ -442,6 +454,13 @@ class EvidenceResolveResponseModel(BaseModel):
         default=None,
         description="主证据所在页的高亮锚点数据，前端可直接用于首屏展示。",
     )
+    annual_finding_id: int = Field(default=0, description="年审权威发现记录 ID。")
+    analysis_run_id: int = Field(default=0, description="生成该年审发现的分析运行 ID。")
+    analysis_type: str = Field(default="", description="年审分析类型。")
+    rule_metadata: dict[str, Any] = Field(default_factory=dict, description="冻结的规则编码与版本。")
+    finding_metadata: dict[str, Any] = Field(default_factory=dict, description="冻结的发现摘要。")
+    anchor_status: str = Field(default="", description="冻结证据锚定状态。")
+    citation_source: str = Field(default="", description="引用解析来源。")
     resolution_status: str = Field(
         default="ok",
         description=(

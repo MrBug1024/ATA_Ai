@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Any, Iterator
 
 import psycopg
-from psycopg.errors import UndefinedTable
+from psycopg.errors import UndefinedColumn, UndefinedTable
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -921,6 +921,56 @@ class KnowledgeGraphService:
                 returned.append(dict(cur.fetchone()))
             conn.commit()
             return returned
+
+    def find_active_annual_projection_claims(
+        self,
+        *,
+        case_id: int,
+        finding_keys: list[str],
+    ) -> list[dict[str, Any]]:
+        """Find reusable graph claims created from deterministic annual findings.
+
+        Annual rule projections are immutable facts keyed by a hash of their
+        rule result and canonical evidence anchors.  Reusing an unchanged
+        claim prevents every report regeneration from duplicating graph claims
+        and evidence links while preserving report-version citation mappings.
+        """
+
+        normalized_keys = [str(key).strip() for key in finding_keys if str(key).strip()]
+        if case_id <= 0 or not normalized_keys:
+            return []
+        query = """
+        SELECT
+            id,
+            entity_id,
+            relation_id,
+            (claim_value ->> 'annual_finding_key') AS annual_finding_key
+        FROM public.kg_claim
+        WHERE case_id = %(case_id)s
+          AND status = 'active'
+          AND claim_value ->> 'source_kind' = 'annual_rule'
+          AND claim_value ->> 'annual_finding_key' = ANY(%(finding_keys)s)
+        ORDER BY id DESC
+        """
+        try:
+            with self.connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    query,
+                    {
+                        "case_id": int(case_id),
+                        "finding_keys": normalized_keys,
+                    },
+                )
+                return [dict(row) for row in cur.fetchall()]
+        except (UndefinedTable, UndefinedColumn):
+            # A rolling deployment may have an older graph schema.  The
+            # caller will skip graph projection instead of fabricating a
+            # non-durable mapping.
+            LOGGER.warning(
+                "find_annual_projection_claims_skipped_missing_schema case_id=%s",
+                case_id,
+            )
+            return []
 
     def insert_reconciliation_ledger(
         self,
@@ -1885,6 +1935,10 @@ class KnowledgeGraphService:
                     "claim_type": str(row.get("claim_type", "") or ""),
                     "claim_text": str(row.get("claim_text", "") or ""),
                     "confidence": float(row.get("confidence", 0) or 0),
+                    # This query is backed by PostgreSQL kg_claim. Keep the
+                    # provenance through the response pipeline so only these
+                    # IDs are persisted to report_citation_map.
+                    "_graph_backed": True,
                     "evidences": [],
                 },
             )

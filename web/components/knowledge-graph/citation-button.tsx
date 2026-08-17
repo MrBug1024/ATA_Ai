@@ -24,10 +24,10 @@ export function CitationButton({ citationId }: CitationButtonProps) {
       type="button"
       onClick={handleClick}
       disabled={disabled}
-      className="mx-0.5 inline-flex h-4 min-w-4 cursor-pointer items-center justify-center rounded bg-primary/15 px-1 text-[10px] font-semibold text-primary hover:bg-primary/25 disabled:cursor-default disabled:opacity-50 transition-colors"
+      className="mx-0.5 inline-flex h-4 cursor-pointer items-center justify-center rounded bg-primary/15 px-1 text-[10px] font-semibold text-primary hover:bg-primary/25 disabled:cursor-default disabled:opacity-50 transition-colors"
       title={disabled ? `角标 [${citationId}]` : `查看角标 [${citationId}] 的证据`}
     >
-      {citationId}
+      [{citationId}]
     </button>
   );
 }

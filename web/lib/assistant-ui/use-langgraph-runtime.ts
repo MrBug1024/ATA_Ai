@@ -5,7 +5,11 @@ import { useSWRConfig } from "swr";
 import { useExternalStoreRuntime, type AppendMessage, type AttachmentAdapter } from "@assistant-ui/react";
 import { ThinkingContext } from "./thinking-context";
 import { useThinking } from "./use-thinking";
-import { runStream, type StreamContentSnapshot } from "./sse";
+import {
+  runStream,
+  type FinalResponseMetadata,
+  type StreamContentSnapshot,
+} from "./sse";
 import { convertDbMessage } from "./convert-message";
 import {
   consumeFileItemsByAttachmentIds,
@@ -28,6 +32,7 @@ type SendInput = {
 
 interface RunTurnOptions {
   clientTurnId: string;
+  streamMessageId: string;
   regenerate?: boolean;
   selectedAssistantTurnId?: string;
 }
@@ -171,7 +176,86 @@ export function useLanggraphRuntime(
             },
             onAbortRef: (cancel) => { abortRef.current = cancel; },
             onThinking: updateThinking,
-            onFinal: (ref) => setState((prev) => ({ ...prev, reportRef: ref })),
+            onFinal: (ref, finalReport, responseMetadata?: FinalResponseMetadata) => {
+              // A scheduled token flush must never overwrite the authoritative
+              // final message after the SSE stream completes.
+              const pendingSnapshot = pendingContentRef.current;
+              cancelFlush();
+              pendingContentRef.current = null;
+              setState((prev) => {
+                const messages = [...prev.messages];
+                const messageIndex = messages.findIndex(
+                  (message) =>
+                    message.id === options.streamMessageId &&
+                    message.role === "assistant"
+                );
+
+                if (messageIndex !== -1) {
+                  const current = messages[messageIndex];
+                  const hasFinalReport =
+                    typeof finalReport === "string" &&
+                    finalReport.trim().length > 0;
+                  const existingCustom =
+                    current.metadata?.custom &&
+                    typeof current.metadata.custom === "object" &&
+                    !Array.isArray(current.metadata.custom)
+                      ? (current.metadata.custom as Record<string, unknown>)
+                      : {};
+                  const traceItems = responseMetadata?.traceItems ?? [];
+                  const citationCoverage = responseMetadata?.citationCoverage ?? {};
+                  // Keep `undefined` distinct from []: the former identifies
+                  // legacy persisted replies, while [] is a newly evaluated
+                  // reply without successful deterministic analysis runs.
+                  const responseAnalysisRuns = responseMetadata?.responseAnalysisRuns;
+                  const unresolvedRelations = responseMetadata?.unresolvedRelations ?? [];
+                  const unresolvedClaims = responseMetadata?.unresolvedClaims ?? [];
+                  const routeDecision = responseMetadata?.routeDecision ?? null;
+                  const assistantMessageId = responseMetadata?.assistantMessageId ?? "";
+                  messages[messageIndex] = {
+                    ...current,
+                    // The final response is what the backend persists and what
+                    // a page reload renders. Applying it here keeps citations
+                    // visible without a browser refresh.
+                    content: hasFinalReport
+                      ? finalReport
+                      : pendingSnapshot?.text ?? current.content,
+                    // Do not retain transient section/reasoning parts once the
+                    // authoritative Markdown replaces the streamed snapshot.
+                    _contentParts: hasFinalReport
+                      ? undefined
+                      : pendingSnapshot?.parts ?? current._contentParts,
+                    metadata: {
+                      ...(current.metadata ?? {}),
+                      final_report_ref: ref,
+                      assistant_message_id: assistantMessageId,
+                      route_decision: routeDecision,
+                      trace_items: traceItems,
+                      citation_coverage: citationCoverage,
+                      response_analysis_runs: responseAnalysisRuns,
+                      unresolved_relations: unresolvedRelations,
+                      unresolved_claims: unresolvedClaims,
+                      custom: {
+                        ...existingCustom,
+                        finalReportRef: ref || null,
+                        assistantMessageId,
+                        routeDecision,
+                        traceItems,
+                        citationCoverage,
+                        responseAnalysisRuns,
+                        unresolvedRelations,
+                        unresolvedClaims,
+                      },
+                    },
+                  };
+                }
+
+                return {
+                  ...prev,
+                  messages,
+                  reportRef: ref || prev.reportRef,
+                };
+              });
+            },
           },
           scheduleFlush,
           cancelFlush,
@@ -242,7 +326,10 @@ export function useLanggraphRuntime(
       const fileItems = collectFileItems(message);
       attachmentsRef.current.set(userMsgId, fileItems);
 
-      await runTurn(content, fileItems, { clientTurnId: userMsgId });
+      await runTurn(content, fileItems, {
+        clientTurnId: userMsgId,
+        streamMessageId: streamMsgId,
+      });
     },
     [threadId, runTurn, initThinking]
   );
@@ -307,6 +394,7 @@ export function useLanggraphRuntime(
       const fileItems = attachmentsRef.current.get(parentId) ?? [];
       await runTurn(parentMessage.content, fileItems, {
         clientTurnId: parentMessage._clientTurnId,
+        streamMessageId: streamMsgId,
         regenerate: !retryingFailedRequest,
       });
     },

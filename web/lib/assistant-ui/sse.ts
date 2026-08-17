@@ -21,7 +21,12 @@ export type LangGraphSseEvent =
   | { type: "section_chunk"; sectionId: string; text: string }
   | { type: "section_reasoning_chunk"; sectionId: string; text: string }
   | { type: "section_done"; sectionId: string }
-  | { type: "final"; finalReportRef?: string; finalReport?: string }
+  | {
+      type: "final";
+      finalReportRef?: string;
+      finalReport?: string;
+      metadata?: FinalResponseMetadata;
+    }
   | { type: "done"; threadId?: string }
   | { type: "error"; threadId?: string; message: string }
   | { type: "unknown"; event: string; data: Record<string, unknown> };
@@ -29,6 +34,21 @@ export type LangGraphSseEvent =
 export interface StreamContentSnapshot {
   text: string;
   parts?: DbMessageContentParts;
+}
+
+/**
+ * Response-scoped graph/evidence snapshot carried by the terminal SSE event.
+ * All values are retained on the assistant message that produced them, rather
+ * than being resolved from mutable thread-wide state after another turn runs.
+ */
+export interface FinalResponseMetadata {
+  assistantMessageId?: string;
+  routeDecision?: Record<string, unknown> | null;
+  traceItems?: Record<string, unknown>[];
+  citationCoverage?: Record<string, unknown>;
+  responseAnalysisRuns?: Record<string, unknown>[];
+  unresolvedRelations?: Record<string, unknown>[];
+  unresolvedClaims?: Record<string, unknown>[];
 }
 
 type StreamContentPart = DbMessageContentParts[number];
@@ -65,6 +85,22 @@ function stringField(data: Record<string, unknown>, key: string): string | undef
 function numberField(data: Record<string, unknown>, key: string): number | undefined {
   const value = data[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function recordField(data: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = data[key];
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function recordArrayField(data: Record<string, unknown>, key: string): Record<string, unknown>[] | undefined {
+  const value = data[key];
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(
+    (item): item is Record<string, unknown> =>
+      typeof item === "object" && item !== null && !Array.isArray(item)
+  );
 }
 
 function normalizeHeading(value: string): string {
@@ -230,14 +266,33 @@ export function toLangGraphEvent(
     case "section_done":
       return { type: "section_done", sectionId: stringField(data, "section_id") ?? "" };
     case "final":
-      return {
+      {
+        const final: Extract<LangGraphSseEvent, { type: "final" }> = {
         type: "final",
         finalReportRef:
           typeof data.final_report_ref === "string" && data.final_report_ref
             ? data.final_report_ref
             : undefined,
         finalReport: typeof data.final_report === "string" ? data.final_report : undefined,
-      };
+        };
+        const metadata: FinalResponseMetadata = {};
+        const assistantMessageId = stringField(data, "assistant_message_id");
+        const routeDecision = recordField(data, "route_decision");
+        const traceItems = recordArrayField(data, "trace_items");
+        const citationCoverage = recordField(data, "citation_coverage");
+        const responseAnalysisRuns = recordArrayField(data, "response_analysis_runs");
+        const unresolvedRelations = recordArrayField(data, "unresolved_relations");
+        const unresolvedClaims = recordArrayField(data, "unresolved_claims");
+        if (assistantMessageId) metadata.assistantMessageId = assistantMessageId;
+        if (routeDecision) metadata.routeDecision = routeDecision;
+        if (traceItems !== undefined) metadata.traceItems = traceItems;
+        if (citationCoverage) metadata.citationCoverage = citationCoverage;
+        if (responseAnalysisRuns !== undefined) metadata.responseAnalysisRuns = responseAnalysisRuns;
+        if (unresolvedRelations !== undefined) metadata.unresolvedRelations = unresolvedRelations;
+        if (unresolvedClaims !== undefined) metadata.unresolvedClaims = unresolvedClaims;
+        if (Object.keys(metadata).length > 0) final.metadata = metadata;
+        return final;
+      }
     case "done": {
       const done: Extract<LangGraphSseEvent, { type: "done" }> = { type: "done" };
       const threadId = stringField(data, "thread_id");
@@ -265,7 +320,11 @@ export interface StreamCallbacks {
   onReplace?: (snapshot: StreamContentSnapshot) => void;
   onAbortRef: (cancel: () => void) => void;
   onThinking?: (update: ThinkingUpdate) => void;
-  onFinal?: (finalReportRef: string, finalReport?: string) => void;
+  onFinal?: (
+    finalReportRef: string,
+    finalReport?: string,
+    metadata?: FinalResponseMetadata
+  ) => void;
 }
 
 export async function* parseSseStream(
@@ -399,7 +458,12 @@ export async function runStream(
             scheduleFlush(flushNow);
           }
           flushNow();
-          if (ev.finalReportRef) callbacks.onFinal?.(ev.finalReportRef, ev.finalReport);
+          // The final payload is the persisted, authoritative reply. It can
+          // include citations that are not present in token chunks, so forward
+          // it even if a report reference is absent.
+          if (ev.finalReportRef || ev.finalReport) {
+            callbacks.onFinal?.(ev.finalReportRef ?? "", ev.finalReport, ev.metadata);
+          }
           break;
         case "error":
           throw new Error(ev.message);

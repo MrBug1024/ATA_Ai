@@ -1,16 +1,21 @@
 import base64
+import json
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
 
 from openpyxl import Workbook
 
+from ai_hunter.annual_audit import import_service
 from ai_hunter.annual_audit.import_service import (
     TabularSheet,
+    bind_structured_source_refs,
     detect_sheet_schema,
     is_audit_workpaper_workbook,
     normalize_sheet_rows,
 )
+from ai_hunter.app.graph.nodes.load_chunks import _build_chunk_batch_pages
 from ai_hunter.app.subgraphs.ingest_graph import (
     _build_file_cache_key,
     _extract_spreadsheet_with_layout,
@@ -203,3 +208,362 @@ def test_storage_backed_file_cache_key_matches_persisted_sha256():
             "file_hash": "abc123",
         }
     ) == "abc123"
+
+
+class _BindingMysqlCursor:
+    def __init__(self, *, rows_by_table):
+        self.rows_by_table = rows_by_table
+        self.calls = []
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, params=None):
+        self.calls.append((query, params))
+        if "SELECT id, source_locator_json" not in query:
+            return
+        self._rows = []
+        for table_name, rows in self.rows_by_table.items():
+            if table_name in query:
+                self._rows = list(rows)
+                return
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _BindingPostgresCursor:
+    def __init__(self):
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, params=None):
+        self.calls.append((query, params))
+
+    def fetchone(self):
+        return {"page_image_ref": "", "page_width": 0, "page_height": 0}
+
+
+class _BindingConnection:
+    def __init__(self, cursor):
+        self.cursor_value = cursor
+        self.committed = False
+
+    def cursor(self):
+        return self.cursor_value
+
+    def commit(self):
+        self.committed = True
+
+
+def _patch_binding_connections(monkeypatch, *, mysql_cursor, postgres_cursor):
+    mysql_connection = _BindingConnection(mysql_cursor)
+    postgres_connection = _BindingConnection(postgres_cursor)
+
+    @contextmanager
+    def fake_mysql_connection(_settings):
+        yield mysql_connection
+
+    @contextmanager
+    def fake_postgres_connection(_settings):
+        yield postgres_connection
+
+    monkeypatch.setattr(import_service, "mysql_connection", fake_mysql_connection)
+    monkeypatch.setattr(import_service, "postgres_connection", fake_postgres_connection)
+    return mysql_connection, postgres_connection
+
+
+def _binding_batch(*, chunks):
+    return {
+        "files": [
+            {
+                "id": 51,
+                "file_name": "银行流水.xlsx",
+                "file_sha256": "bank-file-sha",
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "storage_ref": "minio://annual/raw/bank.xlsx",
+            }
+        ],
+        "pages": [
+            {
+                "id": 601,
+                "file_id": 51,
+                "page_no": 1,
+                "sheet_name": "封皮",
+                "page_text": "## 工作表：封皮\n[第1行] 年审资料",
+            },
+            {
+                "id": 602,
+                "file_id": 51,
+                "page_no": 2,
+                "sheet_name": "银行流水",
+                "page_text": "## 工作表：银行流水\n[第1行] 交易日期 | 金额 | 对方户名",
+            },
+        ],
+        "chunks": chunks,
+    }
+
+
+def _bank_locator():
+    return {
+        "source_sha256": "bank-file-sha",
+        "file_name": "银行流水.xlsx",
+        "sheet_name": "银行流水",
+        "row_number": 2,
+        "quote_text": "2025-12-31 | 100 | 甲公司",
+    }
+
+
+def test_chunk_batch_pages_keep_persisted_page_ids_and_worksheet_metadata():
+    pages = _build_chunk_batch_pages(
+        inserted_pages=[
+            {"id": 601, "file_id": 51, "page_no": 1},
+            {"id": 602, "file_id": 51, "page_no": 2},
+        ],
+        source_pages=[
+            {
+                "file_id": 51,
+                "page_no": 1,
+                "page_text": "## 工作表：封皮",
+                "ocr_blocks": [{"sheet_name": "封皮"}],
+            },
+            {
+                "file_id": 51,
+                "page_no": 2,
+                "page_text": "## 工作表：银行流水\n[第2行] 2025-12-31 | 100 | 甲公司",
+                "ocr_blocks": [{"sheet_name": "银行流水"}],
+            },
+        ],
+    )
+
+    assert pages[0]["id"] == 601
+    assert pages[1]["id"] == 602
+    assert pages[1]["sheet_name"] == "银行流水"
+    assert "[第2行]" in pages[1]["page_text"]
+
+
+def test_binding_uses_matching_worksheet_and_row_chunk_not_first_page(monkeypatch):
+    mysql_cursor = _BindingMysqlCursor(
+        rows_by_table={
+            "annual_bank_transaction": [
+                {"id": 701, "source_locator_json": _bank_locator()},
+            ]
+        }
+    )
+    postgres_cursor = _BindingPostgresCursor()
+    mysql_connection, postgres_connection = _patch_binding_connections(
+        monkeypatch,
+        mysql_cursor=mysql_cursor,
+        postgres_cursor=postgres_cursor,
+    )
+
+    result = bind_structured_source_refs(
+        engagement_id=10,
+        settings=object(),
+        chunk_batch=_binding_batch(
+            chunks=[
+                {
+                    "chunk_id": "cover-chunk",
+                    "page_id": 601,
+                    "chunk_text": "## 工作表：封皮\n[第2行] 2025-12-31 | 100 | 甲公司",
+                },
+                {
+                    "chunk_id": "bank-row-2",
+                    "page_id": 602,
+                    "chunk_text": (
+                        "## 工作表：银行流水\n"
+                        "[第1行] 交易日期 | 金额 | 对方户名\n"
+                        "[第2行] 2025-12-31 | 100 | 甲公司"
+                    ),
+                },
+            ]
+        ),
+    )
+
+    updates = [(query, params) for query, params in mysql_cursor.calls if "UPDATE annual_" in query]
+    assert result["status"] == "completed"
+    assert result["bound_count"] == 1
+    assert result["unbound_count"] == 0
+    assert len(updates) == 1
+    assert updates[0][1][0:3] == (51, 602, "bank-row-2")
+    locator = json.loads(updates[0][1][4])
+    assert locator["row_start"] == 2
+    assert locator["row_end"] == 2
+    assert locator["cell_range"] == "A2:XFD2"
+    assert locator["source_chunk_row_start"] == 1
+    assert locator["source_chunk_row_end"] == 2
+    assert mysql_connection.committed is True
+    assert postgres_connection.committed is True
+
+
+def test_binding_never_marks_a_row_bound_without_a_canonical_chunk(monkeypatch):
+    mysql_cursor = _BindingMysqlCursor(
+        rows_by_table={
+            "annual_bank_transaction": [
+                {"id": 702, "source_locator_json": _bank_locator()},
+            ]
+        }
+    )
+    postgres_cursor = _BindingPostgresCursor()
+    _patch_binding_connections(
+        monkeypatch,
+        mysql_cursor=mysql_cursor,
+        postgres_cursor=postgres_cursor,
+    )
+
+    result = bind_structured_source_refs(
+        engagement_id=10,
+        settings=object(),
+        chunk_batch=_binding_batch(chunks=[]),
+    )
+
+    updates = [query for query, _params in mysql_cursor.calls if "UPDATE annual_" in query]
+    assert result["status"] == "partial"
+    assert result["bound_count"] == 0
+    assert result["unbound_count"] == 1
+    assert result["unbound_reasons"] == {"chunk_not_found": 1}
+    assert result["unbound_rows"] == [
+        {
+            "dataset": "bank_transaction",
+            "record_id": 702,
+            "reason": "chunk_not_found",
+            "file_name": "银行流水.xlsx",
+            "sheet_name": "银行流水",
+            "row_number": 2,
+        }
+    ]
+    assert updates == []
+
+
+def test_binding_never_falls_back_to_the_first_page_when_sheet_metadata_is_missing(monkeypatch):
+    mysql_cursor = _BindingMysqlCursor(
+        rows_by_table={
+            "annual_bank_transaction": [
+                {"id": 703, "source_locator_json": _bank_locator()},
+            ]
+        }
+    )
+    postgres_cursor = _BindingPostgresCursor()
+    _patch_binding_connections(
+        monkeypatch,
+        mysql_cursor=mysql_cursor,
+        postgres_cursor=postgres_cursor,
+    )
+    batch = _binding_batch(
+        chunks=[
+            {
+                "chunk_id": "first-page-chunk",
+                "page_id": 601,
+                "chunk_text": "[第2行] 2025-12-31 | 100 | 甲公司",
+            }
+        ]
+    )
+    # This represents an old/incomplete heavy batch.  It has database page IDs
+    # but no worksheet metadata, so binding it to page 1 would be a fabrication.
+    batch["pages"] = [
+        {"id": 601, "file_id": 51, "page_no": 1},
+        {"id": 602, "file_id": 51, "page_no": 2},
+    ]
+
+    result = bind_structured_source_refs(
+        engagement_id=10,
+        settings=object(),
+        chunk_batch=batch,
+    )
+
+    updates = [query for query, _params in mysql_cursor.calls if "UPDATE annual_" in query]
+    assert result["bound_count"] == 0
+    assert result["unbound_reasons"] == {"sheet_not_found": 1}
+    assert updates == []
+
+
+def test_binding_refuses_ambiguous_chunks_without_writing_a_partial_anchor(monkeypatch):
+    mysql_cursor = _BindingMysqlCursor(
+        rows_by_table={
+            "annual_bank_transaction": [
+                {"id": 704, "source_locator_json": _bank_locator()},
+            ]
+        }
+    )
+    postgres_cursor = _BindingPostgresCursor()
+    _patch_binding_connections(
+        monkeypatch,
+        mysql_cursor=mysql_cursor,
+        postgres_cursor=postgres_cursor,
+    )
+
+    result = bind_structured_source_refs(
+        engagement_id=10,
+        settings=object(),
+        chunk_batch=_binding_batch(
+            chunks=[
+                {
+                    "chunk_id": "bank-row-2-a",
+                    "page_id": 602,
+                    "chunk_text": "[第2行] 2025-12-31 | 100 | 甲公司",
+                },
+                {
+                    "chunk_id": "bank-row-2-b",
+                    "page_id": 602,
+                    "chunk_text": "[第2行] 2025-12-31 | 100 | 甲公司",
+                },
+            ]
+        ),
+    )
+
+    updates = [query for query, _params in mysql_cursor.calls if "UPDATE annual_" in query]
+    assert result["status"] == "partial"
+    assert result["bound_count"] == 0
+    assert result["unbound_reasons"] == {"row_range_ambiguous": 1}
+    assert updates == []
+
+
+def test_binding_refuses_ambiguous_same_name_source_files(monkeypatch):
+    mysql_cursor = _BindingMysqlCursor(
+        rows_by_table={
+            "annual_bank_transaction": [
+                {
+                    "id": 705,
+                    "source_locator_json": {
+                        **_bank_locator(),
+                        "source_sha256": "",
+                    },
+                },
+            ]
+        }
+    )
+    postgres_cursor = _BindingPostgresCursor()
+    _patch_binding_connections(
+        monkeypatch,
+        mysql_cursor=mysql_cursor,
+        postgres_cursor=postgres_cursor,
+    )
+    batch = _binding_batch(chunks=[])
+    batch["files"].append(
+        {
+            **batch["files"][0],
+            "id": 52,
+            "file_sha256": "another-bank-file-sha",
+        }
+    )
+
+    result = bind_structured_source_refs(
+        engagement_id=10,
+        settings=object(),
+        chunk_batch=batch,
+    )
+
+    updates = [query for query, _params in mysql_cursor.calls if "UPDATE annual_" in query]
+    assert result["status"] == "partial"
+    assert result["bound_count"] == 0
+    assert result["unbound_reasons"] == {"source_file_ambiguous": 1}
+    assert updates == []

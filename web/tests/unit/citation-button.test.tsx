@@ -18,11 +18,11 @@ vi.mock("@/lib/assistant-ui/evidence-context", () => ({
 describe("CitationButton", () => {
   beforeEach(() => { mockOpen.mockReset(); });
 
-  it("renders citation number", async () => {
+  it("renders the user-facing bracketed citation number", async () => {
     ctxValue = { caseId: 116, reportRef: "final_report:demo-116" };
     const { CitationButton } = await import("@/components/knowledge-graph/citation-button");
     const { getByText } = render(<CitationButton citationId="3" />);
-    expect(getByText("3")).toBeTruthy();
+    expect(getByText("[3]")).toBeTruthy();
   });
 
   it("calls openDrawer with correct params on click", async () => {

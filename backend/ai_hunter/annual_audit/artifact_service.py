@@ -26,6 +26,14 @@ REPORT_CONTENT_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
+_CITATION_WIRE_PATTERN = re.compile(r"\[\[cite:([1-9]\d*)\]\]")
+
+
+def _artifact_display_text(report_text: str) -> str:
+    """Materialize explicit chat citation markers for non-interactive files."""
+
+    return _CITATION_WIRE_PATTERN.sub(r"[\1]", report_text)
+
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
@@ -74,15 +82,15 @@ def build_workpaper_xlsx(*, code: str, name: str, facts: dict[str, Any], version
 
 
 def build_report_xlsx(*, report_text: str, snapshot: dict[str, Any], report_version: int) -> bytes:
-    """Build a review workbook containing report text, findings and evidence."""
+    """Build a review workbook containing a draft, findings and evidence."""
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
 
     workbook = Workbook()
     report_sheet = workbook.active
-    report_sheet.title = "审计报告"
-    report_sheet.append(["年度审计报告版本", report_version])
+    report_sheet.title = "审计报告草稿"
+    report_sheet.append(["年度财务报表审计报告草稿版本", report_version])
     report_sheet.append(["模板版本", snapshot.get("report_template_version", "")])
     report_sheet.append([])
     for line in report_text.splitlines():
@@ -168,29 +176,37 @@ def publish_annual_artifacts(
     report_version: int,
     workpapers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Render and publish report/workpaper artifacts to the annual bucket."""
+    """Render and persist review-only draft artifacts to the annual bucket."""
 
     service = get_minio_service()
-    report_name = f"annual-audit-{engagement_id}-v{report_version}"
+    report_name = f"annual-audit-draft-{engagement_id}-v{report_version}"
+    artifact_report_text = _artifact_display_text(report_text)
     payloads: list[tuple[str, str, bytes, str, int]] = [
         (
             f"{report_name}.md",
             REPORT_CONTENT_TYPES["md"],
-            report_text.encode("utf-8"),
+            artifact_report_text.encode("utf-8"),
             "annual_report_markdown",
             report_version,
         ),
         (
             f"{report_name}.docx",
             REPORT_CONTENT_TYPES["docx"],
-            build_docx(title="年度财务报表审计报告", report_text=report_text),
+            build_docx(
+                title="年度财务报表审计报告（草稿，未经签发）",
+                report_text=artifact_report_text,
+            ),
             "annual_report_docx",
             report_version,
         ),
         (
             f"{report_name}.xlsx",
             REPORT_CONTENT_TYPES["xlsx"],
-            build_report_xlsx(report_text=report_text, snapshot=snapshot, report_version=report_version),
+            build_report_xlsx(
+                report_text=artifact_report_text,
+                snapshot=snapshot,
+                report_version=report_version,
+            ),
             "annual_report_xlsx",
             report_version,
         ),
@@ -232,14 +248,14 @@ def publish_annual_artifacts(
                     storage_ref=uploaded.storage_ref,
                     content_type=content_type,
                     file_name=file_name,
-                    status="published",
+                    status="draft",
                 )
             )
         except Exception as exc:
             errors.append(f"{file_name}: {str(exc)[:240]}")
 
     return {
-        "status": "published" if not errors else "partial",
+        "status": "draft_saved" if not errors else "partial",
         "artifacts": [item.to_dict() for item in published],
         "errors": errors,
     }

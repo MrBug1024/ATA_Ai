@@ -26,6 +26,7 @@
     {"role_code": "engagement_manager", "role_name": "项目经理", "tier": "management", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["*"], "description": "年审项目总体负责"},
     {"role_code": "auditor", "role_name": "审计人员", "tier": "expert", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["engagement_scope", "revenue_audit", "receivables_audit", "cash_audit", "evidence_index"], "description": "执行审计程序并编制底稿"},
     {"role_code": "reviewer", "role_name": "复核人员", "tier": "management", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["*"], "description": "复核底稿、风险事项和报告初稿"},
+    {"role_code": "engagement_partner", "role_name": "项目合伙人", "tier": "management", "modules": ["report", "drilldown", "materials", "tasks", "corrections", "graph"], "visible_report_sections": ["*"], "description": "项目最终复核并以具备资格的人员身份签发正式报告"},
     {"role_code": "audit_assistant", "role_name": "审计助理", "tier": "field", "modules": ["materials", "tasks", "report"], "visible_report_sections": ["engagement_scope", "revenue_audit", "receivables_audit", "cash_audit", "evidence_index"], "description": "资料整理和基础程序执行"}
   ],
   "tag_catalog": [

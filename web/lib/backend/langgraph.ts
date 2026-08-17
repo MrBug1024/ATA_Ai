@@ -58,6 +58,7 @@ export type {
   ThreadListResponse,
   ThreadMessage,
   ThreadMessagesResponse,
+  RouteDecisionSnapshot,
   UserTurnItem,
   AssistantTurnItem,
   TurnGroup,

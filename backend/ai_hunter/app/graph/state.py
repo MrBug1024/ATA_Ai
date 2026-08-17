@@ -199,6 +199,19 @@ class AuditGraphState(TypedDict, total=False):
     final_report_ref: str
     final_report_summary: str
     final_report: str
+    # Per-turn display metadata. These are reset before every invocation so
+    # a later response cannot inherit an earlier response's evidence drawer.
+    assistant_message_id: str
+    response_evidence_index: str
+    response_trace_candidates: list[dict[str, Any]]
+    # Exact tool output scopes for this assistant reply. They are never
+    # reconstructed from conversation text or a project's newest run.
+    response_analysis_runs: list[dict[str, Any]]
+    response_evidence_tool_results: list[dict[str, Any]]
+    response_citation_coverage: dict[str, Any] | CitationCoverageModel
+    citation_entries: list[dict[str, Any]]
+    annual_report_manifest: dict[str, Any]
+    citation_manifest_binding: dict[str, Any]
     trace_items: list[dict[str, Any] | TraceItemModel]
     citation_coverage: dict[str, Any] | CitationCoverageModel
     demo_trace_validation: dict[str, Any] | DemoCaseTraceValidationResponseModel

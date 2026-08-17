@@ -37,7 +37,7 @@ describe("operations", () => {
       json: async () => ({ detail: [{ msg: "案件名称不能为空" }] }),
     });
     const { createCase } = await import("@/lib/backend/cases");
-    const err = await createCase({ case_name: "", case_type: "年度财务报表审计" }).catch(
+    const err = await createCase({ case_name: "", case_type: "年度财务报表审计", entity_name: "测试单位" }).catch(
       (e: unknown) => e
     );
     expect((err as Error).message).toBe("案件名称不能为空");

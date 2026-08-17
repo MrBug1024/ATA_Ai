@@ -26,6 +26,18 @@ interface StreamCallbacks {
   onReplace?: (snapshot: { text: string; parts?: DbMessage["_contentParts"] }) => void;
   onAbortRef: (cancel: () => void) => void;
   onThinking: (u: unknown) => void;
+  onFinal?: (
+    finalReportRef: string,
+    finalReport?: string,
+    metadata?: {
+      assistantMessageId?: string;
+      traceItems?: Record<string, unknown>[];
+      citationCoverage?: Record<string, unknown>;
+      responseAnalysisRuns?: Record<string, unknown>[];
+      unresolvedRelations?: Record<string, unknown>[];
+      unresolvedClaims?: Record<string, unknown>[];
+    }
+  ) => void;
 }
 const runStreamMock = vi.fn();
 vi.mock("@/lib/assistant-ui/sse", () => ({
@@ -139,6 +151,60 @@ describe("useLanggraphRuntime", () => {
     expect(last.role).toBe("assistant");
     expect(last.content).toBe("hello world");
     expect(capturedConfig.isRunning).toBe(false);
+  });
+
+  it("updates the local reply with its final content and evidence reference", async () => {
+    runStreamMock.mockImplementation(
+      async (_req: { threadId: string; query: string }, cb: StreamCallbacks) => {
+        cb.onAbortRef(() => {});
+        cb.onChunk("streamed answer without citations");
+        cb.onFinal?.("report-for-turn-1", "final answer with [1]", {
+          assistantMessageId: "persisted-turn-1_assistant",
+          traceItems: [{ citation_id: "1", claim_id: 701 }],
+          citationCoverage: { total_claims: 1, cited_claims: 1 },
+          responseAnalysisRuns: [
+            { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+          ],
+          unresolvedRelations: [{ relation_key: "r-1" }],
+          unresolvedClaims: [{ claim_text: "needs follow-up" }],
+        });
+      }
+    );
+    renderHook(() => useLanggraphRuntime("t1", 42));
+    await waitFor(() => expect(capturedConfig).toBeDefined());
+
+    await act(async () => {
+      await capturedConfig.onNew({ content: "hi" });
+    });
+
+    const last = capturedConfig.messages[capturedConfig.messages.length - 1];
+    expect(last).toMatchObject({
+      role: "assistant",
+      content: "final answer with [1]",
+      metadata: {
+        final_report_ref: "report-for-turn-1",
+        assistant_message_id: "persisted-turn-1_assistant",
+        trace_items: [{ citation_id: "1", claim_id: 701 }],
+        citation_coverage: { total_claims: 1, cited_claims: 1 },
+        response_analysis_runs: [
+          { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+        ],
+        unresolved_relations: [{ relation_key: "r-1" }],
+        unresolved_claims: [{ claim_text: "needs follow-up" }],
+        custom: {
+          finalReportRef: "report-for-turn-1",
+          assistantMessageId: "persisted-turn-1_assistant",
+          traceItems: [{ citation_id: "1", claim_id: 701 }],
+          citationCoverage: { total_claims: 1, cited_claims: 1 },
+          responseAnalysisRuns: [
+            { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+          ],
+          unresolvedRelations: [{ relation_key: "r-1" }],
+          unresolvedClaims: [{ claim_text: "needs follow-up" }],
+        },
+      },
+    });
+    expect(last._contentParts).toBeUndefined();
   });
 
   it("分段快照写入 assistant 消息正文和结构化 parts", async () => {

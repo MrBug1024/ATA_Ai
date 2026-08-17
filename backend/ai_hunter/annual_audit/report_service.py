@@ -15,14 +15,33 @@ from typing import Any
 
 from ai_hunter.app.settings import Settings, get_settings
 
-from .analysis_service import data_readiness, run_cash_and_bank, run_sales_receivables
+from .analysis_service import (
+    ANALYSIS_RULES_VERSION,
+    data_readiness,
+    run_cash_and_bank,
+    run_sales_receivables,
+)
 from .artifact_service import publish_annual_artifacts
+from .citation_manifest_service import (
+    DEFAULT_REPORT_TYPE,
+    build_manifest_entry,
+    persist_report_citation_manifest,
+)
+from .evidence_service import (
+    render_knowledge_graph_trace_appendix,
+    trace_items_from_deterministic_findings,
+)
 from .engagement_repository import get_engagement
+from .knowledge_graph_projection import (
+    annual_finding_key,
+    project_annual_findings_to_knowledge_graph,
+)
 from .storage import mysql_connection
 
 
 WORKPAPER_TEMPLATE_VERSION = "customer-workpaper-2023-v1"
 REPORT_TEMPLATE_VERSION = "customer-audit-report-v2"
+MAX_REPORT_CITATIONS = 20
 
 _FULL_AUDIT_MATERIAL_CATEGORIES = (
     ("financial_statements", "财务报表及附注"),
@@ -58,6 +77,7 @@ def _finding_lines(
     findings: list[dict[str, Any]],
     *,
     executed: bool = True,
+    citation_id_by_finding_key: dict[str, str] | None = None,
 ) -> list[str]:
     if not executed:
         return ["- 未执行：缺少可识别的结构化源数据；0 项规则命中不代表不存在异常。"]
@@ -69,11 +89,274 @@ def _finding_lines(
         risk = risk_names.get(str(finding.get("risk_level") or "").lower(), "待定")
         amount = finding.get("amount")
         suffix = f"；涉及金额/命中金额 {_money(amount)} 元" if amount not in (None, "") else ""
+        citation_id = (citation_id_by_finding_key or {}).get(annual_finding_key(finding), "")
+        citation_marker = f" [[cite:{citation_id}]]" if citation_id else ""
         lines.append(
             f"- 【{risk}风险】{finding.get('title') or '待核查事项'}："
-            f"{finding.get('description') or ''}{suffix}"
+            f"{finding.get('description') or ''}{suffix}{citation_marker}"
         )
     return lines
+
+
+def build_annual_report_citation_plan(
+    *,
+    case_id: int,
+    entity_name: str,
+    sales_receivables: dict[str, Any],
+    cash_and_bank: dict[str, Any],
+) -> dict[str, Any]:
+    """Plan report-local citations before rendering the immutable draft.
+
+    The plan is deterministic: a marker is emitted only when a finding has a
+    graph claim backed by a canonical platform anchor.  Similar prose never
+    receives a guessed citation.
+    """
+
+    groups = [
+        (
+            "F1-2",
+            "revenue_risk",
+            list((sales_receivables.get("revenue") or {}).get("findings") or []),
+            int(sales_receivables.get("analysis_run_id") or 0),
+            "sales_receivables",
+        ),
+        (
+            "C5-2",
+            "receivables_risk",
+            list((sales_receivables.get("receivables") or {}).get("findings") or []),
+            int(sales_receivables.get("analysis_run_id") or 0),
+            "sales_receivables",
+        ),
+        (
+            "C1-2",
+            "cash_and_bank_risk",
+            list(cash_and_bank.get("findings") or []),
+            int(cash_and_bank.get("analysis_run_id") or 0),
+            "cash_and_bank",
+        ),
+    ]
+    ordered_findings: list[tuple[str, str, int, str, dict[str, Any]]] = []
+    for section_code, paragraph_prefix, findings, analysis_run_id, analysis_type in groups:
+        for index, finding in enumerate(findings, start=1):
+            if not isinstance(finding, dict):
+                continue
+            enriched = dict(finding)
+            enriched.setdefault("analysis_run_id", analysis_run_id)
+            ordered_findings.append(
+                (section_code, paragraph_prefix, index, analysis_type, enriched)
+            )
+
+    projection = project_annual_findings_to_knowledge_graph(
+        case_id=case_id,
+        entity_name=entity_name,
+        findings=[item[4] for item in ordered_findings],
+        analysis_rules_version=ANALYSIS_RULES_VERSION,
+    )
+    projected_traces = dict(projection.get("trace_by_finding_key") or {})
+    response_trace_candidates: list[dict[str, Any]] = []
+    citation_id_by_finding_key: dict[str, str] = {}
+    citation_entries: list[dict[str, Any]] = []
+    coverage_items: list[dict[str, Any]] = []
+
+    for section_code, paragraph_prefix, finding_index, analysis_type, finding in ordered_findings:
+        finding_key = annual_finding_key(finding)
+        fallback_traces = trace_items_from_deterministic_findings([finding], limit=1)
+        fallback_trace = fallback_traces[0] if fallback_traces else None
+        projected_trace = projected_traces.get(finding_key)
+        graph_backed = bool(
+            isinstance(projected_trace, dict)
+            and projected_trace.get("_graph_backed")
+            and int(projected_trace.get("claim_id") or 0) > 0
+        )
+        selected = graph_backed and len(response_trace_candidates) < MAX_REPORT_CITATIONS
+        citation_id = ""
+        if selected:
+            citation_id = str(len(response_trace_candidates) + 1)
+            trace = {**projected_trace, "citation_id": citation_id}
+            response_trace_candidates.append(trace)
+            citation_id_by_finding_key[finding_key] = citation_id
+        trace_for_coverage = projected_trace if graph_backed else fallback_trace
+        coverage_items.append(
+            {
+                "finding_key": finding_key,
+                "finding": finding,
+                "trace": trace_for_coverage,
+                "cited": selected,
+                "citation_id": citation_id,
+            }
+        )
+        citation_entries.append(
+            {
+                "citation_id": citation_id,
+                "section_code": section_code,
+                "paragraph_key": f"{paragraph_prefix}.{finding_index}",
+                "annual_finding_key": finding_key,
+                "annual_finding_id": int(finding.get("finding_id") or 0),
+                "analysis_run_id": int(finding.get("analysis_run_id") or 0),
+                "analysis_type": analysis_type,
+                "finding_type": str(finding.get("finding_type") or ""),
+                "risk_level": str(finding.get("risk_level") or ""),
+                "rule_metadata": {
+                    "rule_code": str(finding.get("finding_type") or ""),
+                    "ruleset_version": ANALYSIS_RULES_VERSION,
+                },
+                "finding_metadata": {
+                    "title": str(finding.get("title") or ""),
+                    "description": str(finding.get("description") or ""),
+                    "amount": finding.get("amount"),
+                    "finding_type": str(finding.get("finding_type") or ""),
+                    "risk_level": str(finding.get("risk_level") or ""),
+                    "graph_claim_id": int((projected_trace or {}).get("claim_id") or 0),
+                    "graph_entity_id": int((projected_trace or {}).get("entity_id") or 0),
+                },
+                "claim_id": int((projected_trace or {}).get("claim_id") or 0),
+                "entity_id": int((projected_trace or {}).get("entity_id") or 0),
+                "claim_text": str(
+                    (projected_trace or {}).get("claim_text")
+                    or (fallback_trace or {}).get("claim_text")
+                    or ""
+                ),
+                "evidence_snapshot": list((trace_for_coverage or {}).get("evidences") or []),
+                "anchor_status": "bound" if graph_backed else "unbound",
+            }
+        )
+
+    missing_items: list[dict[str, Any]] = []
+    cited_claims = 0
+    unbound_count = 0
+    for item in coverage_items:
+        trace = item["trace"] if isinstance(item["trace"], dict) else {}
+        if item["cited"]:
+            cited_claims += 1
+            continue
+        evidences = [evidence for evidence in trace.get("evidences") or [] if isinstance(evidence, dict)]
+        has_bound_anchor = any(
+            str(evidence.get("chunk_id") or "")
+            and int(evidence.get("file_id") or 0) > 0
+            and int(evidence.get("source_page_id") or 0) > 0
+            for evidence in evidences
+        )
+        if not has_bound_anchor:
+            unbound_count += 1
+        missing_items.append(
+            {
+                "citation_id": "",
+                "claim_id": int(trace.get("claim_id") or 0),
+                "claim_type": str(trace.get("claim_type") or item["finding"].get("finding_type") or ""),
+                "claim_text": str(
+                    trace.get("claim_text")
+                    or "：".join(
+                        part
+                        for part in (
+                            str(item["finding"].get("title") or ""),
+                            str(item["finding"].get("description") or ""),
+                        )
+                        if part
+                    )
+                ),
+            }
+        )
+    total_claims = len(coverage_items)
+    coverage = {
+        "total_claims": total_claims,
+        "cited_claims": cited_claims,
+        "uncited_claims": total_claims - cited_claims,
+        "coverage_ratio": cited_claims / total_claims if total_claims else 0.0,
+        "missing_items": missing_items,
+        "unbound_count": unbound_count,
+        "evidence_blocked": bool(missing_items),
+        "blocking_status": "evidence_blocked" if missing_items else "ready",
+    }
+    return {
+        "citation_id_by_finding_key": citation_id_by_finding_key,
+        "response_trace_candidates": response_trace_candidates,
+        "citation_entries": citation_entries,
+        "citation_coverage": coverage,
+        "projection_summary": {
+            "projected_count": int(projection.get("projected_count") or 0),
+            "unprojected_count": int(projection.get("unprojected_count") or 0),
+        },
+    }
+
+
+def _persist_citation_manifest(
+    *,
+    engagement_id: int,
+    artifacts: dict[str, Any],
+    citation_entries: list[dict[str, Any]],
+    settings: Settings,
+) -> dict[str, Any]:
+    """Freeze only the citations actually rendered in this report version.
+
+    Unbound or otherwise uncited findings remain in the coverage gate, but
+    cannot enter a citation manifest: doing so would make an unresolved item
+    look like a released report assertion.
+    """
+
+    report = dict(artifacts.get("report") or {})
+    annual_report_id = int(report.get("id") or 0)
+    report_version = int(report.get("version") or 0)
+    if annual_report_id <= 0 or report_version <= 0:
+        raise RuntimeError("annual report draft must be persisted before citations")
+
+    entries = []
+    for raw_entry in citation_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        citation_id = str(raw_entry.get("citation_id") or "").strip()
+        if not citation_id:
+            continue
+        entries.append(
+            build_manifest_entry(
+                engagement_id=engagement_id,
+                annual_report_id=annual_report_id,
+                report_version=report_version,
+                report_type=DEFAULT_REPORT_TYPE,
+                citation_id=citation_id,
+                section_key=str(raw_entry.get("section_code") or ""),
+                paragraph_key=str(raw_entry.get("paragraph_key") or ""),
+                annual_finding_id=int(raw_entry.get("annual_finding_id") or 0),
+                annual_finding_key=str(raw_entry.get("annual_finding_key") or ""),
+                analysis_run_id=int(raw_entry.get("analysis_run_id") or 0),
+                analysis_type=str(raw_entry.get("analysis_type") or ""),
+                finding_type=str(raw_entry.get("finding_type") or ""),
+                risk_level=str(raw_entry.get("risk_level") or ""),
+                rule_metadata=dict(raw_entry.get("rule_metadata") or {}),
+                finding_metadata=dict(raw_entry.get("finding_metadata") or {}),
+                evidence_snapshot=list(raw_entry.get("evidence_snapshot") or []),
+            )
+        )
+
+    if not entries:
+        return {
+            "annual_report_id": annual_report_id,
+            "report_type": DEFAULT_REPORT_TYPE,
+            "report_version": report_version,
+            "citation_count": 0,
+            "snapshot_hashes": {},
+        }
+
+    persisted = persist_report_citation_manifest(
+        engagement_id=engagement_id,
+        annual_report_id=annual_report_id,
+        report_version=report_version,
+        report_type=DEFAULT_REPORT_TYPE,
+        entries=entries,
+        complete_manifest=True,
+        settings=settings,
+    )
+    if len(persisted) != len(entries):
+        raise RuntimeError("annual report citation manifest persistence is incomplete")
+    return {
+        "annual_report_id": annual_report_id,
+        "report_type": DEFAULT_REPORT_TYPE,
+        "report_version": report_version,
+        "citation_count": len(entries),
+        "snapshot_hashes": {
+            str(entry.get("citation_id") or ""): str(entry.get("snapshot_hash") or "")
+            for entry in persisted
+        },
+    }
 
 
 def _missing_lines(readiness: dict[str, Any], analyses: list[dict[str, Any]]) -> list[str]:
@@ -161,8 +444,10 @@ def render_annual_report_draft(
     cash_and_bank: dict[str, Any],
     corrections: list[str] | None = None,
     material_sources: list[dict[str, Any]] | None = None,
+    execution_gate: dict[str, Any] | None = None,
+    citation_id_by_finding_key: dict[str, str] | None = None,
 ) -> str:
-    """Render the first demo's auditable chat report without invoking an LLM."""
+    """Render a deterministic review draft without invoking an LLM."""
 
     receivables = sales_receivables.get("receivables") or {}
     revenue = sales_receivables.get("revenue") or {}
@@ -187,7 +472,7 @@ def render_annual_report_draft(
         f"- 被审计单位：{engagement.get('entity_name') or '-'}",
         f"- 审计期间：{engagement.get('period_start')} 至 {engagement.get('period_end')}",
         f"- 项目编号：{engagement.get('engagement_code') or '-'}",
-        "- 本次自动化演示范围：营业收入、应收账款、货币资金/银行流水。",
+        "- 当前确定性分析范围：营业收入、应收账款、货币资金/银行流水；完整年审程序以项目工作台的受控程序清单为准。",
         "",
         "## 二、资料就绪度",
         f"- 科目余额行数：{int(counts.get('account_balance_rows') or 0)}",
@@ -223,7 +508,11 @@ def render_annual_report_draft(
     lines.extend([
         "",
         "### 收入风险规则结果",
-        *_finding_lines(revenue.get("findings") or [], executed=bool(revenue.get("row_count"))),
+        *_finding_lines(
+            revenue.get("findings") or [],
+            executed=bool(revenue.get("row_count")),
+            citation_id_by_finding_key=citation_id_by_finding_key,
+        ),
     ])
 
     lines.extend(["", "## 四、C5-2 应收账款审定与账龄分析草稿"])
@@ -242,7 +531,11 @@ def render_annual_report_draft(
     lines.extend([
         "",
         "### 应收风险规则结果",
-        *_finding_lines(receivables.get("findings") or [], executed=bool(receivables.get("row_count"))),
+        *_finding_lines(
+            receivables.get("findings") or [],
+            executed=bool(receivables.get("row_count")),
+            citation_id_by_finding_key=citation_id_by_finding_key,
+        ),
     ])
 
     lines.extend(["", "## 五、C1-2 货币资金与银行流水审定草稿"])
@@ -260,7 +553,11 @@ def render_annual_report_draft(
     lines.extend([
         "",
         "### 资金风险规则结果",
-        *_finding_lines(cash_findings, executed=bool(cash_and_bank.get("row_count"))),
+        *_finding_lines(
+            cash_findings,
+            executed=bool(cash_and_bank.get("row_count")),
+            citation_id_by_finding_key=citation_id_by_finding_key,
+        ),
     ])
 
     lines.extend(["", "## 六、异常凭证与跨循环筛查"])
@@ -295,8 +592,32 @@ def render_annual_report_draft(
             "- 当前仅可形成审计工作底稿和审计报告初稿，不具备签发正式审计报告或表达审计意见的充分条件。",
         ]
     )
+    if execution_gate:
+        program_summary = execution_gate.get("program_summary") or {}
+        blockers = list(execution_gate.get("blockers") or [])
+        lines.extend(
+            [
+                "",
+                "## 九、完整年审执行与签发门禁",
+                (
+                    f"- 受控程序：共 {int(program_summary.get('total') or 0)} 项；"
+                    f"已完成 {int(program_summary.get('completed') or 0)} 项；"
+                    f"不适用 {int(program_summary.get('not_applicable') or 0)} 项；"
+                    f"待处理 {int(program_summary.get('open') or 0)} 项。"
+                ),
+                (
+                    "- 当前签发门禁：已具备待签发条件。"
+                    if execution_gate.get("gate_status") == "ready_for_signature"
+                    else f"- 当前签发门禁：阻断（{len(blockers)} 项）。"
+                ),
+                *[
+                    f"- 待处理：{str(item.get('message') or item.get('code') or '')}"
+                    for item in blockers[:20]
+                ],
+            ]
+        )
     if corrections:
-        lines.extend(["", "## 九、本轮重审采用的订正", *[f"- {item}" for item in corrections]])
+        lines.extend(["", "## 十、本轮重审采用的订正", *[f"- {item}" for item in corrections]])
     return "\n".join(lines).strip()
 
 
@@ -507,9 +828,23 @@ def generate_annual_report_draft(
 
     resolved = settings or get_settings()
     engagement = get_engagement(case_id, settings=resolved)
+    from .execution_service import bootstrap_execution
+
+    execution = bootstrap_execution(
+        case_id,
+        actor_user_id=created_by or "ai_agent",
+        settings=resolved,
+    )
+    execution_gate = dict(execution.get("release_gate") or {})
     readiness = data_readiness(case_id, settings=resolved)
     sales = run_sales_receivables(case_id, recompute=recompute, settings=resolved)
     cash = run_cash_and_bank(case_id, recompute=recompute, settings=resolved)
+    citation_plan = build_annual_report_citation_plan(
+        case_id=case_id,
+        entity_name=str(engagement.get("entity_name") or ""),
+        sales_receivables=sales,
+        cash_and_bank=cash,
+    )
     snapshot = {
         "engagement_id": case_id,
         "report_template_version": REPORT_TEMPLATE_VERSION,
@@ -521,6 +856,25 @@ def generate_annual_report_draft(
         "material_sources": list(material_sources or []),
         "sales_receivables": sales,
         "cash_and_bank": cash,
+        "execution_program_version": execution.get("program_version"),
+        "release_gate": execution_gate,
+        "citation_plan_summary": {
+            "cited_claims": int((citation_plan.get("citation_coverage") or {}).get("cited_claims") or 0),
+            "total_claims": int((citation_plan.get("citation_coverage") or {}).get("total_claims") or 0),
+            "projected_count": int((citation_plan.get("projection_summary") or {}).get("projected_count") or 0),
+        },
+        # The report version must change when the exact claim/anchor plan
+        # changes, even where aggregate counts happen to be identical.
+        "citation_plan_entries": [
+            {
+                "citation_id": str(entry.get("citation_id") or ""),
+                "annual_finding_key": str(entry.get("annual_finding_key") or ""),
+                "claim_id": int(entry.get("claim_id") or 0),
+                "evidence_snapshot": list(entry.get("evidence_snapshot") or []),
+            }
+            for entry in citation_plan.get("citation_entries") or []
+            if isinstance(entry, dict) and str(entry.get("citation_id") or "")
+        ],
         "workpaper_facts": {
             "F1-2": sales.get("revenue") or {},
             "C5-2": sales.get("receivables") or {},
@@ -535,7 +889,14 @@ def generate_annual_report_draft(
         cash_and_bank=cash,
         corrections=corrections,
         material_sources=material_sources,
+        execution_gate=execution_gate,
+        citation_id_by_finding_key=dict(citation_plan.get("citation_id_by_finding_key") or {}),
     )
+    trace_appendix = render_knowledge_graph_trace_appendix(
+        list(citation_plan.get("response_trace_candidates") or [])
+    )
+    if trace_appendix:
+        report_text = f"{report_text}\n\n{trace_appendix}"
     artifacts = _persist_draft_artifacts(
         engagement_id=case_id,
         snapshot=snapshot,
@@ -543,6 +904,13 @@ def generate_annual_report_draft(
         created_by=created_by or "ai_agent",
         settings=resolved,
     )
+    citation_manifest = _persist_citation_manifest(
+        engagement_id=case_id,
+        artifacts=artifacts,
+        citation_entries=list(citation_plan.get("citation_entries") or []),
+        settings=resolved,
+    )
+    artifacts = {**artifacts, "citation_manifest": citation_manifest}
     published = publish_annual_artifacts(
         engagement_id=case_id,
         report_text=report_text,
@@ -563,10 +931,22 @@ def generate_annual_report_draft(
         settings=resolved,
     )
     artifacts = {**artifacts, **published, "tasks": task_result}
-    return {"report_text": report_text, "artifacts": artifacts, "generation_key": snapshot["generation_key"]}
+    return {
+        "report_text": report_text,
+        "artifacts": artifacts,
+        "generation_key": snapshot["generation_key"],
+        # The report generator plans these citations before rendering.  The
+        # response finalizer must use this exact list instead of querying a
+        # later project-wide analysis run.
+        "response_trace_candidates": list(citation_plan.get("response_trace_candidates") or []),
+        "response_citation_coverage": dict(citation_plan.get("citation_coverage") or {}),
+        "citation_entries": list(citation_plan.get("citation_entries") or []),
+        "annual_report_manifest": citation_manifest,
+    }
 
 
 __all__ = [
     "generate_annual_report_draft",
+    "build_annual_report_citation_plan",
     "render_annual_report_draft",
 ]

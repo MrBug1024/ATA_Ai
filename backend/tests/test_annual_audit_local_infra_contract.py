@@ -23,6 +23,8 @@ def test_local_compose_uses_dedicated_annual_audit_stores():
     assert "name: ata-annual-minio-data" in compose
     assert "annual_audit_mysql_v7.sql:/docker-entrypoint-initdb.d/007_evidence_bindings.sql:ro" in compose
     assert "annual_audit_mysql_v8.sql:/docker-entrypoint-initdb.d/008_artifact_refs.sql:ro" in compose
+    assert "annual_audit_mysql_v9.sql:/docker-entrypoint-initdb.d/009_execution_and_knowledge_governance.sql:ro" in compose
+    assert "annual_audit_postgres_v2.sql:/docker-entrypoint-initdb.d/062_annual_material_catalog.sql:ro" in compose
 
 
 def test_annual_postgres_contract_uses_isolated_platform_schema():
@@ -56,13 +58,19 @@ def test_local_launcher_prefers_configured_company_minio_and_keeps_local_fallbac
     assert 'function Use-ConfiguredMySql' in launcher
     assert 'function Use-ConfiguredRedis' in launcher
     assert 'function Use-LocalMinio' in launcher
-    assert '(-not (Use-LocalMinio) -and $name -like "ANNUAL_MINIO_*")' in launcher
+    assert 'function Use-ForcedLocalServices' in launcher
+    assert 'ANNUAL_FORCE_LOCAL_SERVICES' in launcher
+    assert 'Explicit process values are used for conflict-free local ports.' in launcher
+    assert '[Environment]::GetEnvironmentVariable($name, "Process")' in launcher
+    assert 'if (Use-ForcedLocalServices) {' in launcher
     assert 'if (Use-LocalMinio) {' in launcher
     assert '$env:AI_HUNTER_MINIO_ENABLED = "true"' in launcher
     assert 'Remove-Item -Path "Env:$name"' in launcher
     assert '$upServices = @("postgres")' in launcher
     assert '& $Docker @composeArgs run --rm minio-init' in launcher
-    assert '[ValidateSet("up", "down", "status", "verify", "migrate", "seed", "backend")]' in launcher
+    assert '[ValidateSet("up", "down", "status", "verify", "migrate", "auth-seed", "seed", "backend")]' in launcher
+    assert '"auth-seed" {' in launcher
+    assert "must not receive a fabricated engagement or financial data" in launcher
     assert "Invoke-AnnualMigrations" in launcher
     assert '$upServices += "minio"' in launcher
     assert "run --rm minio-init" in launcher

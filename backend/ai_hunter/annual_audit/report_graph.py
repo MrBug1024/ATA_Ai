@@ -47,13 +47,17 @@ def generate_annual_report_node(state: AuditGraphState) -> AuditGraphState:
     return {
         "agent_output": str(result.get("report_text") or "") + artifact_note,
         "artifacts": artifacts,
+        "response_trace_candidates": list(result.get("response_trace_candidates") or []),
+        "response_citation_coverage": dict(result.get("response_citation_coverage") or {}),
+        "citation_entries": list(result.get("citation_entries") or []),
+        "annual_report_manifest": dict(result.get("annual_report_manifest") or {}),
         "extracted_tasks": [],
     }
 
 
 def _delivery_status_label(status: str) -> str:
     return {
-        "published": "已生成可下载成果",
+        "draft_saved": "已保存可下载草稿，待复核和签发",
         "draft": "草稿，待复核",
         "not_published": "草稿，待复核",
     }.get(status, "草稿，待复核")

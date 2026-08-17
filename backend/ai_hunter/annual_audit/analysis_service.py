@@ -225,8 +225,77 @@ def _cached_result(cursor, case_id: int, analysis_type: str, input_version: str)
         return None
     result = _loads_json(row["result_json"])
     result["analysis_run_id"] = int(row["id"])
+    _attach_finding_identifiers(
+        cursor,
+        result=result,
+        analysis_run_id=int(row["id"]),
+    )
     result["cached"] = True
     return result
+
+
+def _all_result_findings(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every view of rule findings in a result payload.
+
+    Sales/receivables results expose findings both at the top level and under
+    their audit-cycle sections.  JSON cache reads make those dictionaries
+    independent objects, so all views need the same durable finding ID.
+    """
+
+    findings: list[dict[str, Any]] = []
+    for finding in result.get("findings") or []:
+        if isinstance(finding, dict):
+            findings.append(finding)
+    for section_name in ("revenue", "receivables"):
+        section = result.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for finding in section.get("findings") or []:
+            if isinstance(finding, dict):
+                findings.append(finding)
+    return findings
+
+
+def _finding_identity(finding: dict[str, Any]) -> tuple[str, str, str, str]:
+    amount = finding.get("amount")
+    try:
+        normalized_amount = (
+            format(Decimal(str(amount or 0)).normalize(), "f").rstrip("0").rstrip(".") or "0"
+        )
+    except Exception:
+        normalized_amount = str(amount or "")
+    return (
+        str(finding.get("finding_type") or ""),
+        str(finding.get("title") or ""),
+        str(finding.get("description") or ""),
+        normalized_amount,
+    )
+
+
+def _attach_finding_identifiers(cursor, *, result: dict[str, Any], analysis_run_id: int) -> None:
+    """Attach MySQL annual_finding IDs to fresh and cached analysis results."""
+
+    cursor.execute(
+        """
+        SELECT id, finding_type, title, description, amount
+        FROM annual_finding
+        WHERE analysis_run_id = %s
+        ORDER BY id
+        """,
+        (analysis_run_id,),
+    )
+    finding_id_by_identity: dict[tuple[str, str, str, str], int] = {}
+    for row in cursor.fetchall():
+        row_dict = dict(row)
+        finding_id_by_identity.setdefault(
+            _finding_identity(row_dict),
+            int(row_dict.get("id") or 0),
+        )
+    for finding in _all_result_findings(result):
+        finding_id = finding_id_by_identity.get(_finding_identity(finding), 0)
+        if finding_id > 0:
+            finding["finding_id"] = finding_id
+            finding["analysis_run_id"] = analysis_run_id
 
 
 def _persist_result(
@@ -273,6 +342,27 @@ def _persist_result(
                 json.dumps(finding.get("evidence_refs", []), ensure_ascii=False, default=_json_default),
             ),
         )
+        finding["finding_id"] = int(cursor.lastrowid)
+        finding["analysis_run_id"] = run_id
+    # Persist the durable annual_finding IDs together with the analysis result
+    # so a cached run keeps the same report-manifest identity.
+    result["analysis_run_id"] = run_id
+    _attach_finding_identifiers(
+        cursor,
+        result=result,
+        analysis_run_id=run_id,
+    )
+    cursor.execute(
+        """
+        UPDATE annual_analysis_run
+        SET result_json = %s
+        WHERE id = %s
+        """,
+        (
+            json.dumps(result, ensure_ascii=False, default=_json_default),
+            run_id,
+        ),
+    )
     return run_id
 
 

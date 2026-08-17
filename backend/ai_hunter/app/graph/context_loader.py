@@ -378,26 +378,32 @@ def resolve_kg_trace_summary(
 
 def resolve_trace_items(state: AuditGraphState) -> list[dict[str, Any]]:
     """Resolve structured trace items for frontend evidence drilldown."""
-    in_state = state.get("trace_items", [])
+    # trace_items is an authoritative response snapshot. In particular, an
+    # explicit empty list means this answer has no citations; it must not fall
+    # through to a prior report or the case-wide graph snapshot.
+    if "trace_items" in state:
+        in_state = state.get("trace_items") or []
+    else:
+        in_state = None
     resolved_from_state: list[dict[str, Any]] = []
-    for item in in_state:
-        if isinstance(item, dict):
-            resolved_from_state.append(_normalize_trace_item(item))
-        else:
-            resolved_from_state.append(_normalize_trace_item(item.model_dump()))
-    if resolved_from_state:
+    if isinstance(in_state, list):
+        for item in in_state:
+            if isinstance(item, dict):
+                resolved_from_state.append(_normalize_trace_item(item))
+            elif hasattr(item, "model_dump"):
+                resolved_from_state.append(_normalize_trace_item(item.model_dump()))
         return resolved_from_state
 
-    final_report_payload = get_heavy_payload(state.get("final_report_ref", ""))
-    if isinstance(final_report_payload, dict):
+    final_report_ref = str(state.get("final_report_ref", "") or "")
+    final_report_payload = get_heavy_payload(final_report_ref)
+    if final_report_ref and isinstance(final_report_payload, dict):
         payload_trace_items = final_report_payload.get("trace_items", [])
-        if isinstance(payload_trace_items, list) and payload_trace_items:
+        if isinstance(payload_trace_items, list):
             resolved_from_ref: list[dict[str, Any]] = []
             for item in payload_trace_items:
                 if isinstance(item, dict):
                     resolved_from_ref.append(_normalize_trace_item(item))
-            if resolved_from_ref:
-                return resolved_from_ref
+            return resolved_from_ref
 
     payload = get_heavy_payload(state.get("kg_subgraph_ref", ""))
     if not isinstance(payload, dict):

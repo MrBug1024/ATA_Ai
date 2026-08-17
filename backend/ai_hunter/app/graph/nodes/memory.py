@@ -119,6 +119,10 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         "route_decision": state.get("route_decision") or {},
         "trace_items": resolve_trace_items(state),
         "citation_coverage": resolve_citation_coverage(state),
+        # Keep the exact current-turn analysis scopes with the reply.  They
+        # distinguish a response that deliberately found no data from legacy
+        # prose that was generated before response-level evidence existed.
+        "response_analysis_runs": list(state.get("response_analysis_runs") or []),
         "unresolved_relations": unresolved_graph_items.get("unresolved_relations", []),
         "unresolved_claims": unresolved_graph_items.get("unresolved_claims", []),
     }
@@ -222,4 +226,8 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *trimmed_messages],
         "memory_summary": memory_summary,
         "conversation_log": existing_conv_log + conversation_log_entries,
+        # The browser receives this exact persisted id in the SSE final event,
+        # so it can attach the response-specific report reference to the
+        # streaming assistant message without waiting for a refresh.
+        "assistant_message_id": f"{turn_id}_assistant",
     }

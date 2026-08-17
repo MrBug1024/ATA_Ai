@@ -85,15 +85,19 @@ describe("runStream", () => {
     const chunks: string[] = [];
     const replaces: StreamContentSnapshot[] = [];
     const thinking: unknown[] = [];
+    const finals: Array<{ ref: string; report?: string; metadata?: unknown }> = [];
     return {
       chunks,
       replaces,
       thinking,
+      finals,
       cb: {
         onChunk: (c: string) => chunks.push(c),
         onReplace: (snapshot: StreamContentSnapshot) => replaces.push(snapshot),
         onAbortRef: () => {},
         onThinking: (u: unknown) => thinking.push(u),
+        onFinal: (ref: string, report?: string, metadata?: unknown) =>
+          finals.push(metadata === undefined ? { ref, report } : { ref, report, metadata }),
       },
     };
   }
@@ -109,7 +113,7 @@ describe("runStream", () => {
       ])
     );
 
-    const { cb, chunks, replaces, thinking } = makeCallbacks();
+    const { cb, chunks, replaces, thinking, finals } = makeCallbacks();
     let pendingFlush: (() => void) | null = null;
     const flushNow = () => {
       const fn = pendingFlush;
@@ -132,6 +136,7 @@ describe("runStream", () => {
     expect(replaces).toEqual([]);
     expect(thinking.some((t) => (t as { type: string }).type === "node")).toBe(true);
     expect(thinking.length).toBe(1);
+    expect(finals).toEqual([{ ref: "", report: "hello world" }]);
   });
 
   it("final 无流式正文时用 final_report 兜底", async () => {
@@ -151,6 +156,39 @@ describe("runStream", () => {
     );
     expect(chunks).toEqual([]);
     expect(replaces).toEqual([{ text: "only final" }]);
+  });
+
+  it("forwards terminal evidence metadata with the final callback", async () => {
+    fetchMock.mockResolvedValue(
+      sseResponseFrom([
+        `event: final\ndata: {"final_report_ref":"report:turn-2","final_report":"answer [[cite:1]]","trace_items":[{"citation_id":"1","claim_id":701}],"citation_coverage":{"total_claims":1,"cited_claims":1},"response_analysis_runs":[{"tool_name":"sales","analysis_type":"sales","analysis_run_id":31}],"unresolved_relations":[],"unresolved_claims":[]}\n\n`,
+      ])
+    );
+
+    const { cb, finals } = makeCallbacks();
+    await runStream(
+      { threadId: "t1", query: "q" },
+      cb,
+      () => {},
+      () => {},
+      () => {}
+    );
+
+    expect(finals).toEqual([
+      {
+        ref: "report:turn-2",
+        report: "answer [[cite:1]]",
+        metadata: {
+          traceItems: [{ citation_id: "1", claim_id: 701 }],
+          citationCoverage: { total_claims: 1, cited_claims: 1 },
+          responseAnalysisRuns: [
+            { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+          ],
+          unresolvedRelations: [],
+          unresolvedClaims: [],
+        },
+      },
+    ]);
   });
 
   it("分段事件交错到达时按 section_id 重组成快照", async () => {
@@ -301,6 +339,38 @@ describe("toLangGraphEvent", () => {
       type: "final",
       finalReportRef: "r-1",
       finalReport: "x",
+    });
+  });
+
+  it("keeps response-scoped evidence metadata on a final event", () => {
+    expect(
+      toLangGraphEvent("final", {
+        final_report_ref: "report:turn-2",
+        assistant_message_id: "turn-2_assistant",
+        route_decision: { capability: "audit.full" },
+        trace_items: [{ citation_id: "1", claim_id: 701 }],
+        citation_coverage: { total_claims: 1, cited_claims: 1 },
+        response_analysis_runs: [
+          { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+        ],
+        unresolved_relations: [{ relation_key: "r-2" }],
+        unresolved_claims: [{ claim_text: "needs evidence" }],
+      })
+    ).toEqual({
+      type: "final",
+      finalReportRef: "report:turn-2",
+      finalReport: undefined,
+      metadata: {
+        assistantMessageId: "turn-2_assistant",
+        routeDecision: { capability: "audit.full" },
+        traceItems: [{ citation_id: "1", claim_id: 701 }],
+        citationCoverage: { total_claims: 1, cited_claims: 1 },
+        responseAnalysisRuns: [
+          { tool_name: "sales", analysis_type: "sales", analysis_run_id: 31 },
+        ],
+        unresolvedRelations: [{ relation_key: "r-2" }],
+        unresolvedClaims: [{ claim_text: "needs evidence" }],
+      },
     });
   });
 

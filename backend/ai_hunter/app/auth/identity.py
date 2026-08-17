@@ -194,6 +194,39 @@ def _load_local_roles(identity: Identity, fallback_roles: list[str], settings) -
     return identity
 
 
+def _require_active_private_local_user(identity: Identity) -> bool:
+    """Bind a private-mode JWT to the active local principal in this deployment.
+
+    A local token may remain correctly signed after an operator switches the
+    service to a fresh isolated database. Claims alone must not then create a
+    partially authenticated user (or retain privilege fields from the token).
+    Platform JWTs and explicit development headers intentionally do not use this
+    private-mode lookup.
+    """
+    if not identity.user_id:
+        raise HTTPException(status_code=401, detail="本地登录已失效，请重新登录")
+
+    try:
+        from ..services.user_service import get_user_service
+
+        user = get_user_service().get_active_local_user(identity.user_id)
+    except Exception as exc:  # noqa: BLE001 - private authentication must fail closed
+        LOGGER.error("private_local_principal_lookup_failed: %s", str(exc)[:160])
+        raise HTTPException(status_code=503, detail="本地身份服务暂不可用，请稍后重试") from exc
+
+    if not user:
+        LOGGER.warning("private_local_jwt_principal_rejected: user_id=%s", identity.user_id[:128])
+        raise HTTPException(status_code=401, detail="本地登录已失效，请重新登录")
+
+    # The local user record is authoritative. In particular, never preserve a
+    # forged/stale is_super_admin claim from a token signed for another state.
+    identity.username = str(user.get("username") or "")
+    identity.company_id = str(user.get("company_id") or "")
+    identity.is_super_admin = False
+    identity.is_company_admin = False
+    return _bool_claim(user.get("is_super_admin"))
+
+
 def get_current_identity(request: Request) -> Identity:
     """FastAPI 依赖：解析当前请求身份（见模块 docstring 的三优先级）。"""
     settings = get_settings()
@@ -203,6 +236,15 @@ def get_current_identity(request: Request) -> Identity:
     if token and (local_secret or settings.user_center_jwt_secret or settings.user_center_jwt_public_key):
         try:
             ident = _identity_from_claims(_decode_jwt(token, settings), settings)
+            if str(settings.auth_identity_mode).strip().lower() == "private":
+                database_super_admin = _require_active_private_local_user(ident)
+                # Local access tokens carry identity only; project roles always
+                # come from this deployment's app_user_role table.
+                ident = _load_local_roles(ident, [], settings)
+                if database_super_admin:
+                    ident.is_super_admin = True
+                    ident.is_company_admin = True
+                return ident
             return _load_local_roles(ident, list(ident.roles), settings)
         except Exception as exc:  # noqa: BLE001 — 验签失败
             if isinstance(exc, HTTPException):

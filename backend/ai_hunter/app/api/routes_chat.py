@@ -215,6 +215,7 @@ def _resolve_cached_turn(thread_id: str, client_turn_id: str) -> dict[str, Any] 
                     "final_report_ref": str(row.get("final_report_ref") or ""),
                     "final_report": str(row.get("content") or ""),
                     "intent": str(row.get("intent") or ""),
+                    "assistant_message_id": str(row.get("turn_id") or ""),
                 }
             )
             return cached_state
@@ -331,6 +332,10 @@ class ChatInvokeResponse(BaseModel):
     current_entity_name: str = Field(default="", description="被审计单位名称。")
     final_report_ref: str = Field(default="", description="最终报告引用 ID。")
     final_report: str = Field(default="", description="最终报告正文。")
+    assistant_message_id: str = Field(
+        default="",
+        description="本轮持久化 assistant 消息 ID；SSE 客户端应将 final_report_ref 绑定到此消息。",
+    )
     trace_items: list[TraceItemModel] = Field(default_factory=list, description="报告断言对应的证据链。")
     reconciliation_items: list[ReconciliationLedgerItemModel] = Field(
         default_factory=list,
@@ -347,6 +352,10 @@ class ChatInvokeResponse(BaseModel):
     citation_coverage: CitationCoverageModel = Field(
         default_factory=CitationCoverageModel,
         description="报告角标覆盖率统计。",
+    )
+    response_analysis_runs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="本轮回复实际成功执行的年审分析运行范围；仅用于本回复的证据追溯。",
     )
     parse_summary: str = Field(default="", description="材料摄入摘要。")
     doc_category: str = Field(default="", description="审计资料类别编码。")
@@ -418,9 +427,12 @@ async def invoke_chat(payload: ChatRequest, request: Request,
     settings = get_settings()
     section_codes = visible_report_sections(identity)  # 报告段落分权：可见 section_code 集
     _require_pre_graph_write_module(identity, payload)
+    requested_case_id = extract_case_id(payload.query) or payload.current_case_id
+    allow_unbound = is_explicit_case_create_request(payload.model_dump())
+    await anyio.to_thread.run_sync(
+        lambda: _require_existing_annual_engagement(requested_case_id, allow_unbound=allow_unbound)
+    )
     if settings.auth_enabled:
-        requested_case_id = extract_case_id(payload.query) or payload.current_case_id
-        allow_unbound = is_explicit_case_create_request(payload.model_dump())
         await anyio.to_thread.run_sync(
             lambda: _ensure_chat_thread(identity, payload.thread_id, requested_case_id, allow_unbound)
         )
@@ -508,6 +520,31 @@ def _ensure_chat_thread(
         service.ensure_thread_for_invoke(identity, thread_id, case_id)
 
 
+def _require_existing_annual_engagement(case_id: int, *, allow_unbound: bool) -> None:
+    """Reject a non-existent annual engagement before any chat route executes.
+
+    Local development commonly runs with authentication disabled, so tenancy
+    checks alone cannot be the guardrail for a case-bound chat. Let an
+    explicit case-creation request remain unbound, but never let an arbitrary
+    positive ``caseId`` reach an LLM or deterministic tool as if it were an
+    audit engagement.
+    """
+    if allow_unbound or int(case_id or 0) <= 0:
+        return
+    from ai_hunter.annual_audit.engagement_repository import EngagementNotFoundError, get_engagement
+
+    try:
+        get_engagement(int(case_id))
+    except EngagementNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"年审项目 {int(case_id)} 不存在，不能执行审计分析或生成审计结论。"
+                "请先创建或选择一个真实项目，并导入相应审计资料。"
+            ),
+        ) from exc
+
+
 def _build_graph_input(payload: ChatRequest, identity: Identity | None = None) -> dict[str, Any]:
     """Prepare the input dict for the graph.
 
@@ -572,6 +609,43 @@ def _require_pre_graph_write_module(identity: Identity, payload: ChatRequest) ->
         raise HTTPException(status_code=403, detail=f"无权限执行业务能力：{capability}，需要模块：{module}")
 
 
+_RESPONSE_FINAL_STATE_FIELDS = (
+    "current_case_id",
+    "current_entity_id",
+    "current_entity_name",
+    "final_report_ref",
+    "final_report_summary",
+    "final_report",
+    "assistant_message_id",
+    "response_evidence_index",
+    "response_analysis_runs",
+    "trace_items",
+    "citation_coverage",
+    "reconciliation_items",
+    "unresolved_relations",
+    "unresolved_claims",
+    "intent",
+    "route_decision",
+)
+
+
+def _merge_response_final_state(
+    state: dict[str, Any],
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge terminal node output without falling back to a prior turn.
+
+    Async checkpointer visibility can lag the astream_events completion event
+    by one scheduling turn. The terminal node output is sufficient to build
+    this response's final payload, so retain it until aget_state is read.
+    """
+    merged = dict(state)
+    for field in _RESPONSE_FINAL_STATE_FIELDS:
+        if field in update:
+            merged[field] = update[field]
+    return merged
+
+
 async def _stream_chat_events(
     payload: ChatRequest,
     logger: logging.LoggerAdapter,
@@ -620,6 +694,7 @@ async def _stream_chat_events(
             streaming_graph = await _ensure_async_graph()
             started_sections: set[str] = set()
             reasoning_stream_states: dict[str, dict[str, str]] = {}
+            terminal_response_state: dict[str, Any] = {}
             async for event in streaming_graph.astream_events(
                 graph_input,
                 config=config,
@@ -644,6 +719,11 @@ async def _stream_chat_events(
                     node_payload = data.get("output", {})
                     if not isinstance(node_payload, dict):
                         node_payload = {}
+                    if name in {"finalize_answer", "persist_conversation_memory"}:
+                        terminal_response_state = _merge_response_final_state(
+                            terminal_response_state,
+                            node_payload,
+                        )
                     if name == "classify_intent" and identity is not None:
                         try:
                             _require_route_module(identity, node_payload)
@@ -721,7 +801,11 @@ async def _stream_chat_events(
             # fields only present in the checkpoint (trace_items, citation_coverage,
             # etc.) are not lost.
             snapshot = await streaming_graph.aget_state(config)
-            final_state = snapshot.values if snapshot else {}
+            final_state = dict(snapshot.values) if snapshot else dict(graph_input)
+            final_state = _merge_response_final_state(
+                final_state,
+                terminal_response_state,
+            )
 
             logger.info(
                 "chat_stream_completed intent=%s capability=%s route_source=%s entity=%s final_report_chars=%s",
@@ -787,6 +871,45 @@ def _run_graph_with_logging(
     return latest_state
 
 
+def _response_analysis_runs(value: Any) -> list[dict[str, Any]]:
+    """Validate the exact persisted analysis scopes exposed to a reply.
+
+    The values originate from ToolMessages, but the conversation table is
+    long-lived JSON.  Revalidate here so an old or malformed record cannot
+    claim that an arbitrary analysis run supported a visible reply.
+    """
+    if not isinstance(value, list):
+        return []
+    scopes: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or "").strip()
+        analysis_type = str(item.get("analysis_type") or "").strip()
+        run_id = item.get("analysis_run_id")
+        if isinstance(run_id, bool):
+            continue
+        try:
+            analysis_run_id = int(run_id)
+        except (TypeError, ValueError):
+            continue
+        if not tool_name or not analysis_type or analysis_run_id <= 0:
+            continue
+        key = (tool_name, analysis_type, analysis_run_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        scopes.append(
+            {
+                "tool_name": tool_name,
+                "analysis_type": analysis_type,
+                "analysis_run_id": analysis_run_id,
+            }
+        )
+    return scopes
+
+
 def _build_final_response(payload: ChatRequest, result: dict[str, Any],
                           visible_section_codes: set[str] | None = None) -> ChatInvokeResponse:
     """Normalize final API output for both blocking and streaming modes.
@@ -804,6 +927,7 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
         current_entity_name=result.get("current_entity_name", ""),
         final_report_ref=result.get("final_report_ref", ""),
         final_report=final_report,
+        assistant_message_id=result.get("assistant_message_id", ""),
         trace_items=[TraceItemModel.model_validate(item) for item in resolve_trace_items(result)],
         reconciliation_items=[
             ReconciliationLedgerItemModel.model_validate(item) for item in resolve_reconciliation_items(result)
@@ -817,6 +941,7 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
             for item in unresolved_items.get("unresolved_claims", [])
         ],
         citation_coverage=CitationCoverageModel.model_validate(resolve_citation_coverage(result)),
+        response_analysis_runs=_response_analysis_runs(result.get("response_analysis_runs")),
         parse_summary=result.get("parse_summary", ""),
         doc_category=result.get("doc_category", payload.doc_category),
         batch_name=result.get("batch_name", payload.batch_name),
@@ -1218,7 +1343,16 @@ async def get_thread_detail(thread_id: str, identity: Identity = Depends(require
         thread = service.get_thread_detail(thread_id)
         
         if not thread:
-            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+            # Do not include thread_id or explain whether another tenant owns
+            # it.  A legacy conversation outside the annual-audit store must
+            # never be presented as a source that can support an audit.
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "该历史会话在当前年审存储中不可用。请在对应年审项目内重新发起会话；"
+                    "未在当前存储中可追溯的历史内容不能作为审计依据。"
+                ),
+            )
         
         return ThreadDetailResponse(**thread)
     except HTTPException:
@@ -1346,6 +1480,30 @@ class AssistantTurnItem(BaseModel):
     final_report_ref: str = Field(default="", description="最终报告引用")
     intent: str = Field(default="", description="本轮意图")
     case_id: int = Field(default=0, description="关联案件 ID")
+    route_decision: RouteDecisionModel | None = Field(
+        default=None,
+        description="该 assistant 版本自己的路由快照；不会回退为线程最新路由。",
+    )
+    trace_items: list[TraceItemModel] = Field(
+        default_factory=list,
+        description="该 assistant 版本自己的引用 claim + 证据快照。",
+    )
+    citation_coverage: CitationCoverageModel = Field(
+        default_factory=CitationCoverageModel,
+        description="该 assistant 版本自己的角标覆盖率快照。",
+    )
+    response_analysis_runs: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="该 assistant 版本实际执行的年审分析运行范围。",
+    )
+    unresolved_relations: list[UnresolvedRelationItemModel] = Field(
+        default_factory=list,
+        description="该 assistant 版本自己的未决关系快照。",
+    )
+    unresolved_claims: list[UnresolvedClaimItemModel] = Field(
+        default_factory=list,
+        description="该 assistant 版本自己的未决断言快照。",
+    )
     version: int = Field(default=1, description="生成版本号，1=首次，2+=重新生成")
     created_at: str = Field(default="", description="创建时间 ISO 格式")
 
@@ -1374,6 +1532,66 @@ class ThreadTurnsResponse(BaseModel):
     thread_id: str = Field(description="会话线程 ID")
     turns: list[TurnGroup] = Field(description="轮次列表")
     turn_count: int = Field(description="轮次总数")
+
+
+def _turn_graph_context(raw_context: Any) -> dict[str, Any]:
+    """Validate one persisted assistant graph snapshot for the ``/turns`` API.
+
+    The history table is long lived and may contain records written before the
+    graph context contract existed.  A malformed legacy item must not make a
+    whole thread unreadable; it is skipped and the remaining response-scoped
+    snapshot is still returned.
+    """
+    context = raw_context if isinstance(raw_context, dict) else {}
+
+    def _models(value: Any, model_type: type[BaseModel]) -> list[BaseModel]:
+        if not isinstance(value, list):
+            return []
+        results: list[BaseModel] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            try:
+                results.append(model_type.model_validate(item))
+            except ValueError:
+                continue
+        return results
+
+    raw_route = context.get("route_decision")
+    route_decision: RouteDecisionModel | None = None
+    if isinstance(raw_route, dict) and raw_route.get("capability"):
+        try:
+            route_decision = RouteDecisionModel.model_validate(raw_route)
+        except ValueError:
+            route_decision = None
+
+    raw_coverage = context.get("citation_coverage")
+    try:
+        citation_coverage = CitationCoverageModel.model_validate(
+            raw_coverage if isinstance(raw_coverage, dict) else {}
+        )
+    except ValueError:
+        citation_coverage = CitationCoverageModel()
+
+    return {
+        "route_decision": route_decision,
+        "trace_items": _models(context.get("trace_items"), TraceItemModel),
+        "citation_coverage": citation_coverage,
+        # ``None`` means this is a legacy reply written before the response
+        # scope contract existed.  An explicit empty list means a new reply
+        # deliberately had no completed analysis run.
+        "response_analysis_runs": (
+            _response_analysis_runs(context.get("response_analysis_runs"))
+            if "response_analysis_runs" in context
+            else None
+        ),
+        "unresolved_relations": _models(
+            context.get("unresolved_relations"), UnresolvedRelationItemModel
+        ),
+        "unresolved_claims": _models(
+            context.get("unresolved_claims"), UnresolvedClaimItemModel
+        ),
+    }
 
 
 @router.get(
@@ -1421,6 +1639,7 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                         created_at = a["created_at"].isoformat()
                     else:
                         created_at = str(a["created_at"])
+                graph_context = _turn_graph_context(a.get("graph_context"))
                 assistants.append(
                     AssistantTurnItem(
                         turn_id=t["turn_id"],
@@ -1428,6 +1647,12 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                         final_report_ref=a.get("final_report_ref") or "",
                         intent=a.get("intent") or "",
                         case_id=a.get("case_id") or 0,
+                        route_decision=graph_context["route_decision"],
+                        trace_items=graph_context["trace_items"],
+                        citation_coverage=graph_context["citation_coverage"],
+                        response_analysis_runs=graph_context["response_analysis_runs"],
+                        unresolved_relations=graph_context["unresolved_relations"],
+                        unresolved_claims=graph_context["unresolved_claims"],
                         version=a.get("version", 1),
                         created_at=created_at,
                     )

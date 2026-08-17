@@ -8,6 +8,7 @@ from typing import Any
 
 from ai_hunter.app.settings import Settings, get_settings
 
+from .program_catalog import PROGRAM_VERSION, baseline_program
 from .storage import mysql_connection
 
 
@@ -278,6 +279,7 @@ def get_engagement_profile(
 
 def get_full_context(case_id: int, *, settings: Settings | None = None) -> dict[str, Any]:
     profile = get_engagement_profile(case_id, settings=settings)
+    program = baseline_program()
     return {
         "case_id": case_id,
         "case": profile["case"],
@@ -287,6 +289,12 @@ def get_full_context(case_id: int, *, settings: Settings | None = None) -> dict[
                 "engagement": profile["annual_audit"],
                 "data_completeness": profile["data_completeness"],
                 "supported_cycles": ["sales_receivables", "cash_and_bank"],
+                "supported_automated_cycles": ["sales_receivables", "cash_and_bank"],
+                "controlled_program": {
+                    "version": PROGRAM_VERSION,
+                    "phases": sorted({str(item["phase"]) for item in program}),
+                    "cycles": sorted({str(item["cycle"]) for item in program}),
+                },
             }
         },
         "whiteglove": {},

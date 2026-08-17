@@ -61,6 +61,33 @@ def normalize_input(state: AuditGraphState) -> AuditGraphState:
         "client_turn_id": state.get("client_turn_id", ""),
         "regenerate": state.get("regenerate", False),
         "selected_assistant_turn_id": state.get("selected_assistant_turn_id", ""),
+        # A checkpoint holds long-lived case context as well as the last
+        # response. The fields below are response-scoped, not case-scoped:
+        # retaining them would make a new answer expose the previous answer's
+        # report reference, citations, or unresolved-item badges.
+        "final_report_ref": "",
+        "final_report_summary": "",
+        "final_report": "",
+        "assistant_message_id": "",
+        "response_evidence_index": "",
+        "response_trace_candidates": [],
+        "response_analysis_runs": [],
+        "response_evidence_tool_results": [],
+        "response_citation_coverage": {},
+        "citation_entries": [],
+        "annual_report_manifest": {},
+        "citation_manifest_binding": {},
+        "trace_items": [],
+        "citation_coverage": {},
+        "reconciliation_items": [],
+        "unresolved_relations": [],
+        "unresolved_claims": [],
+        "agent_output": "",
+        "business_line_plan": {},
+        "business_line_result": {},
+        "artifacts": {},
+        "extracted_tasks": [],
+        "task_create_result": {},
     }
 
     if case_switched:

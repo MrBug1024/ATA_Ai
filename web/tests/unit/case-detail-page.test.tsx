@@ -82,6 +82,9 @@ vi.mock("@/components/knowledge-graph/unresolved-items-panel", () => ({
 vi.mock("@/components/cases/corrections-panel", () => ({
   CorrectionsPanel: () => <div data-testid="corrections-panel" />,
 }));
+vi.mock("@/components/cases/annual-audit-execution-panel", () => ({
+  AnnualAuditExecutionPanel: () => <div data-testid="annual-audit-execution" />,
+}));
 vi.mock("@/components/ui/sidebar", () => ({
   SidebarTrigger: () => null,
 }));
@@ -107,6 +110,7 @@ describe("CaseDetailPage", () => {
     expect(screen.getByText("资料处理记录")).toBeTruthy();
     expect(screen.getByText("审计结论演进")).toBeTruthy();
     expect(screen.getByText("待补资料")).toBeTruthy();
+    expect(screen.getByText("审计执行")).toBeTruthy();
     expect(screen.getByText("审计调整")).toBeTruthy();
     expect(screen.queryByText("回款管理")).toBeNull();
     expect(screen.queryByText("时效看板")).toBeNull();
@@ -127,6 +131,17 @@ describe("CaseDetailPage", () => {
       ctrlKey: false,
     });
     expect(screen.getByTestId("corrections-panel")).toBeTruthy();
+  });
+
+  it("opens the annual audit execution workbench from its tab", async () => {
+    const { default: Page } = await import("@/app/(main)/cases/[id]/page");
+    render(<Page />);
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "审计执行" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    expect(screen.getByTestId("annual-audit-execution")).toBeTruthy();
   });
 
   it("requests the maximum page and selects the newest thread client-side", async () => {

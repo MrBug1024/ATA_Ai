@@ -39,7 +39,12 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { ThinkingContext, type ThinkingState } from "@/lib/assistant-ui/thinking-context";
+import {
+  EvidenceContextProvider,
+  useEvidenceContext,
+} from "@/lib/assistant-ui/evidence-context";
 import { useDebugMode } from "@/lib/hooks/use-debug-mode";
+import { isLegacyUnauditableAuditDrilldownReply } from "@/lib/assistant-ui/annual-audit-reply-safety";
 
 interface ChatThreadProps {
   suggestions?: string[];
@@ -354,8 +359,20 @@ const ReasoningText: FC<{ text: string }> = ({ text }) => {
 
 const AssistantMessage: FC = () => {
   const thinkingMap = useContext(ThinkingContext);
+  const evidenceContext = useEvidenceContext();
   const messageId = useAuiState((s) => s.message.id);
   const isRunning = useAuiState((s) => s.message.status?.type === "running");
+  const isLegacyUnauditableAuditReply = useAuiState((s) => {
+    const custom = s.message.metadata.custom;
+    return isLegacyUnauditableAuditDrilldownReply(custom);
+  });
+  const messageReportRef = useAuiState((s) => {
+    const custom = s.message.metadata.custom as
+      | { finalReportRef?: unknown }
+      | undefined;
+    const value = custom?.finalReportRef;
+    return typeof value === "string" && value.trim().length > 0 ? value : null;
+  });
   const thinking = messageId
     ? thinkingMap.get(messageId) ?? (isRunning ? [...thinkingMap.values()].find((t) => !t.isComplete) : undefined)
     : undefined;
@@ -368,7 +385,20 @@ const AssistantMessage: FC = () => {
     >
       <div className="wrap-break-word px-2 leading-relaxed text-foreground">
         {debugMode && thinking && <NodeTracePanel thinking={thinking} />}
-        <MessagePrimitive.Parts components={{ Text: MarkdownText, Reasoning: ReasoningText }} />
+        {!isRunning && isLegacyUnauditableAuditReply && (
+          <div
+            role="alert"
+            className="mb-3 rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200"
+          >
+            此历史回复未建立可审计证据链，不能作为审计结论或底稿。
+          </div>
+        )}
+        <EvidenceContextProvider
+          caseId={evidenceContext.caseId}
+          reportRef={messageReportRef}
+        >
+          <MessagePrimitive.Parts components={{ Text: MarkdownText, Reasoning: ReasoningText }} />
+        </EvidenceContextProvider>
         <MessageError />
         <AuiIf condition={(s) => s.thread.isRunning && s.message.content.length === 0}>
           <div className="flex items-center gap-2 text-muted-foreground">

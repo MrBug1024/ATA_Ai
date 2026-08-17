@@ -22,6 +22,7 @@ import { MaterialEventTimeline } from "@/components/knowledge-graph/material-eve
 import { EvolutionTimeline } from "@/components/knowledge-graph/evolution-timeline";
 import { UnresolvedItemsPanel } from "@/components/knowledge-graph/unresolved-items-panel";
 import { CorrectionsPanel } from "@/components/cases/corrections-panel";
+import { AnnualAuditExecutionPanel } from "@/components/cases/annual-audit-execution-panel";
 
 export default function CaseDetailPage() {
   const params = useParams();
@@ -124,6 +125,7 @@ export default function CaseDetailPage() {
             <TabsTrigger value="events">资料处理记录</TabsTrigger>
             <TabsTrigger value="evolution">审计结论演进</TabsTrigger>
             <TabsTrigger value="unresolved">待补资料</TabsTrigger>
+            <TabsTrigger value="execution">审计执行</TabsTrigger>
             {canUseCorrections && <TabsTrigger value="corrections">审计调整</TabsTrigger>}
           </TabsList>
         </div>
@@ -147,6 +149,9 @@ export default function CaseDetailPage() {
               caseDocCategories={caseDocCategories ?? null}
               docCategoriesLoading={docCategoriesLoading}
             />
+          </TabsContent>
+          <TabsContent value="execution" className="mt-0">
+            <AnnualAuditExecutionPanel caseId={caseId} />
           </TabsContent>
           {canUseCorrections && (
             <TabsContent value="corrections" className="mt-0">

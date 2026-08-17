@@ -269,6 +269,13 @@ class ConversationMessageRepository:
                     "intent": row.get("intent"),
                     "case_id": row.get("case_id"),
                     "final_report_ref": row.get("final_report_ref"),
+                    # ``graph_context`` is a response-scoped snapshot.  Keep it
+                    # with this exact assistant version so the /turns endpoint
+                    # never borrows citations or unresolved items from a later
+                    # reply in the same thread.
+                    "graph_context": row.get("graph_context")
+                    if isinstance(row.get("graph_context"), dict)
+                    else {},
                     "version": row.get("version", 1),
                 })
 

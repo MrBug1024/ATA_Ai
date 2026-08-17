@@ -23,7 +23,10 @@ powershell -ExecutionPolicy Bypass -File scripts/annual-audit-local.ps1 verify
 # 对既有具名卷应用幂等 MySQL 迁移
 powershell -ExecutionPolicy Bypass -File scripts/annual-audit-local.ps1 migrate
 
-# 初始化年审权限、superadmin 和空演示项目（可重复执行）
+# 仅初始化年审权限与 superadmin，不创建演示项目或客户数据
+powershell -ExecutionPolicy Bypass -File scripts/annual-audit-local.ps1 auth-seed
+
+# 初始化权限后额外创建空演示项目（仅用于开发验证，可重复执行）
 powershell -ExecutionPolicy Bypass -File scripts/annual-audit-local.ps1 seed
 
 # 在唯一的 8080 端口启动年度审计后端

@@ -51,9 +51,27 @@ MIGRATIONS = (
         SQL_DIR / "annual_audit_mysql_v8.sql",
         "allow versioned annual report and workpaper artifact manifests",
     ),
+    (
+        "009",
+        SQL_DIR / "annual_audit_mysql_v9.sql",
+        "annual audit execution, evidence, review, issuance and knowledge governance",
+    ),
+    (
+        "010",
+        SQL_DIR / "annual_audit_mysql_v10.sql",
+        "immutable annual report citation manifests",
+    ),
+    (
+        "011",
+        SQL_DIR / "annual_audit_mysql_v11.sql",
+        "immutable annual report citation delivery references",
+    ),
 )
 
-POSTGRES_MIGRATION = SQL_DIR / "annual_audit_postgres_v1.sql"
+POSTGRES_MIGRATIONS = (
+    SQL_DIR / "annual_audit_postgres_v1.sql",
+    SQL_DIR / "annual_audit_postgres_v2.sql",
+)
 
 
 def _migration_applied(cursor, version: str) -> bool:
@@ -122,7 +140,8 @@ def apply_platform_schema(settings: Settings | None = None) -> None:
         raise AnnualAuditStorageError("psycopg is required for annual platform migrations") from exc
 
     with psycopg.connect(dsn, autocommit=True) as connection:
-        connection.execute(POSTGRES_MIGRATION.read_text(encoding="utf-8"))
+        for migration in POSTGRES_MIGRATIONS:
+            connection.execute(migration.read_text(encoding="utf-8"))
 
 
 def main() -> None:

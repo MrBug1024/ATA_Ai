@@ -55,6 +55,11 @@ def rank_case_evidence(
                 "citation_id": str(trace.get("citation_id", "") or ""),
                 "claim_id": int(trace.get("claim_id", 0) or 0),
                 "claim_text": str(trace.get("claim_text", "") or ""),
+                # Keep graph provenance when a trace is flattened for the
+                # evidence.resolve business result.  The finalizer must not
+                # infer this from a numeric ID because annual_finding IDs are
+                # in a different database domain.
+                "_graph_backed": bool(trace.get("_graph_backed")),
                 "chunk_id": str(evidence.get("chunk_id", "") or ""),
                 "file_id": int(evidence.get("file_id", 0) or 0),
                 "file_name": str(evidence.get("file_name", "") or ""),

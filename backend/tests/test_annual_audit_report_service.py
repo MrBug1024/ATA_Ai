@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from ai_hunter.annual_audit import report_graph
+from ai_hunter.annual_audit import report_service
 from ai_hunter.annual_audit.analysis_service import _source_quality
 from ai_hunter.annual_audit.report_service import render_annual_report_draft
 
@@ -106,6 +107,122 @@ def test_source_quality_distinguishes_split_workpapers_and_partial_ledgers():
     assert _source_quality(["工资.xlsx", "完整序时账.xlsx"]) == "mixed"
 
 
+def test_report_citation_plan_places_only_planned_graph_claims_on_finding_lines(monkeypatch):
+    finding = {
+        "analysis_run_id": 41,
+        "finding_type": "period_end_transactions",
+        "risk_level": "high",
+        "title": "期末存在大额资金流水",
+        "description": "规则命中 1 条，需核查交易背景。",
+        "evidence_refs": [
+            {
+                "source_locator": {
+                    "source_file_id": 101,
+                    "source_page_id": 201,
+                    "source_chunk_id": "a" * 64,
+                    "file_name": "银行流水.xlsx",
+                    "page_no": 2,
+                }
+            }
+        ],
+    }
+    finding_key = report_service.annual_finding_key(finding)
+    monkeypatch.setattr(
+        report_service,
+        "project_annual_findings_to_knowledge_graph",
+        lambda **_kwargs: {
+            "trace_by_finding_key": {
+                finding_key: {
+                    "claim_id": 501,
+                    "claim_type": "risk_signal",
+                    "claim_text": "期末存在大额资金流水：规则命中 1 条，需核查交易背景。",
+                    "confidence": 1.0,
+                    "entity_id": 81,
+                    "_graph_backed": True,
+                    "evidences": [
+                        {
+                            "chunk_id": "a" * 64,
+                            "file_id": 101,
+                            "source_page_id": 201,
+                            "page_no": 2,
+                        }
+                    ],
+                }
+            },
+            "projected_count": 1,
+            "unprojected_count": 0,
+        },
+    )
+
+    plan = report_service.build_annual_report_citation_plan(
+        case_id=7,
+        entity_name="示例制造有限公司",
+        sales_receivables={},
+        cash_and_bank={"analysis_run_id": 41, "findings": [finding]},
+    )
+    lines = report_service._finding_lines(
+        [finding],
+        citation_id_by_finding_key=plan["citation_id_by_finding_key"],
+    )
+
+    assert lines[0].endswith("[[cite:1]]")
+    assert plan["response_trace_candidates"][0]["claim_id"] == 501
+    assert plan["citation_coverage"]["coverage_ratio"] == 1.0
+    # A plain bracketed year is never converted by report rendering; only the
+    # explicit marker emitted by the deterministic citation plan is present.
+    assert "[2026]" not in lines[0]
+
+
+def test_persist_citation_manifest_freezes_only_rendered_markers(monkeypatch):
+    captured = {}
+
+    def persist_manifest(**kwargs):
+        captured.update(kwargs)
+        return list(kwargs["entries"])
+
+    monkeypatch.setattr(report_service, "persist_report_citation_manifest", persist_manifest)
+    result = report_service._persist_citation_manifest(
+        engagement_id=7,
+        artifacts={"report": {"id": 41, "version": 2}},
+        citation_entries=[
+            {
+                "citation_id": "1",
+                "section_code": "C1-2",
+                "paragraph_key": "cash_and_bank_risk.1",
+                "annual_finding_key": "a" * 64,
+                "annual_finding_id": 11,
+                "analysis_run_id": 21,
+                "analysis_type": "cash_and_bank",
+                "finding_type": "large_transaction",
+                "risk_level": "high",
+                "rule_metadata": {"rule_code": "C1-LARGE-001"},
+                "finding_metadata": {"title": "cash exception", "amount": 100},
+                "evidence_snapshot": [
+                    {
+                        "file_id": 101,
+                        "source_page_id": 201,
+                        "chunk_id": "b" * 64,
+                    }
+                ],
+            },
+            {
+                # Coverage records for uncited findings must never become
+                # an apparently valid report citation.
+                "citation_id": "",
+                "annual_finding_key": "c" * 64,
+                "finding_metadata": {"title": "unbound exception"},
+            },
+        ],
+        settings=object(),
+    )
+
+    assert [entry["citation_id"] for entry in captured["entries"]] == ["1"]
+    assert captured["entries"][0]["annual_finding_id"] == 11
+    assert captured["entries"][0]["anchor_status"] == "bound"
+    assert result["citation_count"] == 1
+    assert result["snapshot_hashes"]["1"] == captured["entries"][0]["snapshot_hash"]
+
+
 def test_report_draft_exposes_missing_data_instead_of_inventing_results():
     text = render_annual_report_draft(
         engagement={
@@ -142,6 +259,14 @@ def test_annual_report_graph_node_returns_original_agent_output_contract(monkeyp
                 "report": {"version": 2},
                 "workpapers": [{"code": "F1-2", "version": 3}],
             },
+            "response_trace_candidates": [
+                {
+                    "claim_id": 0,
+                    "claim_type": "cash_exception",
+                    "claim_text": "本轮现金异常",
+                    "evidences": [],
+                }
+            ],
         },
     )
 
@@ -152,4 +277,5 @@ def test_annual_report_graph_node_returns_original_agent_output_contract(monkeyp
     assert result["agent_output"].startswith("年审报告初稿正文")
     assert "报告草稿 v2" in result["agent_output"]
     assert "F1-2 v3" in result["agent_output"]
+    assert result["response_trace_candidates"][0]["claim_text"] == "本轮现金异常"
     assert result["extracted_tasks"] == []

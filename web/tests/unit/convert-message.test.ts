@@ -80,4 +80,47 @@ describe("convertDbMessage", () => {
         ?.custom?.canReload
     ).toBe(true);
   });
+
+  it("preserves the final report reference for each assistant reply", () => {
+    const result = convertDbMessage({
+      ...baseMsg,
+      role: "assistant",
+      metadata: { final_report_ref: "report-for-this-message" },
+    });
+    expect(result.metadata?.custom?.finalReportRef).toBe("report-for-this-message");
+  });
+
+  it("keeps a streamed message's local custom evidence reference", () => {
+    const result = convertDbMessage({
+      ...baseMsg,
+      role: "assistant",
+      metadata: { custom: { finalReportRef: "stream-report-ref" } },
+    });
+    expect(result.metadata?.custom?.finalReportRef).toBe("stream-report-ref");
+  });
+
+  it("preserves response-scoped evidence metadata for the same assistant message", () => {
+    const result = convertDbMessage({
+      ...baseMsg,
+      role: "assistant",
+      metadata: {
+        final_report_ref: "report:turn-1",
+        custom: {
+          finalReportRef: "report:turn-1",
+          traceItems: [{ citation_id: "1", claim_id: 701 }],
+          citationCoverage: { total_claims: 1, cited_claims: 1 },
+          unresolvedRelations: [{ relation_key: "r-1" }],
+          unresolvedClaims: [{ claim_text: "needs evidence" }],
+        },
+      },
+    });
+
+    expect(result.metadata?.custom).toMatchObject({
+      finalReportRef: "report:turn-1",
+      traceItems: [{ citation_id: "1", claim_id: 701 }],
+      citationCoverage: { total_claims: 1, cited_claims: 1 },
+      unresolvedRelations: [{ relation_key: "r-1" }],
+      unresolvedClaims: [{ claim_text: "needs evidence" }],
+    });
+  });
 });

@@ -42,14 +42,15 @@ describe("DemoValidationGate", () => {
     expect(mockValidate).toHaveBeenCalledWith({ case_id: 116, report_ref: "final_report:demo-116" });
   });
 
-  it("shows ready badge when validation passes", async () => {
+  it("shows evidence-chain status without offering a publication action", async () => {
     mockHookState = {
       data: { ready: true, total_citations: 3, passed_citations: 3, failed_citations: 0, checks: [], issues: [], case_id: 116, report_ref: "r" },
       isMutating: false, error: null, validate: mockValidate, reset: mockReset,
     };
     const { DemoValidationGate } = await import("@/components/knowledge-graph/demo-validation-gate");
     render(<DemoValidationGate caseId={116} reportRef="r" />);
-    expect(screen.getByText(/可发布/)).toBeTruthy();
+    expect(screen.getByText(/证据链校验通过/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /发布/ })).toBeNull();
   });
 
   it("shows failed badge and failing checks when ready is false", async () => {

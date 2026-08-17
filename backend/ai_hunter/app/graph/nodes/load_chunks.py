@@ -144,7 +144,14 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         "files": inserted_files,
         "upload_batch": batch_row,
         "doc_category_links": category_rows,
-        "pages": inserted_pages,
+        # insert_source_pages intentionally returns only durable database IDs.
+        # Keep source-page text and worksheet metadata alongside those IDs in
+        # the batch snapshot: structured-row binding needs them after this
+        # graph node exits.
+        "pages": _build_chunk_batch_pages(
+            inserted_pages=inserted_pages,
+            source_pages=all_pages,
+        ),
         "chunks": [chunk.model_dump() for chunk in all_chunks],
     }
     chunk_batch_ref = put_heavy_payload("kg_chunk_batch", chunk_batch_payload)
@@ -176,6 +183,54 @@ def bind_annual_evidence_anchors(state: AuditGraphState) -> AuditGraphState:
         chunk_batch=payload,
     )
     return {"annual_evidence_binding_summary": result}
+
+
+def _build_chunk_batch_pages(
+    *,
+    inserted_pages: list[dict[str, Any]],
+    source_pages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge persisted source-page IDs with metadata needed for row binding.
+
+    source_page returns only compact identifiers after its PostgreSQL upsert.
+    The heavy batch payload is the hand-off boundary, so retain page text and
+    worksheet information there without changing the storage return contract.
+    """
+
+    source_by_key = {
+        (int(row.get("file_id") or 0), int(row.get("page_no") or 0)): row
+        for row in source_pages
+        if int(row.get("file_id") or 0) > 0 and int(row.get("page_no") or 0) > 0
+    }
+    merged_pages: list[dict[str, Any]] = []
+    for inserted in inserted_pages:
+        persisted = dict(inserted)
+        key = (int(persisted.get("file_id") or 0), int(persisted.get("page_no") or 0))
+        source = source_by_key.get(key)
+        if source is None:
+            merged_pages.append(persisted)
+            continue
+
+        page = {
+            **persisted,
+            "page_text": str(source.get("page_text") or ""),
+            "page_image_ref": str(source.get("page_image_ref") or ""),
+            "page_width": int(source.get("page_width") or 0),
+            "page_height": int(source.get("page_height") or 0),
+        }
+        sheet_names = sorted(
+            {
+                str(block.get("sheet_name") or "").strip()
+                for block in source.get("ocr_blocks", [])
+                if isinstance(block, dict) and str(block.get("sheet_name") or "").strip()
+            }
+        )
+        if sheet_names:
+            page["sheet_names"] = sheet_names
+        if len(sheet_names) == 1:
+            page["sheet_name"] = sheet_names[0]
+        merged_pages.append(page)
+    return merged_pages
 
 
 def _persist_upload_batch_context(

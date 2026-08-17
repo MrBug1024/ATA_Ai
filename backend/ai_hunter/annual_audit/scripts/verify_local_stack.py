@@ -39,6 +39,8 @@ REQUIRED_MYSQL_TABLES = {
     "annual_finding",
     "annual_workpaper",
     "audit_report",
+    "annual_report_citation_manifest",
+    "annual_report_citation_delivery_ref",
     "annual_task",
 }
 
@@ -81,7 +83,19 @@ def main() -> None:
     missing_mysql = sorted(REQUIRED_MYSQL_TABLES - mysql_tables)
     if missing_mysql:
         raise RuntimeError(f"missing MySQL tables: {missing_mysql}")
-    if migrations != ["001", "002", "003", "004", "005", "006", "007", "008"]:
+    if migrations != [
+        "001",
+        "002",
+        "003",
+        "004",
+        "005",
+        "006",
+        "007",
+        "008",
+        "009",
+        "010",
+        "011",
+    ]:
         raise RuntimeError(f"unexpected MySQL migrations: {migrations}")
 
     if not settings.redis_url:

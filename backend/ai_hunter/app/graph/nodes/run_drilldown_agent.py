@@ -1,8 +1,11 @@
 """Run the drilldown/task agent as a Runnable so token streams are visible to astream_events."""
 
+import json
 import logging
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages.tool import ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.managed.is_last_step import RemainingSteps
 from langgraph.prebuilt import create_react_agent
@@ -18,6 +21,16 @@ from ...tools.registry import tools_for_capability
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+# These are deliberately explicit rather than inferred from an assistant's
+# prose.  A citation/evidence resolver must only see analysis runs that this
+# ReAct invocation actually executed.
+_ANALYSIS_TOOL_TYPES = {
+    "analyze_sales_receivables": "sales_receivables",
+    "analyze_cash_and_bank": "cash_and_bank",
+}
+_EVIDENCE_TOOL_NAMES = frozenset({"search_annual_evidence"})
 
 
 class DrilldownAgentState(AuditGraphState, total=False):
@@ -170,13 +183,150 @@ def _inject_current_query(state: AuditGraphState) -> AuditGraphState:
     return {**state, "messages": messages}
 
 
-def _extract_agent_output(response: dict) -> dict:
-    """Pull the final assistant message content from the agent response."""
-    messages = response.get("messages", [])
+def _current_turn_tool_messages(messages: list[Any]) -> list[ToolMessage]:
+    """Return ToolMessages emitted after the current query in this agent run.
+
+    The prompt contains compact conversation history.  Retaining a historical
+    ToolMessage here would make the next answer appear to have executed an old
+    analysis run, so the last HumanMessage is the strict current-turn boundary.
+    A direct unit invocation may not include a HumanMessage; in that case its
+    supplied ToolMessages are the complete response scope.
+    """
+
+    last_human_index = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=-1,
+    )
+    return [
+        message
+        for message in messages[last_human_index + 1 :]
+        if isinstance(message, ToolMessage)
+    ]
+
+
+def _tool_name(message: ToolMessage) -> str:
+    """Read the exact registered tool name without inspecting result prose."""
+
+    name = getattr(message, "name", "")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+    fallback_name = additional_kwargs.get("name") if isinstance(additional_kwargs, dict) else ""
+    return fallback_name.strip() if isinstance(fallback_name, str) else ""
+
+
+def _successful_tool_envelope(message: ToolMessage) -> dict[str, Any] | None:
+    """Parse a successful ``build_tool_result`` envelope from one ToolMessage.
+
+    Tool errors use the same envelope shape but place ``error`` in
+    ``key_facts``.  They are intentionally excluded: a failed tool call is not
+    an evidence or analysis scope for the visible answer.
+    """
+
+    if not isinstance(message.content, str):
+        return None
+    try:
+        envelope = json.loads(message.content)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    key_facts = envelope.get("key_facts")
+    if not isinstance(key_facts, dict):
+        return None
+    if envelope.get("error") or envelope.get("success") is False or key_facts.get("error"):
+        return None
+    return envelope
+
+
+def _positive_int(value: Any) -> int | None:
+    """Accept only a positive integral JSON value for a persisted run id."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _extract_agent_output(response: dict, *, capability: str = "") -> dict:
+    """Pull final output and exact current-tool execution scope from an agent run."""
+
+    messages = list(response.get("messages") or [])
+    current_tool_messages = _current_turn_tool_messages(messages)
+    analysis_runs: list[dict[str, Any]] = []
+    evidence_tool_results: list[dict[str, Any]] = []
+
+    for message in current_tool_messages:
+        tool_name = _tool_name(message)
+        envelope = _successful_tool_envelope(message)
+        if not tool_name or envelope is None:
+            continue
+        key_facts = envelope["key_facts"]
+
+        expected_analysis_type = _ANALYSIS_TOOL_TYPES.get(tool_name)
+        if expected_analysis_type:
+            analysis_type = key_facts.get("analysis_type")
+            analysis_run_id = _positive_int(key_facts.get("analysis_run_id"))
+            # The tool name and the type returned by its structured result must
+            # agree.  Do not infer either value from the assistant response.
+            if analysis_type == expected_analysis_type and analysis_run_id is not None:
+                analysis_runs.append(
+                    {
+                        "tool_name": tool_name,
+                        "analysis_type": analysis_type,
+                        "analysis_run_id": analysis_run_id,
+                    }
+                )
+            continue
+
+        if tool_name in _EVIDENCE_TOOL_NAMES:
+            # Keep the direct, de-hydrated tool result as-is for a downstream
+            # evidence resolver.  This is distinct from a graph-wide/latest
+            # lookup and cannot inherit evidence from another turn.
+            evidence_tool_results.append(
+                {
+                    "tool_name": tool_name,
+                    "key_facts": key_facts,
+                    "truncated": bool(envelope.get("truncated")),
+                }
+            )
+
+    if capability == "audit.drilldown":
+        successful_tool_count = sum(
+            _successful_tool_envelope(message) is not None
+            for message in current_tool_messages
+        )
+        if successful_tool_count == 0:
+            return {
+                "agent_output": (
+                    "本轮未取得可核验的项目资料或分析结果，因此不能形成审计事实、风险结论或金额判断。"
+                    "请先确认年审项目存在且已导入相应资料后，再执行下钻分析。"
+                ),
+                "business_line_result": {
+                    "capability": capability,
+                    "ok": False,
+                    "error": "no_successful_audit_tool_result",
+                },
+                "response_analysis_runs": [],
+                "response_evidence_tool_results": [],
+            }
+
     if messages:
-        return {"agent_output": str(messages[-1].content).strip()}
+        return {
+            "agent_output": str(messages[-1].content).strip(),
+            "response_analysis_runs": analysis_runs,
+            "response_evidence_tool_results": evidence_tool_results,
+        }
     LOGGER.warning("drilldown_agent_empty_response")
-    return {"agent_output": ""}
+    return {
+        "agent_output": "",
+        "response_analysis_runs": [],
+        "response_evidence_tool_results": [],
+    }
 
 
 def _fallback_agent_output(state: AuditGraphState) -> dict:
@@ -307,7 +457,9 @@ def _build_scoped_agent(
         prompt=prompt,
         state_schema=DrilldownAgentState,
     ).with_config({"recursion_limit": _agent_recursion_limit()})
-    return RunnableLambda(_inject_current_query) | agent | RunnableLambda(_extract_agent_output)
+    return RunnableLambda(_inject_current_query) | agent | RunnableLambda(
+        lambda response: _extract_agent_output(response, capability=capability)
+    )
 
 
 def build_capability_agent_node(capability: str):

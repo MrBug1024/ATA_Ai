@@ -28,6 +28,9 @@ scripts/   本地环境管理脚本
 ```powershell
 .\scripts\annual-audit-local.ps1 up
 
+# 仅初始化本地登录、角色、报告段落与权限；不会创建演示项目或客户数据
+.\scripts\annual-audit-local.ps1 auth-seed
+
 cd backend
 python -m ai_hunter
 
@@ -47,4 +50,4 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
 - 前端：<http://localhost:3000>
 - 后端文档：<http://localhost:8080/docs>
 
-本地最高权限账号由年度审计种子初始化：`superadmin`。
+本地最高权限账号由年度审计权限种子初始化：`superadmin`。真实项目环境请使用 `auth-seed`，不要执行会创建空演示项目的 `seed`。

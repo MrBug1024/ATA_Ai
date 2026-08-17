@@ -19,6 +19,25 @@ interface EvidenceDrawerProps {
   variant?: "inline" | "overlay";
 }
 
+function evidenceLocationLabel(evidence: EvidenceItem): string {
+  const isSheetRow =
+    evidence.locator_kind === "sheet_row" ||
+    Boolean(evidence.sheet_name) ||
+    (evidence.row_start ?? 0) > 0;
+
+  if (!isSheetRow) {
+    return `第 ${evidence.page_no} 页`;
+  }
+
+  const worksheet = evidence.sheet_name ? `工作表：${evidence.sheet_name}` : "工作表";
+  const rowStart = evidence.row_start ?? 0;
+  const rowEnd = evidence.row_end ?? rowStart;
+  if (rowStart <= 0) {
+    return worksheet;
+  }
+  return `${worksheet} · 行：${rowStart}${rowEnd > rowStart ? `-${rowEnd}` : ""}`;
+}
+
 export function EvidenceDrawer({ variant = "overlay" }: EvidenceDrawerProps) {
   const open = useEvidenceDrawerStore((s) => s.open);
   const caseId = useEvidenceDrawerStore((s) => s.caseId);
@@ -98,7 +117,7 @@ export function EvidenceDrawer({ variant = "overlay" }: EvidenceDrawerProps) {
               >
                 <div className="flex items-baseline gap-1.5">
                   <span className="truncate font-medium">{ev.file_name}</span>
-                  <span className="shrink-0 opacity-70">第 {ev.page_no} 页</span>
+                  <span className="shrink-0 opacity-70">{evidenceLocationLabel(ev)}</span>
                 </div>
                 {ev.quote_text && (
                   <div className="mt-0.5 line-clamp-2 opacity-60">{ev.quote_text}</div>

@@ -7,12 +7,22 @@ import { cn } from "@/lib/utils";
 import { MermaidDiagram } from "@/components/assistant-ui/mermaid-diagram";
 import { CitationButton } from "@/components/knowledge-graph/citation-button";
 
-function rehypeCitations() {
+/**
+ * Convert only the explicit citation wire format emitted by the backend.
+ *
+ * `[[cite:n]]` is deliberately an internal transport marker.  The renderer
+ * turns it into the user-facing `[n]` evidence marker, while plain bracketed
+ * numbers remain ordinary Markdown text.  Audit reports routinely contain
+ * years, legal provisions, spreadsheet row labels, and list items such as
+ * `[2026]` / `[1]`; accepting those as citations would let a reader open
+ * unrelated evidence.
+ */
+export function rehypeCitations() {
   return (tree: unknown) => {
     visit(tree as Parameters<typeof visit>[0], "text", (node: any, index: number | undefined, parent: any) => {
       if (index === undefined || !parent || parent.type === "element" && parent.tagName === "code") return;
       const text: string = node.value ?? "";
-      const regex = /\[(\d+)\]/g;
+      const regex = /\[\[cite:([1-9]\d*)\]\]/g;
       if (!regex.test(text)) return;
       regex.lastIndex = 0;
 

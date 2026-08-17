@@ -92,3 +92,130 @@ def test_invalid_jwt_is_rejected_when_auth_enabled(monkeypatch):
     with pytest.raises(HTTPException) as error:
         get_current_identity(request)
     assert error.value.status_code == 401
+
+
+def test_private_valid_signature_unknown_local_principal_is_rejected(monkeypatch):
+    from fastapi import HTTPException
+
+    class LocalUsers:
+        def get_active_local_user(self, user_id):
+            assert user_id == "stale-user"
+            return None
+
+    settings = get_settings()
+    secret = "local-test-secret-key-at-least-32-bytes!!"
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "auth_identity_mode", "private")
+    monkeypatch.setattr(settings, "user_center_jwt_alg", "HS256")
+    monkeypatch.setattr(settings, "auth_local_jwt_secret", secret)
+    monkeypatch.setattr(settings, "user_center_jwt_secret", "")
+    monkeypatch.setattr(
+        "ai_hunter.app.services.user_service.get_user_service",
+        lambda: LocalUsers(),
+    )
+    token = jwt.encode(
+        {"sub": "stale-user", "name": "旧会话用户", "auth_source": "local"},
+        secret,
+        algorithm="HS256",
+    )
+    request = type("Request", (), {"headers": {"authorization": f"Bearer {token}"}})()
+
+    with pytest.raises(HTTPException) as error:
+        get_current_identity(request)
+
+    assert error.value.status_code == 401
+    assert "重新登录" in str(error.value.detail)
+
+
+def test_private_known_active_superadmin_uses_local_principal(monkeypatch):
+    class LocalUsers:
+        def get_active_local_user(self, user_id):
+            assert user_id == "local_super_admin"
+            return {
+                "user_id": user_id,
+                "username": "本地超级管理员",
+                "company_id": "",
+                "auth_source": "local",
+                "status": "active",
+                "is_super_admin": True,
+            }
+
+        def list_user_roles(self, user_id, *, company_id=""):
+            assert user_id == "local_super_admin"
+            assert company_id == ""
+            return ["super_admin"]
+
+    settings = get_settings()
+    secret = "local-test-secret-key-at-least-32-bytes!!"
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "auth_identity_mode", "private")
+    monkeypatch.setattr(settings, "auth_legacy_roles_enabled", False)
+    monkeypatch.setattr(settings, "user_center_jwt_alg", "HS256")
+    monkeypatch.setattr(settings, "auth_local_jwt_secret", secret)
+    monkeypatch.setattr(settings, "user_center_jwt_secret", "")
+    monkeypatch.setattr(
+        "ai_hunter.app.services.user_service.get_user_service",
+        lambda: LocalUsers(),
+    )
+    token = jwt.encode(
+        {
+            "sub": "local_super_admin",
+            "name": "过期显示名",
+            "company": "untrusted-company",
+            "is_super_admin": False,
+            "auth_source": "local",
+        },
+        secret,
+        algorithm="HS256",
+    )
+    request = type("Request", (), {"headers": {"authorization": f"Bearer {token}"}})()
+
+    identity = get_current_identity(request)
+
+    assert identity.user_id == "local_super_admin"
+    assert identity.username == "本地超级管理员"
+    assert identity.company_id == ""
+    assert identity.roles == ["super_admin"]
+    assert identity.is_super_admin is True
+    assert identity.is_admin is True
+
+
+def test_private_development_headers_do_not_require_local_jwt_principal(monkeypatch):
+    class LocalUsers:
+        def get_active_local_user(self, _user_id):
+            raise AssertionError("development headers must not use the local JWT lookup")
+
+        def list_user_roles(self, _user_id, *, company_id=""):
+            assert company_id == "co-dev"
+            return []
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "auth_identity_mode", "private")
+    monkeypatch.setattr(settings, "auth_dev_trust_headers", True)
+    monkeypatch.setattr(settings, "auth_legacy_roles_enabled", True)
+    monkeypatch.setattr(settings, "auth_local_jwt_secret", "")
+    monkeypatch.setattr(settings, "user_center_jwt_secret", "")
+    monkeypatch.setattr(settings, "user_center_jwt_public_key", "")
+    monkeypatch.setattr(
+        "ai_hunter.app.services.user_service.get_user_service",
+        lambda: LocalUsers(),
+    )
+    request = type(
+        "Request",
+        (),
+        {
+            "headers": {
+                "x-user-id": "dev-user",
+                "x-user-name": "开发用户",
+                "x-user-roles": "auditor",
+                "x-company-id": "co-dev",
+            }
+        },
+    )()
+
+    identity = get_current_identity(request)
+
+    assert identity.user_id == "dev-user"
+    assert identity.roles == ["auditor"]
+    assert identity.authenticated is False

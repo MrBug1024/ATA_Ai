@@ -29,7 +29,7 @@ def test_report_and_workpaper_artifacts_are_openable():
     )
 
     assert load_workbook(io.BytesIO(report), read_only=True).sheetnames == [
-        "审计报告",
+        "审计报告草稿",
         "审计发现",
         "资料完整性",
     ]

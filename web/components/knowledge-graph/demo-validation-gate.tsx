@@ -33,9 +33,8 @@ export function DemoValidationGate({ caseId, reportRef }: DemoValidationGateProp
         <div className="flex items-center gap-1.5">
           <span className="flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-500">
             <CheckCircle className="h-3 w-3" />
-            ✓ 可发布
+            证据链校验通过
           </span>
-          <Button size="sm" className="h-7 text-xs">发布</Button>
         </div>
       )}
 

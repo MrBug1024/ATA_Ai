@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("up", "down", "status", "verify", "migrate", "seed", "backend")]
+    [ValidateSet("up", "down", "status", "verify", "migrate", "auth-seed", "seed", "backend")]
     [string]$Action = "status"
 )
 
@@ -24,8 +24,14 @@ function Import-LocalEnvironment {
             throw "Invalid environment line in $EnvFile"
         }
         $name = $pair[0].Trim()
+        $value = $pair[1].Trim().Trim('"').Trim("'")
+        # Explicit process values are used for conflict-free local ports.
+        # They must not be overwritten by the checked-in compose defaults.
+        if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name, "Process"))) {
+            continue
+        }
         if (
-            (-not (Use-LocalMinio) -and $name -like "ANNUAL_MINIO_*") -or
+            ((-not (Use-LocalMinio)) -and $name -like "ANNUAL_MINIO_*") -or
             (Use-ConfiguredMySql -and $name -like "ANNUAL_MYSQL_*") -or
             (Use-ConfiguredRedis -and $name -like "ANNUAL_REDIS_*")
         ) {
@@ -34,8 +40,12 @@ function Import-LocalEnvironment {
             # backend/.env when an online service is configured.
             continue
         }
-        [Environment]::SetEnvironmentVariable($name, $pair[1], "Process")
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
     }
+}
+
+function Use-ForcedLocalServices {
+    return [Environment]::GetEnvironmentVariable("ANNUAL_FORCE_LOCAL_SERVICES", "Process") -eq "1"
 }
 
 function Resolve-DockerCli {
@@ -102,6 +112,9 @@ function Get-BackendEnvFileValue {
 }
 
 function Use-LocalMinio {
+    if (Use-ForcedLocalServices) {
+        return $true
+    }
     # Company MinIO is the default.  The Docker MinIO is only a fallback for
     # a development checkout that has no configured remote endpoint.
     $endpoint = Get-BackendSettingValue "ANNUAL_MINIO_ENDPOINT"
@@ -109,12 +122,18 @@ function Use-LocalMinio {
 }
 
 function Use-ConfiguredMySql {
+    if (Use-ForcedLocalServices) {
+        return $false
+    }
     $mysqlHost = Get-BackendEnvFileValue "MYSQL_HOST"
     $database = Get-BackendEnvFileValue "MYSQL_DATABASE"
     return (-not [string]::IsNullOrWhiteSpace($mysqlHost)) -and (-not [string]::IsNullOrWhiteSpace($database))
 }
 
 function Use-ConfiguredRedis {
+    if (Use-ForcedLocalServices) {
+        return $false
+    }
     $url = Get-BackendEnvFileValue "REDIS_URL"
     $redisHost = Get-BackendEnvFileValue "REDIS_HOST"
     return (-not [string]::IsNullOrWhiteSpace($url)) -or (-not [string]::IsNullOrWhiteSpace($redisHost))
@@ -278,8 +297,11 @@ switch ($Action) {
     "migrate" {
         Invoke-AnnualMigrations
     }
-    "seed" {
-        Invoke-AnnualMigrations
+    "auth-seed" {
+        # Production-like local environments need roles and the local admin,
+        # but must not receive a fabricated engagement or financial data.
+        # Storage initialization belongs to `up` / `migrate`.  Do not make an
+        # authentication repair depend on MySQL migration credentials.
         Set-BackendEnvironment
         $env:INIT_SUPER_ADMIN_PASSWORD = $env:ANNUAL_BOOTSTRAP_SUPERADMIN_PASSWORD
         $Python = Resolve-ProjectPython
@@ -287,6 +309,18 @@ switch ($Action) {
         try {
             & $Python -m ai_hunter.app.scripts.init_local_admin --seed-file $SeedFile
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    "seed" {
+        & $PSCommandPath auth-seed
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Set-BackendEnvironment
+        $Python = Resolve-ProjectPython
+        Push-Location $BackendDir
+        try {
             & $Python -m ai_hunter.annual_audit.scripts.bootstrap_local_demo
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }

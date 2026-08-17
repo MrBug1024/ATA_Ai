@@ -175,6 +175,26 @@ class UserService:
             row = cur.fetchone()
         return dict(row) if row else None
 
+    def get_active_local_user(self, user_id: str) -> dict[str, Any] | None:
+        """Return the canonical principal for a currently enabled local account.
+
+        Private-mode access tokens are only issued through the local-login flow.
+        Looking this record up on every authenticated request makes user deletion,
+        disabling, and isolated-database changes take effect immediately instead of
+        leaving a validly signed but stale token as an authenticated principal.
+        """
+        if not user_id:
+            return None
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, username, company_id, auth_source, status, is_super_admin "
+                "FROM public.app_user "
+                "WHERE user_id=%s AND auth_source='local' AND status='active'",
+                (user_id,),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
     # ── 私有化本地凭证（v2-A）───────────────────────────────────────────────
     def set_local_password(self, user_id: str, *, login_identifier: str,
                            password_hash: str, password_algo: str = "argon2id") -> None:

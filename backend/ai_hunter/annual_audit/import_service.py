@@ -812,6 +812,152 @@ def import_uploaded_files(
     }
 
 
+_SHEET_HEADER_RE = re.compile(r"^\s*##\s*工作表\s*[：:]\s*(.+?)\s*$", re.MULTILINE)
+_SHEET_ROW_RE = re.compile(r"\[第\s*(\d+)\s*行\]")
+
+
+def _canonical_source_key(value: Any) -> str:
+    """Normalize a source identity for deterministic equality matching."""
+
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", _text(value))).strip().casefold()
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _unique_rows(rows: Iterable[dict[str, Any]], *, identity_field: str) -> list[dict[str, Any]]:
+    """Deduplicate candidates by a durable identifier before testing uniqueness."""
+
+    unique: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = str(row.get(identity_field) or "").strip()
+        if identity:
+            unique[identity] = row
+    return [unique[key] for key in sorted(unique)]
+
+
+def _page_sheet_keys(page: dict[str, Any]) -> set[str]:
+    """Return all worksheet names carried by one source-page batch record."""
+
+    values: list[Any] = [page.get("sheet_name")]
+    sheet_names = page.get("sheet_names")
+    if isinstance(sheet_names, list):
+        values.extend(sheet_names)
+    page_text = str(page.get("page_text") or "")
+    values.extend(match.group(1) for match in _SHEET_HEADER_RE.finditer(page_text))
+    return {key for value in values if (key := _canonical_source_key(value))}
+
+
+def _select_source_file(
+    *,
+    locator: dict[str, Any],
+    files_by_sha256: dict[str, list[dict[str, Any]]],
+    files_by_name: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any] | None, str]:
+    """Select one canonical platform file, never a positional fallback."""
+
+    source_sha256 = _canonical_source_key(locator.get("source_sha256"))
+    if source_sha256:
+        candidates = _unique_rows(files_by_sha256.get(source_sha256, []), identity_field="id")
+        if len(candidates) == 1:
+            return candidates[0], ""
+        return None, "source_file_not_found" if not candidates else "source_file_ambiguous"
+
+    file_name = _canonical_source_key(locator.get("file_name"))
+    if not file_name:
+        return None, "source_file_missing"
+    candidates = _unique_rows(files_by_name.get(file_name, []), identity_field="id")
+    if len(candidates) == 1:
+        return candidates[0], ""
+    return None, "source_file_not_found" if not candidates else "source_file_ambiguous"
+
+
+def _select_source_page(
+    *,
+    pages: list[dict[str, Any]],
+    sheet_name: str,
+    allow_unique_page_without_sheet: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
+    """Select exactly one source page for a worksheet."""
+
+    candidates = _unique_rows(pages, identity_field="id")
+    expected_sheet = _canonical_source_key(sheet_name)
+    if expected_sheet:
+        sheet_matches = [page for page in candidates if expected_sheet in _page_sheet_keys(page)]
+        if sheet_matches:
+            candidates = sheet_matches
+        elif not (allow_unique_page_without_sheet and len(candidates) == 1):
+            return None, "sheet_not_found"
+    if len(candidates) == 1:
+        return candidates[0], ""
+    return None, "page_not_found" if not candidates else "page_ambiguous"
+
+
+def _chunk_row_bounds(chunk: dict[str, Any]) -> tuple[int, int]:
+    """Resolve spreadsheet row bounds from explicit metadata or source text."""
+
+    metadata = _loads(chunk.get("metadata")) or {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    row_start = _positive_int(metadata.get("row_start"))
+    row_end = _positive_int(metadata.get("row_end"))
+    if row_start > 0 and row_end >= row_start:
+        return row_start, row_end
+
+    rows = [int(match.group(1)) for match in _SHEET_ROW_RE.finditer(str(chunk.get("chunk_text") or ""))]
+    if not rows:
+        return 0, 0
+    return min(rows), max(rows)
+
+
+def _chunk_contains_row(chunk: dict[str, Any], row_number: int) -> bool:
+    row_start, row_end = _chunk_row_bounds(chunk)
+    return row_start > 0 and row_start <= row_number <= row_end
+
+
+def _chunk_contains_quote(chunk: dict[str, Any], quote: str) -> bool:
+    expected = _canonical_source_key(quote)
+    return bool(expected and expected in _canonical_source_key(chunk.get("chunk_text")))
+
+
+def _select_source_chunk(
+    *,
+    chunks: list[dict[str, Any]],
+    row_number: int,
+    quote_text: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Select exactly one page chunk using a spreadsheet row or exact quote."""
+
+    candidates = _unique_rows(chunks, identity_field="chunk_id")
+    if not candidates:
+        return None, "chunk_not_found"
+
+    quote_matches = [chunk for chunk in candidates if _chunk_contains_quote(chunk, quote_text)]
+    if row_number > 0:
+        row_matches = [chunk for chunk in candidates if _chunk_contains_row(chunk, row_number)]
+        if len(row_matches) == 1:
+            return row_matches[0], ""
+        if len(row_matches) > 1:
+            row_quote_matches = [chunk for chunk in row_matches if _chunk_contains_quote(chunk, quote_text)]
+            if len(row_quote_matches) == 1:
+                return row_quote_matches[0], ""
+            return None, "row_range_ambiguous"
+        if len(quote_matches) == 1:
+            return quote_matches[0], ""
+        if len(quote_matches) > 1:
+            return None, "quote_ambiguous"
+        return None, "row_range_not_found"
+
+    if len(quote_matches) == 1:
+        return quote_matches[0], ""
+    if len(quote_matches) > 1:
+        return None, "quote_ambiguous"
+    return None, "chunk_not_found" if quote_text else "row_and_quote_missing"
+
+
 def bind_structured_source_refs(
     *,
     engagement_id: int,
@@ -836,10 +982,11 @@ def bind_structured_source_refs(
     if not file_rows:
         return {"bound_count": 0, "unbound_count": 0, "status": "no_source_files"}
 
-    platform_files: dict[str, dict[str, Any]] = {}
-    platform_files_by_name: dict[str, dict[str, Any]] = {}
+    platform_files_by_sha256: dict[str, list[dict[str, Any]]] = {}
+    platform_files_by_name: dict[str, list[dict[str, Any]]] = {}
+    platform_file_ids: set[int] = set()
     for row in file_rows:
-        file_id = int(row.get("id") or 0)
+        file_id = _positive_int(row.get("id"))
         if file_id <= 0:
             continue
         normalized = {
@@ -849,15 +996,20 @@ def bind_structured_source_refs(
             "content_type": str(row.get("content_type") or ""),
             "storage_ref": str(row.get("storage_ref") or ""),
         }
-        platform_files[normalized["file_sha256"]] = normalized
-        platform_files_by_name[normalized["file_name"]] = normalized
+        platform_file_ids.add(file_id)
+        source_sha256 = _canonical_source_key(normalized["file_sha256"])
+        if source_sha256:
+            platform_files_by_sha256.setdefault(source_sha256, []).append(normalized)
+        file_name = _canonical_source_key(normalized["file_name"])
+        if file_name:
+            platform_files_by_name.setdefault(file_name, []).append(normalized)
 
     page_by_file: dict[int, list[dict[str, Any]]] = {}
     for row in page_rows:
-        page_by_file.setdefault(int(row.get("file_id") or 0), []).append(row)
+        page_by_file.setdefault(_positive_int(row.get("file_id")), []).append(row)
     chunk_by_page: dict[int, list[dict[str, Any]]] = {}
     for row in chunk_rows:
-        chunk_by_page.setdefault(int(row.get("page_id") or 0), []).append(row)
+        chunk_by_page.setdefault(_positive_int(row.get("page_id")), []).append(row)
 
     table_map = {
         "account_balance": "annual_account_balance",
@@ -867,6 +1019,32 @@ def bind_structured_source_refs(
     }
     bound = 0
     unbound = 0
+    unbound_reasons: dict[str, int] = {}
+    unbound_rows: list[dict[str, Any]] = []
+
+    def record_unbound(
+        *,
+        dataset: str,
+        source_row: dict[str, Any],
+        locator: dict[str, Any],
+        reason: str,
+    ) -> None:
+        nonlocal unbound
+        unbound += 1
+        unbound_reasons[reason] = unbound_reasons.get(reason, 0) + 1
+        if len(unbound_rows) >= 100:
+            return
+        unbound_rows.append(
+            {
+                "dataset": dataset,
+                "record_id": _positive_int(source_row.get("id")),
+                "reason": reason,
+                "file_name": str(locator.get("file_name") or ""),
+                "sheet_name": str(locator.get("sheet_name") or ""),
+                "row_number": _positive_int(locator.get("row_number") or locator.get("row_start")),
+            }
+        )
+
     with mysql_connection(resolved) as mysql_conn, postgres_connection(resolved) as pg_conn:
         with mysql_conn.cursor() as mysql_cursor, pg_conn.cursor() as pg_cursor:
             for dataset, table_name in table_map.items():
@@ -874,7 +1052,13 @@ def bind_structured_source_refs(
                     f"""
                     SELECT id, source_locator_json
                     FROM {table_name}
-                    WHERE engagement_id = %s AND source_file_id IS NULL
+                    WHERE engagement_id = %s
+                      AND (
+                        source_file_id IS NULL
+                        OR source_page_id IS NULL
+                        OR source_chunk_id IS NULL
+                        OR source_chunk_id = ''
+                      )
                     ORDER BY id
                     """,
                     (engagement_id,),
@@ -883,44 +1067,85 @@ def bind_structured_source_refs(
                 for row in rows:
                     locator = _loads(row.get("source_locator_json")) or {}
                     if not isinstance(locator, dict):
-                        unbound += 1
-                        continue
-                    file_row = platform_files.get(str(locator.get("source_sha256") or ""))
-                    if file_row is None:
-                        file_row = platform_files_by_name.get(str(locator.get("file_name") or ""))
-                    if file_row is None:
-                        unbound += 1
+                        record_unbound(
+                            dataset=dataset,
+                            source_row=row,
+                            locator={},
+                            reason="invalid_source_locator",
+                        )
                         continue
 
-                    file_id = int(file_row["id"])
+                    file_row, reason = _select_source_file(
+                        locator=locator,
+                        files_by_sha256=platform_files_by_sha256,
+                        files_by_name=platform_files_by_name,
+                    )
+                    if file_row is None:
+                        record_unbound(
+                            dataset=dataset,
+                            source_row=row,
+                            locator=locator,
+                            reason=reason,
+                        )
+                        continue
+
+                    file_id = _positive_int(file_row["id"])
                     candidate_pages = page_by_file.get(file_id, [])
                     sheet_name = str(locator.get("sheet_name") or "")
-                    page = next(
-                        (
-                            item
-                            for item in candidate_pages
-                            if sheet_name and sheet_name in str(item.get("page_text") or "")
+                    page, reason = _select_source_page(
+                        pages=candidate_pages,
+                        sheet_name=sheet_name,
+                        allow_unique_page_without_sheet=(
+                            str(file_row["file_name"]).lower().endswith(".csv")
+                            or str(file_row["content_type"]).lower().startswith("text/csv")
                         ),
-                        None,
                     )
-                    if page is None and candidate_pages:
-                        page = candidate_pages[0]
                     if page is None:
-                        unbound += 1
+                        record_unbound(
+                            dataset=dataset,
+                            source_row=row,
+                            locator=locator,
+                            reason=reason,
+                        )
                         continue
 
-                    page_id = int(page.get("id") or 0)
-                    candidates = chunk_by_page.get(page_id, [])
+                    page_id = _positive_int(page.get("id"))
+                    if page_id <= 0:
+                        record_unbound(
+                            dataset=dataset,
+                            source_row=row,
+                            locator=locator,
+                            reason="page_not_found",
+                        )
+                        continue
                     quote = str(locator.get("quote_text") or "").strip()
-                    chunk = next(
-                        (
-                            item
-                            for item in candidates
-                            if quote and quote[:80] in str(item.get("chunk_text") or "")
-                        ),
-                        candidates[0] if candidates else None,
+                    chunk, reason = _select_source_chunk(
+                        chunks=chunk_by_page.get(page_id, []),
+                        row_number=_positive_int(locator.get("row_number") or locator.get("row_start")),
+                        quote_text=quote,
                     )
-                    chunk_id = str(chunk.get("chunk_id") or "") if chunk else ""
+                    chunk_id = str(chunk.get("chunk_id") or "").strip() if chunk else ""
+                    if not chunk_id:
+                        record_unbound(
+                            dataset=dataset,
+                            source_row=row,
+                            locator=locator,
+                            reason=reason or "chunk_not_found",
+                        )
+                        continue
+
+                    chunk_row_start, chunk_row_end = _chunk_row_bounds(chunk)
+                    row_start = (
+                        _positive_int(locator.get("row_start"))
+                        or _positive_int(locator.get("row_number"))
+                        or chunk_row_start
+                    )
+                    row_end = _positive_int(locator.get("row_end")) or row_start or chunk_row_end
+                    if row_start > 0 and row_end < row_start:
+                        row_end = row_start
+                    cell_range = str(locator.get("cell_range") or "").strip()
+                    if not cell_range and row_start > 0:
+                        cell_range = f"A{row_start}:XFD{row_end}"
 
                     pg_cursor.execute(
                         """
@@ -938,8 +1163,17 @@ def bind_structured_source_refs(
                             "source_file_id": file_id,
                             "source_page_id": page_id,
                             "source_chunk_id": chunk_id,
-                            "locator_kind": "sheet_row" if sheet_name else "csv_row",
+                            "locator_kind": (
+                                "csv_row"
+                                if str(file_row["file_name"]).lower().endswith(".csv")
+                                else "sheet_row"
+                            ),
                             "page_no": int(page.get("page_no") or 0),
+                            "row_start": row_start,
+                            "row_end": row_end,
+                            "cell_range": cell_range,
+                            "source_chunk_row_start": chunk_row_start,
+                            "source_chunk_row_end": chunk_row_end,
                             "content_type": file_row["content_type"],
                             "source_file_ref": file_row["storage_ref"],
                             "page_image_ref": str(page_meta.get("page_image_ref") or ""),
@@ -961,7 +1195,7 @@ def bind_structured_source_refs(
                         (
                             file_id,
                             page_id,
-                            chunk_id or None,
+                            chunk_id,
                             str(locator["locator_kind"]),
                             _json(locator),
                             int(row["id"]),
@@ -975,7 +1209,10 @@ def bind_structured_source_refs(
         "status": "completed" if unbound == 0 else "partial",
         "bound_count": bound,
         "unbound_count": unbound,
-        "source_file_count": len(platform_files),
+        "source_file_count": len(platform_file_ids),
+        "unbound_reasons": dict(sorted(unbound_reasons.items())),
+        "unbound_rows": unbound_rows,
+        "unbound_rows_truncated": unbound > len(unbound_rows),
     }
 
 

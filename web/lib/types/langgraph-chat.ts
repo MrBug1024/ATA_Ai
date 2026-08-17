@@ -52,6 +52,38 @@ export interface CitationCoverage {
   uncited_claims: number;
   coverage_ratio: number;
   missing_items: CitationCoverageMissingItem[];
+  unbound_count?: number;
+  evidence_blocked?: boolean;
+  blocking_status?: string;
+}
+
+/**
+ * Immutable routing snapshot stored alongside one assistant response.
+ * The frontend deliberately treats this as message metadata rather than
+ * deriving it from the latest state of the thread.
+ */
+export interface RouteDecisionSnapshot {
+  route_version?: string;
+  business_line?: string;
+  capability?: string;
+  intent?: string;
+  confidence?: number;
+  needs_clarification?: boolean;
+  source?: string;
+  case_id?: number | null;
+  action?: string;
+  target_id?: string;
+  clarification_question?: string;
+}
+
+/**
+ * Deterministic analysis runs that produced one assistant response.  This is
+ * response-scoped metadata, not a lookup of the latest run for a project.
+ */
+export interface ResponseAnalysisRun {
+  tool_name: string;
+  analysis_type: string;
+  analysis_run_id: number;
 }
 
 export interface ReplayUnresolvedRelation {
@@ -87,9 +119,12 @@ export interface ThreadMessage {
   name: string;
   final_report_ref: string;
   intent: string;
+  route_decision: RouteDecisionSnapshot | null;
   uploaded_files: FileItem[];
   trace_items: TraceItem[];
   citation_coverage: CitationCoverage;
+  /** Undefined only for messages persisted before the auditability contract. */
+  response_analysis_runs?: ResponseAnalysisRun[];
   unresolved_relations: ReplayUnresolvedRelation[];
   unresolved_claims: ReplayUnresolvedClaim[];
 }
@@ -115,6 +150,13 @@ export interface AssistantTurnItem {
   final_report_ref: string;
   intent: string;
   case_id: number;
+  route_decision: RouteDecisionSnapshot | null;
+  trace_items: TraceItem[];
+  citation_coverage: CitationCoverage;
+  /** Undefined only for messages persisted before the auditability contract. */
+  response_analysis_runs?: ResponseAnalysisRun[];
+  unresolved_relations: ReplayUnresolvedRelation[];
+  unresolved_claims: ReplayUnresolvedClaim[];
   version: number;
   created_at: string;
 }
