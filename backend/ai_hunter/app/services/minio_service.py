@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from uuid import uuid4
 
 from ...platform_core import scoped_object_key, validate_domain
 from ..settings import get_settings
@@ -101,6 +102,7 @@ class MinioService:
         file_name: str,
         content_type: str,
         file_bytes: bytes,
+        storage_file_name: str | None = None,
     ) -> MinioUploadResult:
         """Upload a generated annual-audit artifact into the isolated bucket."""
 
@@ -112,7 +114,10 @@ class MinioService:
             get_settings(),
             project_id=project_id,
             category="artifacts",
-            parts=(Path(file_name).name,),
+            # Keep the user-facing filename stable while allowing repeated
+            # attachment packages to coexist in object storage.  Callers that
+            # do not need a separate storage key keep the historical behavior.
+            parts=(Path(storage_file_name or file_name).name,),
         )
         self._ensure_bucket(self.bucket_artifacts)
         result = self.client.put_object(
@@ -121,6 +126,47 @@ class MinioService:
             data=BytesIO(file_bytes),
             length=len(file_bytes),
             content_type=content_type or "application/octet-stream",
+        )
+        return MinioUploadResult(
+            storage_provider="minio",
+            storage_bucket=self.bucket_artifacts,
+            storage_key=object_key,
+            storage_etag=result.etag or "",
+            storage_version=result.version_id or "",
+        )
+
+    def upload_template_file(
+        self,
+        *,
+        template_code: str,
+        version_no: int,
+        file_name: str,
+        content_type: str,
+        file_bytes: bytes,
+    ) -> MinioUploadResult:
+        """Store one uploaded annual-audit template in the isolated artifact bucket."""
+
+        if not self.enabled:
+            raise RuntimeError("AI Hunter MinIO is disabled")
+        if not self.bucket_artifacts:
+            raise RuntimeError("AI Hunter MinIO artifact bucket is not configured")
+        settings = get_settings()
+        validate_domain(settings.business_domain, expected="annual_audit")
+        safe_code = quote(str(template_code or "").strip(), safe="")
+        safe_name = quote(Path(file_name or "uploaded-template").name, safe="")
+        object_key = scoped_object_key(
+            settings,
+            project_id=0,
+            category="templates",
+            parts=(safe_code, f"version-{max(int(version_no), 0)}", f"{uuid4().hex}-{safe_name}"),
+        )
+        self._ensure_bucket(self.bucket_artifacts)
+        result = self.client.put_object(
+            self.bucket_artifacts,
+            object_key,
+            data=BytesIO(file_bytes),
+            length=len(file_bytes),
+            content_type=content_type or _guess_content_type(file_name),
         )
         return MinioUploadResult(
             storage_provider="minio",

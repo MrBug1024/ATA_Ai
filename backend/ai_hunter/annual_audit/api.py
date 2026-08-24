@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
+import mimetypes
+from io import BytesIO
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ai_hunter.app.auth.identity import Identity
 from ai_hunter.app.auth.permissions import require_module
 from ai_hunter.app.auth.tenancy import require_case_access
 from ai_hunter.app.settings import get_settings
+from ai_hunter.app.services.minio_service import get_minio_service
 
 from . import document_repository as documents
 from . import engagement_repository as engagements
@@ -45,6 +53,8 @@ from .knowledge_service import (
 )
 from .report_service import generate_annual_report_draft
 from .storage import AnnualAuditStorageError, mysql_connection
+from . import generic_template_repository as generic_templates
+from . import template_file_repository as templates
 
 
 router = APIRouter()
@@ -258,8 +268,28 @@ class PublicationRequest(BaseModel):
     approval_note: str | None = None
 
 
+class TemplateCreateRequest(BaseModel):
+    template_code: str = Field(min_length=1, max_length=128)
+    template_type: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=1024)
+    content: dict[str, Any] = Field(default_factory=dict)
+    field_schema: dict[str, Any] | list[Any] = Field(default_factory=dict)
+    version_label: str = Field(default="v1", min_length=1, max_length=128)
+
+
+class TemplateVersionRequest(BaseModel):
+    content: dict[str, Any] = Field(default_factory=dict)
+    field_schema: dict[str, Any] | list[Any] = Field(default_factory=dict)
+    version_label: str = Field(default="", max_length=128)
+
+
 def _storage_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail=f"年审独立存储不可用：{exc}")
+
+
+def _template_storage_http_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=503, detail=f"模板存储不可用：{exc}")
 
 
 def _workflow_http_error(exc: WorkflowBlockedError) -> HTTPException:
@@ -935,6 +965,425 @@ def publish_ruleset_route(
         raise _storage_http_error(exc) from exc
 
 
+async def _read_template_uploads(
+    files: list[UploadFile],
+    *,
+    template_usages: list[str] | None = None,
+    remarks: list[str] | None = None,
+    default_usage: str = "",
+    default_remark: str = "",
+) -> list[dict[str, Any]]:
+    settings = get_settings()
+    if not files:
+        raise HTTPException(status_code=400, detail="模板版本至少需要上传一个文件")
+    if len(files) > settings.max_upload_files:
+        raise HTTPException(status_code=400, detail=f"单次最多上传 {settings.max_upload_files} 个模板文件")
+    payloads: list[dict[str, Any]] = []
+    for index, upload in enumerate(files):
+        file_name = Path(upload.filename or "uploaded-template").name
+        file_ext = Path(file_name).suffix.lower()
+        if file_ext not in generic_templates.SUPPORTED_TEMPLATE_EXTENSIONS:
+            raise HTTPException(status_code=422, detail=f"不支持的模板文件格式：{file_ext or file_name}")
+        file_bytes = await upload.read()
+        if len(file_bytes) > settings.max_upload_file_mb * 1024 * 1024:
+            raise HTTPException(status_code=400, detail=f"文件 {file_name} 超过 {settings.max_upload_file_mb}MB 限制")
+        usage_values = template_usages or []
+        remark_values = remarks or []
+        payloads.append(
+            {
+                "file_name": file_name,
+                "file_ext": file_ext,
+                "content_type": upload.content_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+                "file_bytes": file_bytes,
+                "storage_sha256": hashlib.sha256(file_bytes).hexdigest(),
+                "template_usage": usage_values[index] if index < len(usage_values) else default_usage,
+                "remark": remark_values[index] if index < len(remark_values) else default_remark,
+            }
+        )
+    return payloads
+
+
+async def _persist_template_uploads(
+    template_code: str,
+    version_no: int,
+    payloads: list[dict[str, Any]],
+    *,
+    actor: str,
+) -> list[dict[str, Any]]:
+    service = get_minio_service()
+    stored_refs: list[str] = []
+    inserted_ids: list[int] = []
+    rows: list[dict[str, Any]] = []
+    try:
+        for payload in payloads:
+            stored = service.upload_template_file(
+                template_code=template_code,
+                version_no=version_no,
+                file_name=str(payload["file_name"]),
+                content_type=str(payload["content_type"]),
+                file_bytes=payload["file_bytes"],
+            )
+            stored_refs.append(stored.storage_ref)
+            row = generic_templates.add_template_file(
+                template_code,
+                version_no,
+                file_name=str(payload["file_name"]),
+                file_ext=str(payload["file_ext"]),
+                content_type=str(payload["content_type"]),
+                storage_ref=stored.storage_ref,
+                storage_sha256=str(payload["storage_sha256"]),
+                file_size=len(payload["file_bytes"]),
+                template_usage=str(payload.get("template_usage") or ""),
+                remark=str(payload.get("remark") or ""),
+                created_by=actor or "system",
+            )
+            inserted_ids.append(int(row["id"]))
+            rows.append(row)
+    except Exception:
+        for file_id in inserted_ids:
+            try:
+                generic_templates.delete_template_file(file_id, settings=get_settings())
+            except Exception:
+                pass
+        for storage_ref in stored_refs:
+            service.delete_object(storage_ref)
+        raise
+    return rows
+
+
+@router.get("/api/templates", tags=["模板管理"])
+def list_template_versions_route(identity: Identity = Depends(_require_admin)) -> dict[str, Any]:
+    """Return a flat list of generic template versions for the admin menu."""
+
+    try:
+        return generic_templates.list_template_versions()
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.post("/api/templates/versions", tags=["模板管理"])
+async def create_template_version_route(
+    template_name: str = Form(..., min_length=1, max_length=255),
+    business_line: str = Form(..., min_length=1, max_length=128),
+    version_label: str = Form(default="", max_length=128),
+    description: str = Form(default="", max_length=1024),
+    template_code: str = Form(default="", max_length=128),
+    template_usages: list[str] | None = Form(default=None),
+    remarks: list[str] | None = Form(default=None),
+    template_usage: str = Form(default="", max_length=128),
+    remark: str = Form(default="", max_length=1024),
+    files: list[UploadFile] = File(..., description="模板原始文件"),
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    record = None
+    try:
+        payloads = await _read_template_uploads(
+            files,
+            template_usages=template_usages,
+            remarks=remarks,
+            default_usage=template_usage,
+            default_remark=remark,
+        )
+        record = generic_templates.create_template_version_record(
+            template_name=template_name,
+            business_line=business_line,
+            version_label=version_label,
+            template_code=template_code,
+            description=description,
+            created_by=identity.user_id or "system",
+        )
+        await _persist_template_uploads(
+            str(record["template_code"]),
+            int(record["version_no"]),
+            payloads,
+            actor=identity.user_id or "system",
+        )
+        return generic_templates.get_template_version(str(record["template_code"]), int(record["version_no"]))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if record:
+            try:
+                generic_templates.delete_template_version(str(record["template_code"]), int(record["version_no"]))
+            except Exception:
+                pass
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        if record:
+            try:
+                generic_templates.delete_template_version(str(record["template_code"]), int(record["version_no"]))
+            except Exception:
+                pass
+        raise _template_storage_http_error(exc) from exc
+    except Exception as exc:
+        if record:
+            try:
+                generic_templates.delete_template_version(str(record["template_code"]), int(record["version_no"]))
+            except Exception:
+                pass
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.get("/api/templates/{template_code}/versions/{version_no}", tags=["模板管理"])
+def get_template_version_route(
+    template_code: str,
+    version_no: int,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        return generic_templates.get_template_version(template_code, version_no)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.post("/api/templates/{template_code}/versions/{version_no}/files", tags=["模板管理"])
+async def upload_template_version_files_route(
+    template_code: str,
+    version_no: int,
+    template_usages: list[str] | None = Form(default=None),
+    remarks: list[str] | None = Form(default=None),
+    template_usage: str = Form(default="", max_length=128),
+    remark: str = Form(default="", max_length=1024),
+    files: list[UploadFile] = File(..., description="模板原始文件"),
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        payloads = await _read_template_uploads(
+            files,
+            template_usages=template_usages,
+            remarks=remarks,
+            default_usage=template_usage,
+            default_remark=remark,
+        )
+        rows = await _persist_template_uploads(
+            template_code,
+            version_no,
+            payloads,
+            actor=identity.user_id or "system",
+        )
+        return generic_templates.get_template_version(template_code, version_no) | {"uploaded_files": rows}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+    except Exception as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.delete("/api/templates/{template_code}/versions/{version_no}", tags=["模板管理"])
+def delete_template_version_route(
+    template_code: str,
+    version_no: int,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        result = generic_templates.delete_template_version(template_code, version_no, deleted_by=identity.user_id or "system")
+        for storage_ref in result.get("storage_refs") or []:
+            try:
+                get_minio_service().delete_object(str(storage_ref))
+            except Exception:
+                pass
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.delete("/api/templates/files/{file_id}", tags=["模板管理"])
+def delete_template_file_route(file_id: int, identity: Identity = Depends(_require_admin)) -> dict[str, Any]:
+    try:
+        result = generic_templates.delete_template_file(file_id, deleted_by=identity.user_id or "system")
+        if result.get("storage_ref"):
+            try:
+                get_minio_service().delete_object(str(result["storage_ref"]))
+            except Exception:
+                pass
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.post("/api/templates/{template_code}/versions/{version_no}/activate", tags=["模板管理"])
+def activate_template_version_route(
+    template_code: str,
+    version_no: int,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        return generic_templates.activate_template_version(template_code, version_no, published_by=identity.user_id or "system")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _template_storage_http_error(exc) from exc
+
+
+@router.get("/api/annual-audit/templates", tags=["年审模板管理"])
+def list_audit_templates(
+    template_type: str | None = Query(default=None),
+    include_versions: bool = Query(default=True),
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    """Backward-compatible annual route backed by the generic registry."""
+
+    try:
+        catalog = generic_templates.list_template_versions()
+        if template_type:
+            catalog["versions"] = [
+                version
+                for version in catalog.get("versions", [])
+                if any(
+                    str(file.get("template_usage") or "") == template_type
+                    for file in (generic_templates.get_template_version(version["template_code"], version["version_no"]).get("files") or [])
+                )
+            ]
+        return catalog
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.get("/api/annual-audit/templates/active", tags=["年审模板管理"])
+def list_active_audit_templates(
+    identity: Identity = Depends(_require_report),
+) -> dict[str, Any]:
+    """Return only the active template version snapshot used by generation."""
+
+    try:
+        return {"templates": generic_templates.get_active_template_catalog()}
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.post("/api/annual-audit/templates", tags=["年审模板管理"])
+def create_audit_template(
+    request: TemplateCreateRequest,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=410,
+        detail="模板版本必须在创建时同时上传真实文件，请使用 /api/templates/versions",
+    )
+
+
+@router.post("/api/annual-audit/templates/{template_code}/versions", tags=["年审模板管理"])
+def create_audit_template_version(
+    template_code: str,
+    request: TemplateVersionRequest,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=410,
+        detail="模板版本必须在创建时同时上传真实文件，请使用 /api/templates/versions",
+    )
+
+
+@router.post("/api/annual-audit/templates/{template_code}/versions/{version_no}/files", tags=["年审模板管理"])
+async def upload_audit_template_files(
+    template_code: str,
+    version_no: int,
+    files: list[UploadFile] = File(..., description="模板原始文件，可上传 Word、Excel、PDF、Markdown 等"),
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    """Upload real template files into a draft template version."""
+
+    settings = get_settings()
+    if len(files) > settings.max_upload_files:
+        raise HTTPException(status_code=400, detail=f"单次最多上传 {settings.max_upload_files} 个模板文件")
+    uploaded_rows: list[dict[str, Any]] = []
+    service = None
+    try:
+        service = get_minio_service()
+        for upload in files:
+            file_name = Path(upload.filename or "uploaded-template").name
+            file_ext = Path(file_name).suffix.lower()
+            if file_ext not in templates.SUPPORTED_TEMPLATE_EXTENSIONS:
+                raise HTTPException(status_code=422, detail=f"不支持的模板文件格式：{file_ext or file_name}")
+            file_bytes = await upload.read()
+            if len(file_bytes) > settings.max_upload_file_mb * 1024 * 1024:
+                raise HTTPException(status_code=400, detail=f"文件 {file_name} 超过 {settings.max_upload_file_mb}MB 限制")
+            content_type = upload.content_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+            digest = hashlib.sha256(file_bytes).hexdigest()
+            stored = service.upload_template_file(
+                template_code=template_code,
+                version_no=version_no,
+                file_name=file_name,
+                content_type=content_type,
+                file_bytes=file_bytes,
+            )
+            try:
+                row = templates.add_template_file(
+                    template_code,
+                    version_no,
+                    file_name=file_name,
+                    file_ext=file_ext,
+                    content_type=content_type,
+                    storage_ref=stored.storage_ref,
+                    storage_sha256=digest,
+                    file_size=len(file_bytes),
+                    created_by=identity.user_id or "system",
+                )
+            except Exception:
+                service.delete_object(stored.storage_ref)
+                raise
+            uploaded_rows.append(row)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except Exception as exc:
+        raise _storage_http_error(exc) from exc
+    return {"template_code": template_code, "version_no": version_no, "files": uploaded_rows}
+
+
+@router.delete("/api/annual-audit/templates/files/{file_id}", tags=["年审模板管理"])
+def delete_audit_template_file(
+    file_id: int,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        deleted = templates.delete_template_file(file_id, deleted_by=identity.user_id or "system")
+        storage_ref = str(deleted.get("storage_ref") or "")
+        if storage_ref:
+            try:
+                get_minio_service().delete_object(storage_ref)
+            except Exception:
+                pass
+        return deleted
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.post(
+    "/api/annual-audit/templates/{template_code}/versions/{version_no}/activate",
+    tags=["年审模板管理"],
+)
+def activate_audit_template_version(
+    template_code: str,
+    version_no: int,
+    identity: Identity = Depends(_require_admin),
+) -> dict[str, Any]:
+    try:
+        return templates.activate_template_version(
+            template_code,
+            version_no,
+            published_by=identity.user_id or "system",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
 @router.get("/api/annual-audit/{case_id}/artifacts", tags=["骞村鎶ュ憡"])
 def list_report_artifacts(
     case_id: int,
@@ -968,13 +1417,217 @@ def list_report_artifacts(
                     (case_id,),
                 )
                 workpapers = [dict(row) for row in cursor.fetchall()]
+                cursor.execute(
+                    """
+                    SELECT id, package_version, status, template_snapshot_json,
+                           artifact_refs_json, created_by, created_at
+                    FROM annual_audit_attachment_package
+                    WHERE engagement_id = %s
+                    ORDER BY package_version DESC
+                    """,
+                    (case_id,),
+                )
+                packages = []
+                for row in cursor.fetchall():
+                    package = dict(row)
+                    for field in ("template_snapshot_json", "artifact_refs_json"):
+                        raw = package.get(field)
+                        if isinstance(raw, str):
+                            try:
+                                package[field.removesuffix("_json")] = json.loads(raw)
+                            except json.JSONDecodeError:
+                                package[field.removesuffix("_json")] = {}
+                        package.pop(field, None)
+                    for index, artifact in enumerate(package.get("artifact_refs") or []):
+                        if isinstance(artifact, dict):
+                            artifact["download_url"] = (
+                                f"/api/annual-audit/{case_id}/attachment-packages/"
+                                f"{package.get('id')}/files/{index}"
+                            )
+                            artifact["preview_url"] = (
+                                f"/api/annual-audit/{case_id}/attachment-packages/"
+                                f"{package.get('id')}/files/{index}/preview"
+                            )
+                    packages.append(package)
         return {
             "case_id": case_id,
             "report": report,
             "workpapers": workpapers,
+            "attachment_packages": packages,
             "artifact_status": "draft_saved" if report.get("artifact_ref") else "not_published",
         }
     except engagements.EngagementNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.get("/api/annual-audit/{case_id}/attachment-packages/{package_id}/files/{artifact_index}", tags=["年审报告"])
+def download_annual_attachment(
+    case_id: int,
+    package_id: int,
+    artifact_index: int,
+    identity: Identity = Depends(_require_report),
+) -> StreamingResponse:
+    """Download a generated attachment from its persisted package reference."""
+
+    require_case_access(case_id, identity)
+    if artifact_index < 0:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    try:
+        with mysql_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT artifact_refs_json
+                    FROM annual_audit_attachment_package
+                    WHERE id = %s AND engagement_id = %s
+                    """,
+                    (package_id, case_id),
+                )
+                row = dict(cursor.fetchone() or {})
+        if not row:
+            raise HTTPException(status_code=404, detail="附件包不存在")
+        raw_refs = row.get("artifact_refs_json")
+        refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
+        artifact = refs[artifact_index] if isinstance(refs, list) and artifact_index < len(refs) else None
+        if not isinstance(artifact, dict) or not artifact.get("storage_ref"):
+            raise HTTPException(status_code=404, detail="附件不存在")
+        content = get_minio_service().get_object_bytes(str(artifact["storage_ref"]))
+        file_name = Path(str(artifact.get("file_name") or f"attachment-{artifact_index}")).name
+        media_type = str(artifact.get("content_type") or "application/octet-stream")
+        return StreamingResponse(
+            BytesIO(content),
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_name)}"},
+        )
+    except HTTPException:
+        raise
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise HTTPException(status_code=404, detail="附件索引无效") from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except Exception as exc:
+        raise _storage_http_error(exc) from exc
+
+
+@router.get("/api/annual-audit/{case_id}/attachment-packages/{package_id}/files/{artifact_index}/preview", tags=["年审报告"])
+def preview_annual_attachment(
+    case_id: int,
+    package_id: int,
+    artifact_index: int,
+    identity: Identity = Depends(_require_report),
+) -> JSONResponse:
+    """Return a safe, read-only preview model for a generated attachment."""
+
+    require_case_access(case_id, identity)
+    if artifact_index < 0:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    try:
+        with mysql_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT artifact_refs_json
+                    FROM annual_audit_attachment_package
+                    WHERE id = %s AND engagement_id = %s
+                    """,
+                    (package_id, case_id),
+                )
+                row = dict(cursor.fetchone() or {})
+        if not row:
+            raise HTTPException(status_code=404, detail="附件包不存在")
+        raw_refs = row.get("artifact_refs_json")
+        refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
+        artifact = refs[artifact_index] if isinstance(refs, list) and artifact_index < len(refs) else None
+        if not isinstance(artifact, dict) or not artifact.get("storage_ref"):
+            raise HTTPException(status_code=404, detail="附件不存在")
+        content = get_minio_service().get_object_bytes(str(artifact["storage_ref"]))
+        file_name = Path(str(artifact.get("file_name") or f"attachment-{artifact_index}")).name
+        extension = Path(file_name).suffix.lower()
+        if extension == ".docx":
+            from docx import Document
+
+            document = Document(BytesIO(content))
+            paragraphs = [" ".join(p.text.split()) for p in document.paragraphs if p.text.strip()]
+            tables: list[list[list[str]]] = []
+            for table in document.tables[:20]:
+                rows: list[list[str]] = []
+                for row_item in table.rows[:40]:
+                    rows.append([" ".join(cell.text.split())[:500] for cell in row_item.cells[:20]])
+                if rows:
+                    tables.append(rows)
+            return JSONResponse({
+                "kind": "document",
+                "file_name": file_name,
+                "content_type": artifact.get("content_type") or "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "paragraphs": paragraphs[:240],
+                "tables": tables,
+                "truncated": len(paragraphs) > 240 or len(document.tables) > 20,
+            })
+        if extension in {".xlsx", ".xlsm"}:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(BytesIO(content), read_only=True, data_only=False)
+            sheets: list[dict[str, Any]] = []
+            for worksheet in workbook.worksheets[:12]:
+                rows: list[list[str]] = []
+                for values in worksheet.iter_rows(max_row=60, max_col=20, values_only=True):
+                    row_values = ["" if value is None else str(value)[:300] for value in values]
+                    if any(row_values):
+                        rows.append(row_values)
+                sheets.append({"name": worksheet.title, "rows": rows})
+            return JSONResponse({
+                "kind": "workbook",
+                "file_name": file_name,
+                "content_type": artifact.get("content_type") or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "sheets": sheets,
+                "truncated": len(workbook.worksheets) > 12,
+            })
+        if extension == ".xls":
+            # xlrd is read-only by design here: preview must not rewrite the
+            # legacy BIFF8 workbook or change the format the user downloads.
+            import xlrd
+
+            workbook = xlrd.open_workbook(file_contents=content, on_demand=True)
+            sheets: list[dict[str, Any]] = []
+            for sheet in workbook.sheets()[:12]:
+                rows: list[list[str]] = []
+                for row_index in range(min(sheet.nrows, 60)):
+                    values = [
+                        "" if value is None else str(value)[:300]
+                        for value in sheet.row_values(row_index, 0, min(sheet.ncols, 20))
+                    ]
+                    if any(values):
+                        rows.append(values)
+                sheets.append({"name": sheet.name, "rows": rows})
+            return JSONResponse({
+                "kind": "workbook",
+                "file_name": file_name,
+                "content_type": artifact.get("content_type") or "application/vnd.ms-excel",
+                "sheets": sheets,
+                "truncated": len(workbook.sheets()) > 12,
+            })
+        if extension in {".txt", ".md", ".markdown", ".csv"}:
+            text = content.decode("utf-8-sig", errors="replace")
+            return JSONResponse({
+                "kind": "text",
+                "file_name": file_name,
+                "content_type": artifact.get("content_type") or "text/plain",
+                "text": text[:30000],
+                "truncated": len(text) > 30000,
+            })
+        return JSONResponse({
+            "kind": "unsupported",
+            "file_name": file_name,
+            "content_type": artifact.get("content_type") or "application/octet-stream",
+            "message": "该文件格式暂不支持在线预览，请点击下载。",
+        })
+    except HTTPException:
+        raise
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise HTTPException(status_code=404, detail="附件索引无效") from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+    except Exception as exc:
         raise _storage_http_error(exc) from exc

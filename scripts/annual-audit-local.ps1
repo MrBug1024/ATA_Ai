@@ -111,6 +111,50 @@ function Get-BackendEnvFileValue {
     return ""
 }
 
+function Get-BackendPreferredValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PrimaryName,
+        [string]$FallbackName = "",
+        [string]$Default = ""
+    )
+
+    $value = [Environment]::GetEnvironmentVariable($PrimaryName, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value.Trim().Trim('"').Trim("'")
+    }
+    $value = Get-BackendEnvFileValue $PrimaryName
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FallbackName)) {
+        $value = [Environment]::GetEnvironmentVariable($FallbackName, "Process")
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim().Trim('"').Trim("'")
+        }
+        $value = Get-BackendEnvFileValue $FallbackName
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value
+        }
+    }
+    return $Default
+}
+
+function Resolve-BackendPostgresDsn {
+    $configuredDsn = Get-BackendPreferredValue "POSTGRES_DSN" "ANNUAL_POSTGRES_DSN"
+    if (-not [string]::IsNullOrWhiteSpace($configuredDsn)) {
+        return $configuredDsn
+    }
+
+    $pgHost = Get-BackendPreferredValue "POSTGRES_HOST" "ANNUAL_POSTGRES_HOST" "127.0.0.1"
+    $pgPort = Get-BackendPreferredValue "POSTGRES_PORT" "ANNUAL_POSTGRES_PORT" "55432"
+    $pgDatabase = Get-BackendPreferredValue "POSTGRES_DATABASE" "ANNUAL_POSTGRES_DATABASE" "ata_agent_platform"
+    $pgUser = Get-BackendPreferredValue "POSTGRES_USER" "ANNUAL_POSTGRES_USER" "ata_agent_app"
+    $pgPassword = [Uri]::EscapeDataString((Get-BackendPreferredValue "POSTGRES_PASSWORD" "ANNUAL_POSTGRES_PASSWORD"))
+
+    return "postgresql+psycopg://{0}:{1}@{2}:{3}/{4}" -f $pgUser, $pgPassword, $pgHost, $pgPort, $pgDatabase
+}
+
 function Use-LocalMinio {
     if (Use-ForcedLocalServices) {
         return $true
@@ -148,7 +192,6 @@ function Use-LocalRedis {
 }
 
 function Set-BackendEnvironment {
-    $pgPassword = [Uri]::EscapeDataString($env:ANNUAL_POSTGRES_PASSWORD)
     $mysqlPassword = $env:ANNUAL_MYSQL_PASSWORD
     $redisPassword = [Uri]::EscapeDataString($env:ANNUAL_REDIS_PASSWORD)
     $backendPort = "8080"
@@ -157,13 +200,7 @@ function Set-BackendEnvironment {
     $env:APP_PORT = $backendPort
     $env:LANGGRAPH_CHECKPOINTER = "postgres"
     $env:LANGGRAPH_CHECKPOINTER_AUTO_SETUP = "false"
-    $env:ANNUAL_POSTGRES_DSN = (
-        "postgresql+psycopg://{0}:{1}@127.0.0.1:{2}/{3}" -f
-        $env:ANNUAL_POSTGRES_USER,
-        $pgPassword,
-        $env:ANNUAL_POSTGRES_PORT,
-        $env:ANNUAL_POSTGRES_DATABASE
-    )
+    $env:ANNUAL_POSTGRES_DSN = Resolve-BackendPostgresDsn
     if (Use-LocalMySql) {
         $env:ANNUAL_MYSQL_HOST = "127.0.0.1"
         $env:ANNUAL_MYSQL_USER = $env:ANNUAL_MYSQL_USER

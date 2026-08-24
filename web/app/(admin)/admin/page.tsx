@@ -3,6 +3,7 @@
 import Link from "next/link";
 import {
   Building2,
+  Files,
   RefreshCw,
   ShieldCheck,
   Users,
@@ -159,6 +160,12 @@ export default function AdminOverviewPage() {
             <Link href="/admin/roles">
               <ShieldCheck data-icon="inline-start" />
               角色权限
+            </Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/admin/templates">
+              <Files data-icon="inline-start" />
+              模板管理
             </Link>
           </Button>
         </CardContent>

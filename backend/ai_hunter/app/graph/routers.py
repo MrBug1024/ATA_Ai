@@ -34,6 +34,8 @@ PROJECT_CREATE_KEYWORDS = (
 )
 FULL_AUDIT_KEYWORDS = (
     "执行完整年审",
+    "执行完整年度审计",
+    "完整年度审计",
     "执行年审",
     "完整年审",
     "全面年审",
@@ -50,6 +52,51 @@ FULL_AUDIT_KEYWORDS = (
 )
 REAUDIT_KEYWORDS = ("重新执行年审", "重新生成报告", "重跑年审", "更正后重跑", "重新审计")
 REAUDIT_OBJECTS = ("报告", "底稿", "结论", "数据", "调整", "错报", "年审")
+AUDIT_REVIEW_ISSUE_KEYWORDS = (
+    "有问题",
+    "存在问题",
+    "不对",
+    "不准确",
+    "不正确",
+    "错误",
+    "错了",
+    "不一致",
+    "遗漏",
+    "缺失",
+    "需要调整",
+    "需要补充",
+    "补充资料",
+    "继续审计",
+    "继续分析",
+)
+AUDIT_REVIEW_OK_KEYWORDS = (
+    "没有问题",
+    "没问题",
+    "无问题",
+    "确认无误",
+    "结果正确",
+    "没有发现问题",
+)
+ATTACHMENT_CONFIRM_KEYWORDS = (
+    "生成附件",
+    "生成成果",
+    "生成报告、报表",
+    "生成报告和报表",
+    "生成报表和附注",
+    "生成年度审计报告",
+    "生成审计报告",
+    "生成财务报表",
+    "生成附注",
+    "生成工作底稿",
+    "生成管理建议书",
+    "可以生成",
+    "确认生成",
+    "开始生成",
+    "好的",
+    "好，生成",
+    "是的",
+    "是，生成",
+)
 MATERIAL_UPLOAD_KEYWORDS = ("上传审计资料", "上传财务资料", "补充审计资料", "补资料")
 MATERIAL_STATUS_KEYWORDS = ("资料状态", "上传进度", "解析进度", "资料处理进度")
 MATERIAL_VALIDATE_KEYWORDS = ("资料完整性", "还缺什么资料", "缺少什么资料", "资料清单")
@@ -168,6 +215,67 @@ def _report_exists(state: AuditGraphState) -> bool:
     )
 
 
+def _review_confirmation_route(state: AuditGraphState) -> RouteDecisionModel | None:
+    """Resolve the two human confirmations following a full audit."""
+
+    stage = str(state.get("audit_review_stage") or "")
+    query = str(state.get("query") or "").strip()
+    case_id = _positive_case_id(state.get("current_case_id"))
+    if not stage or not query or not case_id:
+        return None
+
+    if stage == "awaiting_result_review":
+        # Check explicit approval first so “没有问题” is never mistaken for
+        # the substring “有问题”.
+        if any(keyword in query for keyword in AUDIT_REVIEW_OK_KEYWORDS):
+            return _decision(
+                "common",
+                "common.general",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="confirm_audit_result",
+                needs_clarification=True,
+                clarification_question=(
+                    "已记录：当前审计结果没有问题。是否基于当前已激活的模板版本生成附件？"
+                    "可生成年度审计报告、经审计的财务报表、会计报表附注和管理建议书等交付附件；审计底稿、函证属于过程资料，不会随标准年审交付包自动生成。"
+                    "请回复“确认生成”或“暂不生成”。"
+                ),
+            )
+        if any(keyword in query for keyword in AUDIT_REVIEW_ISSUE_KEYWORDS):
+            return _decision(
+                "audit_analysis",
+                "audit.reaudit",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="reaudit",
+            )
+
+    if stage in {"awaiting_artifact_confirmation", "attachments_skipped", "attachments_generated"}:
+        if any(keyword in query for keyword in ATTACHMENT_CONFIRM_KEYWORDS):
+            return _decision(
+                "audit_analysis",
+                "audit.full",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="generate_attachments",
+            )
+        if any(keyword in query for keyword in ("暂不生成", "不生成", "先不", "取消")):
+            return _decision(
+                "common",
+                "common.general",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="skip_attachments",
+                needs_clarification=True,
+                clarification_question="好的，暂不生成附件。后续如需生成，请回复“确认生成附件”。",
+            )
+    return None
+
+
 def is_explicit_case_create_request(state: AuditGraphState | dict) -> bool:
     if explicit_write_capability(state) == "case.create":
         return True
@@ -253,6 +361,9 @@ def _rule_route(state: AuditGraphState) -> RouteDecisionModel | None:
             action=str(command_dict(state).get("task_action") or ""),
             source="context",
         )
+    workflow_route = _review_confirmation_route(state)
+    if workflow_route is not None:
+        return workflow_route
     if any(keyword in query for keyword in REAUDIT_KEYWORDS) and any(marker in query for marker in REAUDIT_OBJECTS):
         return _decision("audit_analysis", "audit.reaudit", confidence=0.99, source="rule", case_id=case_id, action="reaudit")
     if any(keyword in query for keyword in FULL_AUDIT_KEYWORDS):

@@ -61,6 +61,9 @@ def normalize_input(state: AuditGraphState) -> AuditGraphState:
         "client_turn_id": state.get("client_turn_id", ""),
         "regenerate": state.get("regenerate", False),
         "selected_assistant_turn_id": state.get("selected_assistant_turn_id", ""),
+        "audit_review_stage": state.get("audit_review_stage", ""),
+        "active_template_versions": state.get("active_template_versions", {}),
+        "attachment_package": {},
         # A checkpoint holds long-lived case context as well as the last
         # response. The fields below are response-scoped, not case-scoped:
         # retaining them would make a new answer expose the previous answer's
@@ -99,6 +102,9 @@ def normalize_input(state: AuditGraphState) -> AuditGraphState:
                 "current_case_id": requested_case_id,
                 "current_entity_id": 0,
                 "current_entity_name": "",
+                "audit_review_stage": "",
+                "active_template_versions": {},
+                "attachment_package": {},
                 "doc_category": "",
                 "batch_name": "",
                 "upload_batch_id": "",

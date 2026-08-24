@@ -11,5 +11,9 @@ INSERT INTO `ata_schema_migration` (`version`, `description`) VALUES
   ('008', 'allow versioned annual report and workpaper artifact manifests'),
   ('009', 'annual audit execution, evidence, review, issuance and knowledge governance'),
   ('010', 'immutable annual report citation manifests'),
-  ('011', 'immutable annual report citation delivery references')
+  ('011', 'immutable annual report citation delivery references'),
+  ('012', 'versioned annual-audit templates and confirmed attachment packages'),
+  ('013', 'file-backed annual-audit template versions'),
+  ('014', 'generic template version and file management'),
+  ('015', 'normalize selectable template types and annual-audit type key')
 ON DUPLICATE KEY UPDATE `description` = VALUES(`description`);

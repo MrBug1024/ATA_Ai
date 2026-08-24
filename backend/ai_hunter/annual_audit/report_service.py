@@ -37,6 +37,7 @@ from .knowledge_graph_projection import (
     project_annual_findings_to_knowledge_graph,
 )
 from .storage import mysql_connection
+from .generic_template_repository import get_active_template_catalog, template_version_ref
 
 
 WORKPAPER_TEMPLATE_VERSION = "customer-workpaper-2023-v1"
@@ -446,6 +447,7 @@ def render_annual_report_draft(
     material_sources: list[dict[str, Any]] | None = None,
     execution_gate: dict[str, Any] | None = None,
     citation_id_by_finding_key: dict[str, str] | None = None,
+    report_template: dict[str, Any] | None = None,
 ) -> str:
     """Render a deterministic review draft without invoking an LLM."""
 
@@ -463,8 +465,10 @@ def render_annual_report_draft(
         if Decimal(str(item.get("net_revenue") or 0)) != 0
     ]
 
+    template_content = (report_template or {}).get("content") or {}
+    report_title = str(template_content.get("title") or "年度财务报表审计工作底稿与报告初稿")
     lines = [
-        "# 年度财务报表审计工作底稿与报告初稿（对话版）",
+        f"# {report_title}（对话版）",
         "",
         "> 本稿由已上传资料和确定性规则自动生成，供项目组复核。规则命中不等同于错报或舞弊；在证据未闭环、抽样未完成、管理层声明及期后事项未核实前，不形成正式审计意见。",
         "",
@@ -635,6 +639,9 @@ def _persist_draft_artifacts(
     settings: Settings,
 ) -> dict[str, Any]:
     generation_key = str(snapshot["generation_key"])
+    template_versions = snapshot.get("template_versions") or {}
+    report_template_version = str(template_versions.get("annual_report") or "unconfigured")
+    workpaper_template_version = str(template_versions.get("audit_workpaper") or "unconfigured")
     workpaper_specs = (
         ("F1-2", "营业收入审定与截止分析", snapshot.get("sales_receivables", {}).get("revenue") or {}),
         ("C5-2", "应收账款审定与账龄分析", snapshot.get("sales_receivables", {}).get("receivables") or {}),
@@ -685,7 +692,7 @@ def _persist_draft_artifacts(
                         engagement_id,
                         code,
                         name,
-                        WORKPAPER_TEMPLATE_VERSION,
+                        workpaper_template_version,
                         version,
                         json.dumps(facts_payload, ensure_ascii=False, default=_json_default),
                         "自动生成的事实草稿，须由项目组结合原始证据复核。",
@@ -726,7 +733,7 @@ def _persist_draft_artifacts(
                     """,
                     (
                         engagement_id,
-                        REPORT_TEMPLATE_VERSION,
+                        report_template_version,
                         report_version,
                         json.dumps({**snapshot, "report_text": report_text}, ensure_ascii=False, default=_json_default),
                         created_by,
@@ -836,6 +843,11 @@ def generate_annual_report_draft(
         settings=resolved,
     )
     execution_gate = dict(execution.get("release_gate") or {})
+    template_catalog = get_active_template_catalog(settings=resolved)
+    template_versions = {
+        template_type: template_version_ref(template)
+        for template_type, template in template_catalog.items()
+    }
     readiness = data_readiness(case_id, settings=resolved)
     sales = run_sales_receivables(case_id, recompute=recompute, settings=resolved)
     cash = run_cash_and_bank(case_id, recompute=recompute, settings=resolved)
@@ -847,8 +859,24 @@ def generate_annual_report_draft(
     )
     snapshot = {
         "engagement_id": case_id,
-        "report_template_version": REPORT_TEMPLATE_VERSION,
-        "workpaper_template_version": WORKPAPER_TEMPLATE_VERSION,
+        # Keep the identity and period in the frozen fact snapshot.  Artifact
+        # rendering happens after the report transaction and must not depend
+        # on a second mutable engagement lookup to fill customer templates.
+        "engagement": {
+            "engagement_code": engagement.get("engagement_code") or "",
+            "entity_name": engagement.get("entity_name") or "",
+            "entity_uscc": engagement.get("entity_uscc") or "",
+            "fiscal_year": engagement.get("fiscal_year") or "",
+            "period_start": engagement.get("period_start") or "",
+            "period_end": engagement.get("period_end") or "",
+        },
+        "engagement_code": engagement.get("engagement_code") or "",
+        "entity_name": engagement.get("entity_name") or "",
+        "fiscal_year": engagement.get("fiscal_year") or "",
+        "period_end": engagement.get("period_end") or "",
+        "report_template_version": template_versions.get("annual_report") or "unconfigured",
+        "workpaper_template_version": template_versions.get("audit_workpaper") or "unconfigured",
+        "template_versions": template_versions,
         "sales_analysis_run_id": sales.get("analysis_run_id"),
         "cash_analysis_run_id": cash.get("analysis_run_id"),
         "corrections": list(corrections or []),
@@ -891,6 +919,7 @@ def generate_annual_report_draft(
         material_sources=material_sources,
         execution_gate=execution_gate,
         citation_id_by_finding_key=dict(citation_plan.get("citation_id_by_finding_key") or {}),
+        report_template=template_catalog.get("annual_report"),
     )
     trace_appendix = render_knowledge_graph_trace_appendix(
         list(citation_plan.get("response_trace_candidates") or [])
@@ -935,6 +964,7 @@ def generate_annual_report_draft(
         "report_text": report_text,
         "artifacts": artifacts,
         "generation_key": snapshot["generation_key"],
+        "active_template_versions": template_versions,
         # The report generator plans these citations before rendering.  The
         # response finalizer must use this exact list instead of querying a
         # later project-wide analysis run.

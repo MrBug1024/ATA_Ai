@@ -125,6 +125,33 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         "response_analysis_runs": list(state.get("response_analysis_runs") or []),
         "unresolved_relations": unresolved_graph_items.get("unresolved_relations", []),
         "unresolved_claims": unresolved_graph_items.get("unresolved_claims", []),
+        "audit_review_stage": str(state.get("audit_review_stage") or ""),
+        "active_template_versions": dict(state.get("active_template_versions") or {}),
+        # Persist only the user-facing attachment projection.  Storage refs
+        # and template snapshots are server-side details; the chat history
+        # needs the same preview/download actions after a page reload.
+        "attachment_package": {
+            "package_id": (state.get("attachment_package") or {}).get("package_id"),
+            "package_version": (state.get("attachment_package") or {}).get("package_version"),
+            "status": (state.get("attachment_package") or {}).get("status") or "",
+            "errors": list((state.get("attachment_package") or {}).get("errors") or []),
+            "artifacts": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "artifact_type",
+                        "file_name",
+                        "template_version",
+                        "template_fill_status",
+                        "download_url",
+                        "preview_url",
+                    )
+                    if item.get(key) is not None
+                }
+                for item in ((state.get("attachment_package") or {}).get("artifacts") or [])
+                if isinstance(item, dict)
+            ],
+        },
     }
 
     # Deterministic turn id.

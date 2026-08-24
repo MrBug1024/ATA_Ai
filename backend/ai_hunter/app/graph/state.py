@@ -114,6 +114,11 @@ class AuditGraphState(TypedDict, total=False):
     client_turn_id: str
     regenerate: bool
     selected_assistant_turn_id: str
+    # Full-audit human confirmation gate.  Values are persisted in the
+    # checkpoint so a follow-up chat turn can be routed deterministically.
+    audit_review_stage: str
+    active_template_versions: dict[str, str]
+    attachment_package: dict[str, Any]
     messages: Annotated[list[AnyMessage], add_messages]
     # Append-only, display-only conversation log holding the FULL assistant
     # answer per turn. Kept separate from `messages` (which stays lean for LLM

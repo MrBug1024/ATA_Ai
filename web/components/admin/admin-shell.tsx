@@ -8,6 +8,7 @@ import {
   Info,
   LayoutDashboard,
   ShieldCheck,
+  Files,
   Users,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -36,6 +37,7 @@ const ADMIN_NAVIGATION = [
   { href: "/admin", label: "概览", icon: LayoutDashboard },
   { href: "/admin/users", label: "用户", icon: Users },
   { href: "/admin/roles", label: "角色权限", icon: ShieldCheck },
+  { href: "/admin/templates", label: "模板管理", icon: Files },
 ] as const;
 
 function isNavigationActive(
@@ -51,6 +53,7 @@ function pageTitle(pathname: string): string {
   if (pathname.startsWith("/admin/users")) return "用户管理";
   if (pathname.startsWith("/admin/companies")) return "公司管理";
   if (pathname.startsWith("/admin/roles")) return "角色权限";
+  if (pathname.startsWith("/admin/templates")) return "模板管理";
   return "管理概览";
 }
 

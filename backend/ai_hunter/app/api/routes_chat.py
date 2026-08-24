@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import itertools
+import json
 import logging
 import asyncio
 import re
@@ -31,6 +32,7 @@ from ..auth.identity import Identity
 from ..auth.permissions import has_module, report_section_code_for_id, require_any_module, require_module, visible_report_sections
 from ..auth.report_filter import filter_report_text_by_sections
 from ..auth.tenancy import get_tenancy_service, require_case_access, require_thread_access, require_thread_manage
+from ...annual_audit.storage import mysql_connection
 
 
 def _any_section_id_from_node(node_name: str) -> str | None:
@@ -376,6 +378,21 @@ class ChatInvokeResponse(BaseModel):
         description="分层路由决策；业务线、capability、执行意图、权限模块和工具范围由统一注册表约束。",
     )
     memory_context: str = Field(default="", description="轻量会话记忆摘要。")
+    audit_review_stage: str = Field(
+        default="",
+        description=(
+            "完整年审后的人工确认阶段：awaiting_result_review、"
+            "awaiting_artifact_confirmation 或附件已处理状态。"
+        ),
+    )
+    active_template_versions: dict[str, str] = Field(
+        default_factory=dict,
+        description="本轮审计/附件生成所使用的已激活模板版本标签。",
+    )
+    attachment_package: dict[str, Any] = Field(
+        default_factory=dict,
+        description="用户确认后生成的附件包及其模板版本快照。",
+    )
 
 
 @router.post(
@@ -626,6 +643,9 @@ _RESPONSE_FINAL_STATE_FIELDS = (
     "unresolved_claims",
     "intent",
     "route_decision",
+    "audit_review_stage",
+    "active_template_versions",
+    "attachment_package",
 )
 
 
@@ -958,6 +978,9 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
         intent=result.get("intent", ""),
         route_decision=result.get("route_decision") or None,
         memory_context=result.get("memory_context", ""),
+        audit_review_stage=str(result.get("audit_review_stage") or ""),
+        active_template_versions=dict(result.get("active_template_versions") or {}),
+        attachment_package=dict(result.get("attachment_package") or {}),
     )
 
 
@@ -1423,6 +1446,13 @@ class MessageItem(BaseModel):
         default_factory=list,
         description="该轮未决断言，供『待补件 N』badge 在历史会话中复现",
     )
+    audit_review_stage: str = Field(default="", description="年审人工确认阶段")
+    active_template_versions: dict[str, str] = Field(
+        default_factory=dict, description="该轮使用的已激活模板版本"
+    )
+    attachment_package: dict[str, Any] = Field(
+        default_factory=dict, description="该轮生成的年审附件包及预览/下载地址"
+    )
 
 
 class ThreadMessagesResponse(BaseModel):
@@ -1503,6 +1533,13 @@ class AssistantTurnItem(BaseModel):
     unresolved_claims: list[UnresolvedClaimItemModel] = Field(
         default_factory=list,
         description="该 assistant 版本自己的未决断言快照。",
+    )
+    audit_review_stage: str = Field(default="", description="年审人工确认阶段")
+    active_template_versions: dict[str, str] = Field(
+        default_factory=dict, description="该 assistant 版本使用的已激活模板版本"
+    )
+    attachment_package: dict[str, Any] = Field(
+        default_factory=dict, description="该 assistant 版本生成的年审附件包"
     )
     version: int = Field(default=1, description="生成版本号，1=首次，2+=重新生成")
     created_at: str = Field(default="", description="创建时间 ISO 格式")
@@ -1591,7 +1628,79 @@ def _turn_graph_context(raw_context: Any) -> dict[str, Any]:
         "unresolved_claims": _models(
             context.get("unresolved_claims"), UnresolvedClaimItemModel
         ),
+        "audit_review_stage": str(context.get("audit_review_stage") or ""),
+        "active_template_versions": (
+            context.get("active_template_versions")
+            if isinstance(context.get("active_template_versions"), dict)
+            else {}
+        ),
+        "attachment_package": (
+            context.get("attachment_package")
+            if isinstance(context.get("attachment_package"), dict)
+            else {}
+        ),
     }
+
+
+def _recover_legacy_attachment_package(case_id: int, content: str) -> dict[str, Any]:
+    """Recover package actions for replies written before metadata persistence.
+
+    Older assistant rows already contain the human-readable ``附件包 vN``
+    response, but their graph snapshot did not store the artifact URLs.  This
+    small compatibility lookup keeps those existing replies actionable after a
+    refresh; new replies use the response-scoped snapshot directly.
+    """
+
+    match = re.search(r"附件包\s*v(\d+)", content or "")
+    if case_id <= 0 or not match:
+        return {}
+    try:
+        package_version = int(match.group(1))
+        with mysql_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, package_version, status, artifact_refs_json
+                    FROM annual_audit_attachment_package
+                    WHERE engagement_id = %s AND package_version = %s
+                    LIMIT 1
+                    """,
+                    (case_id, package_version),
+                )
+                row = dict(cursor.fetchone() or {})
+        if not row:
+            return {}
+        raw_refs = row.get("artifact_refs_json")
+        refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
+        artifacts = []
+        for index, item in enumerate(refs if isinstance(refs, list) else []):
+            if not isinstance(item, dict):
+                continue
+            artifacts.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "artifact_type",
+                        "file_name",
+                        "template_version",
+                        "template_fill_status",
+                    )
+                    if item.get(key) is not None
+                }
+                | {
+                    "download_url": f"/api/annual-audit/{case_id}/attachment-packages/{row['id']}/files/{index}",
+                    "preview_url": f"/api/annual-audit/{case_id}/attachment-packages/{row['id']}/files/{index}/preview",
+                }
+            )
+        return {
+            "package_id": row.get("id"),
+            "package_version": row.get("package_version"),
+            "status": row.get("status") or "",
+            "artifacts": artifacts,
+        }
+    except Exception:
+        LOGGER.warning("legacy_attachment_package_recovery_failed case_id=%s", case_id, exc_info=True)
+        return {}
 
 
 @router.get(
@@ -1640,6 +1749,13 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                     else:
                         created_at = str(a["created_at"])
                 graph_context = _turn_graph_context(a.get("graph_context"))
+                if not graph_context["attachment_package"]:
+                    recovered_package = _recover_legacy_attachment_package(
+                        int(a.get("case_id") or 0), str(a.get("content") or "")
+                    )
+                    if recovered_package:
+                        graph_context["attachment_package"] = recovered_package
+                        graph_context["audit_review_stage"] = "attachments_generated"
                 assistants.append(
                     AssistantTurnItem(
                         turn_id=t["turn_id"],
@@ -1653,6 +1769,9 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                         response_analysis_runs=graph_context["response_analysis_runs"],
                         unresolved_relations=graph_context["unresolved_relations"],
                         unresolved_claims=graph_context["unresolved_claims"],
+                        audit_review_stage=graph_context["audit_review_stage"],
+                        active_template_versions=graph_context["active_template_versions"],
+                        attachment_package=graph_context["attachment_package"],
                         version=a.get("version", 1),
                         created_at=created_at,
                     )

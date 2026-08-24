@@ -127,6 +127,9 @@ export interface ThreadMessage {
   response_analysis_runs?: ResponseAnalysisRun[];
   unresolved_relations: ReplayUnresolvedRelation[];
   unresolved_claims: ReplayUnresolvedClaim[];
+  audit_review_stage?: string;
+  active_template_versions?: Record<string, string>;
+  attachment_package?: Record<string, unknown>;
 }
 
 export interface ThreadMessagesResponse {
@@ -157,6 +160,9 @@ export interface AssistantTurnItem {
   response_analysis_runs?: ResponseAnalysisRun[];
   unresolved_relations: ReplayUnresolvedRelation[];
   unresolved_claims: ReplayUnresolvedClaim[];
+  audit_review_stage?: string;
+  active_template_versions?: Record<string, string>;
+  attachment_package?: Record<string, unknown>;
   version: number;
   created_at: string;
 }

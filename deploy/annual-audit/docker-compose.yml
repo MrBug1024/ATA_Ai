@@ -65,7 +65,10 @@ services:
       - ../../backend/sql/annual_audit_mysql_v9.sql:/docker-entrypoint-initdb.d/009_execution_and_knowledge_governance.sql:ro
       - ../../backend/sql/annual_audit_mysql_v10.sql:/docker-entrypoint-initdb.d/010_report_citation_manifest.sql:ro
       - ../../backend/sql/annual_audit_mysql_v11.sql:/docker-entrypoint-initdb.d/011_report_citation_delivery_refs.sql:ro
-      - ./mysql-init/009_record_migrations.sql:/docker-entrypoint-initdb.d/012_record_migrations.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v12.sql:/docker-entrypoint-initdb.d/012_templates_and_attachment_packages.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v13.sql:/docker-entrypoint-initdb.d/013_file_backed_templates.sql:ro
+      - ../../backend/sql/annual_audit_mysql_v14.sql:/docker-entrypoint-initdb.d/014_generic_templates.sql:ro
+      - ./mysql-init/009_record_migrations.sql:/docker-entrypoint-initdb.d/015_record_migrations.sql:ro
     healthcheck:
       test:
         - CMD-SHELL

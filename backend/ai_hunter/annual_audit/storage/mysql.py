@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ai_hunter.app.settings import (
@@ -14,6 +15,9 @@ from ai_hunter.app.settings import (
 
 if TYPE_CHECKING:
     import pymysql
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AnnualAuditStorageError(RuntimeError):
@@ -80,6 +84,13 @@ def mysql_connection(
     except Exception as exc:
         if connection is not None and not autocommit:
             connection.rollback()
+        LOGGER.exception(
+            "annual_mysql_operation_failed host=%s port=%s database=%s user=%s",
+            resolved.annual_mysql_host,
+            resolved.annual_mysql_port,
+            resolved.annual_mysql_database,
+            resolved.annual_mysql_user,
+        )
         raise AnnualAuditStorageError("annual-audit MySQL operation failed") from exc
     finally:
         if connection is not None:
