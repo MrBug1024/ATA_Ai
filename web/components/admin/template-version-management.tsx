@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import useSWR from "swr";
-import { RefreshCw, Save, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw, Save, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -21,13 +21,18 @@ import {
 
 const ACCEPTED = ".doc,.docx,.xls,.xlsx,.xlsm,.pdf,.md,.markdown,.txt,.csv";
 const USAGE_OPTIONS = [
-  ["annual_report", "年度审计报告"],
-  ["financial_statements", "财务报表"],
-  ["notes", "财务报表附注"],
+  ["annual_report", "年度审计报告（审计报告正文.docx）"],
+  ["financial_statements", "年度审计财务报表（一般企业报表.xlsx / 经审计的财务报表.xls）"],
+  ["notes", "财务报表附注（一般企业附注.docx / 会计报表附注.doc）"],
   ["audit_workpaper", "审计工作底稿（过程资料）"],
-  ["management_letter", "管理建议书"],
-  ["confirmations", "函证模板（过程资料）"],
+  ["management_letter", "管理建议书（管理建议书模板.docx）"],
+  ["confirmations", "函证（过程资料）"],
 ] as const;
+const CORE_USAGE_LABELS: Record<string, string> = {
+  annual_report: "审计报告",
+  financial_statements: "财务报表",
+  notes: "财务报表附注",
+};
 
 const TEMPLATE_TYPE_OPTIONS = [
   ["annual_audit", "年度审计"],
@@ -50,9 +55,15 @@ function formatBytes(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function contractSummary(version: GenericTemplateVersion): string {
+  const missing = version.template_contract?.missing_usages ?? [];
+  if (!missing.length) return "核心三份交付附件已配置";
+  return `缺少核心附件：${missing.map((item) => CORE_USAGE_LABELS[item] ?? item).join("、")}`;
+}
+
 function inferUsage(fileName: string): string {
-  if (fileName.includes("审计报告")) return "annual_report";
-  if (fileName.includes("财务报表") || fileName.includes("一般企业报表")) return "financial_statements";
+  if (fileName.includes("审计报告") && !fileName.includes("财务报表") && !fileName.includes("附注")) return "annual_report";
+  if (fileName.includes("财务报表") || fileName.includes("一般企业报表") || fileName.includes("经审计的财务报表")) return "financial_statements";
   if (fileName.includes("附注")) return "notes";
   if (fileName.includes("管理建议")) return "management_letter";
   if (fileName.includes("函证") || fileName.includes("询证")) return "confirmations";
@@ -132,7 +143,7 @@ export function TemplateVersionManagement() {
     <section className="flex flex-col gap-6" aria-labelledby="template-management-title">
       <div className="flex flex-col gap-1">
         <h2 id="template-management-title" className="text-xl font-semibold">模板管理</h2>
-        <p className="text-sm text-muted-foreground">模板类型由系统选择；同一类型同一时间只允许一个激活版本。创建版本时必须上传实际文件，激活后不可修改。Word、Excel 等源文件会按原扩展名生成交付附件。</p>
+        <p className="text-sm text-muted-foreground">模板类型由系统选择；同一类型同一时间只允许一个激活版本。年度审计核心交付必须同时配置审计报告、财务报表和财务报表附注。系统只在模板原有字段、段落或表格位置填充结果，并按源文件扩展名交付，不追加通用审计正文。</p>
       </div>
 
       {error && <Alert variant="destructive"><RefreshCw aria-hidden="true" /><div><AlertTitle>模板目录加载失败</AlertTitle><AlertDescription>{error.message}</AlertDescription></div></Alert>}
@@ -182,11 +193,19 @@ export function TemplateVersionManagement() {
           {!isLoading && !versions.length && <p className="text-sm text-muted-foreground">暂未创建模板版本。</p>}
           {versions.map((version) => {
             const isActive = version.active_version_no === version.version_no && version.status === "active";
+            const isAnnualAudit = version.business_line === "annual_audit";
+            const ready = version.template_contract?.ready_for_core_delivery ?? false;
             return (
               <div key={version.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
                 <Link href={`/admin/templates/${encodeURIComponent(version.template_code)}/versions/${version.version_no}`} className="min-w-0 flex-1 hover:underline">
                   <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{versionTitle(version)}</span>{isActive && <Badge>当前激活</Badge>}<Badge variant="outline">{version.status}</Badge></div>
-                  <div className="mt-1 text-xs text-muted-foreground">{templateTypeLabel(version.business_line)} · {version.file_count} 个模板文件 · {version.created_at || ""}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>{templateTypeLabel(version.business_line)} · {version.file_count} 个模板文件 · {version.created_at || ""}</span>
+                    {isAnnualAudit && <span className={ready ? "inline-flex items-center gap-1 text-emerald-700" : "inline-flex items-center gap-1 text-amber-700"}>
+                      {ready ? <CheckCircle2 className="size-3" aria-hidden="true" /> : <AlertTriangle className="size-3" aria-hidden="true" />}
+                      {contractSummary(version)}
+                    </span>}
+                  </div>
                 </Link>
                 <div className="flex flex-wrap gap-2">
                   {!isActive && <Button type="button" size="sm" variant="outline" disabled={!version.file_count || busyKey === `activate:${version.id}`} onClick={() => void activate(version)}><Zap data-icon="inline-start" />激活</Button>}

@@ -17,6 +17,7 @@ from .deterministic_analysis import (
 )
 from .engagement_repository import EngagementNotFoundError, get_engagement
 from .storage import mysql_connection
+from .workpaper_case import get_case_workpaper_summary
 
 
 _READINESS_DATASETS = (
@@ -116,6 +117,7 @@ def data_readiness(case_id: int, *, settings: Settings | None = None) -> dict[st
                 for code, _label, count_key, table_name in _READINESS_DATASETS
                 if int(counts.get(count_key) or 0) > 0
             }
+    case_workpaper = get_case_workpaper_summary(case_id, settings=resolved)
     counts = {key: int(value or 0) for key, value in counts.items()}
     quality_labels = {
         "source": "原始/标准化源数据",
@@ -158,6 +160,20 @@ def data_readiness(case_id: int, *, settings: Settings | None = None) -> dict[st
                 "limitation": limitation,
             }
         )
+    if case_workpaper and bool(case_workpaper.get("is_complete_case")):
+        available_data.append(
+            {
+                "code": "audit_workpapers",
+                "name": "完整年度审计案例主底稿",
+                "row_count": int(case_workpaper.get("nonempty_row_count") or 0),
+                "source_quality": "case_workpaper",
+                "quality_label": "案例主底稿（296 个工作表）",
+                "source_files": [str(case_workpaper.get("file_name") or "")],
+                "limitation": "用于本案例回放和底稿验证；不替代新项目应取得的原始账务资料。",
+                "sheet_count": int(case_workpaper.get("sheet_count") or 0),
+                "covered_categories": sorted(case_workpaper.get("covered_categories") or {}),
+            }
+        )
     return {
         "case_id": case_id,
         "engagement_code": engagement["engagement_code"],
@@ -185,6 +201,8 @@ def data_readiness(case_id: int, *, settings: Settings | None = None) -> dict[st
             if counts[key] == 0
         ],
         "supplemental_required_data": supplemental_required_data,
+        "case_workpaper": case_workpaper,
+        "case_pack_complete": bool(case_workpaper and case_workpaper.get("is_complete_case")),
     }
 
 

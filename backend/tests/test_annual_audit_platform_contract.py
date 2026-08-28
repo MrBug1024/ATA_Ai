@@ -62,6 +62,7 @@ def test_app_mounts_only_platform_and_annual_routes():
     ("query", "capability"),
     [
         ("执行完整年审并生成报告", "audit.full"),
+        ("执行年度审计，生成底稿", "audit.full"),
         ("全面检查并生成审计报告草稿", "audit.full"),
         ("请生成本项目的全面年度审计报告初稿，并列出无法执行的审计程序", "audit.full"),
         ("分析收入截止性和应收账龄", "audit.drilldown"),

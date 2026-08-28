@@ -35,6 +35,7 @@ PROJECT_CREATE_KEYWORDS = (
 FULL_AUDIT_KEYWORDS = (
     "执行完整年审",
     "执行完整年度审计",
+    "执行年度审计",
     "完整年度审计",
     "执行年审",
     "完整年审",
@@ -49,6 +50,8 @@ FULL_AUDIT_KEYWORDS = (
     "生成审计报告草稿",
     "出具审计报告",
     "生成完整工作底稿",
+    "生成工作底稿",
+    "生成底稿",
 )
 REAUDIT_KEYWORDS = ("重新执行年审", "重新生成报告", "重跑年审", "更正后重跑", "重新审计")
 REAUDIT_OBJECTS = ("报告", "底稿", "结论", "数据", "调整", "错报", "年审")
@@ -89,6 +92,9 @@ ATTACHMENT_CONFIRM_KEYWORDS = (
     "生成附注",
     "生成工作底稿",
     "生成管理建议书",
+    "生成函证",
+    "重新生成附件",
+    "重新生成",
     "可以生成",
     "确认生成",
     "开始生成",
@@ -221,12 +227,29 @@ def _review_confirmation_route(state: AuditGraphState) -> RouteDecisionModel | N
     stage = str(state.get("audit_review_stage") or "")
     query = str(state.get("query") or "").strip()
     case_id = _positive_case_id(state.get("current_case_id"))
-    if not stage or not query or not case_id:
+    if not query or not case_id:
+        return None
+
+    # A restart can clear the in-memory graph checkpoint while the browser is
+    # still showing an already generated attachment package.  The visible
+    # “重新生成附件” action must remain usable in that situation; otherwise a
+    # user clicks a supplied button and receives a generic clarification.
+    if any(keyword in query for keyword in ("重新生成附件", "重新生成交付附件")):
+        return _decision(
+            "audit_analysis",
+            "audit.full",
+            confidence=1.0,
+            source="context",
+            case_id=case_id,
+            action="prepare_attachments",
+        )
+
+    if not stage:
         return None
 
     if stage == "awaiting_result_review":
-        # Check explicit approval first so “没有问题” is never mistaken for
-        # the substring “有问题”.
+        # Check explicit approval first so "没有问题" is never mistaken for
+        # the substring "有问题".
         if any(keyword in query for keyword in AUDIT_REVIEW_OK_KEYWORDS):
             return _decision(
                 "common",
@@ -237,8 +260,13 @@ def _review_confirmation_route(state: AuditGraphState) -> RouteDecisionModel | N
                 action="confirm_audit_result",
                 needs_clarification=True,
                 clarification_question=(
-                    "已记录：当前审计结果没有问题。是否基于当前已激活的模板版本生成附件？"
-                    "可生成年度审计报告、经审计的财务报表、会计报表附注和管理建议书等交付附件；审计底稿、函证属于过程资料，不会随标准年审交付包自动生成。"
+                    "已记录：当前审计结果没有问题。\n\n"
+                    "是否基于当前已激活的模板版本生成年度审计交付附件？\n"
+                    "可生成的核心交付附件包括年度审计报告、年度审计财务报表和财务报表附注；\n"
+                    "管理建议书属于按需生成的可选附件；\n"
+                    "每个附件严格沿用对应已激活模板的文件格式和版式（模板是 .docx/.xlsx/.xls/.md/.pdf 等，\n"
+                    "交付就保持该格式），并只写入模板定义的字段、段落或表格位置，不追加通用结果附页。\n\n"
+                    "审计工作底稿、函证属于过程资料，不会随标准年审交付包自动生成。\n\n"
                     "请回复“确认生成”或“暂不生成”。"
                 ),
             )
@@ -252,7 +280,7 @@ def _review_confirmation_route(state: AuditGraphState) -> RouteDecisionModel | N
                 action="reaudit",
             )
 
-    if stage in {"awaiting_artifact_confirmation", "attachments_skipped", "attachments_generated"}:
+    if stage == "awaiting_attachment_generation_confirmation":
         if any(keyword in query for keyword in ATTACHMENT_CONFIRM_KEYWORDS):
             return _decision(
                 "audit_analysis",
@@ -261,6 +289,28 @@ def _review_confirmation_route(state: AuditGraphState) -> RouteDecisionModel | N
                 source="context",
                 case_id=case_id,
                 action="generate_attachments",
+            )
+        if any(keyword in query for keyword in ("暂不生成", "不生成", "先不", "取消")):
+            return _decision(
+                "common",
+                "common.general",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="skip_attachments",
+                needs_clarification=True,
+                clarification_question="好的，暂不生成附件。后续如需生成，请回复“确认生成附件”。",
+            )
+
+    if stage in {"awaiting_artifact_confirmation", "attachments_skipped", "attachments_generated"}:
+        if any(keyword in query for keyword in ATTACHMENT_CONFIRM_KEYWORDS):
+            return _decision(
+                "audit_analysis",
+                "audit.full",
+                confidence=1.0,
+                source="context",
+                case_id=case_id,
+                action="prepare_attachments",
             )
         if any(keyword in query for keyword in ("暂不生成", "不生成", "先不", "取消")):
             return _decision(

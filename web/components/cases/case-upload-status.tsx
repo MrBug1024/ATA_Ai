@@ -20,7 +20,7 @@ export function CaseUploadStatus({ caseId }: Props) {
 
     const categories = caseDocCategories?.categories ?? [];
     const total = categories.length;
-    const available = categories.filter((category) => category.uploaded).length;
+    const available = categories.filter((category) => category.uploaded || category.covered_by_case_workpaper).length;
     const missing = Math.max(total - available, 0);
     if (total > 0 && missing === 0) {
       return { label: `完整 ${available}/${total} 类`, variant: "completed" as const };
@@ -53,7 +53,7 @@ export function CaseUploadStatus({ caseId }: Props) {
   }[status.variant];
 
   const totalCategories = caseDocCategories?.categories.length ?? 0;
-  const availableCategories = caseDocCategories?.categories.filter((category) => category.uploaded).length ?? 0;
+  const availableCategories = caseDocCategories?.categories.filter((category) => category.uploaded || category.covered_by_case_workpaper).length ?? 0;
   const missingCategories = Math.max(totalCategories - availableCategories, 0);
   const title = totalCategories > 0
     ? `已识别 ${availableCategories} 类，仍缺 ${missingCategories} 类；${events.length} 个材料事件`

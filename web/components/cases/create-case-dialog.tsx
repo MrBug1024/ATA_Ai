@@ -19,6 +19,7 @@ interface CreateCasePayload {
   case_name: string;
   case_type: string;
   entity_name: string;
+  company_id: string;
   entity_uscc: string;
   fiscal_year: string;
 }
@@ -33,6 +34,7 @@ const EMPTY: CreateCasePayload = {
   case_name: "",
   case_type: CASE_TYPES[0],
   entity_name: "",
+  company_id: "co_annual_local",
   entity_uscc: "",
   fiscal_year: String(new Date().getFullYear() - 1),
 };
@@ -57,6 +59,7 @@ export function CreateCaseDialog({ open, onOpenChange, onCreated }: Props) {
         case_name: form.case_name.trim(),
         case_type: form.case_type,
         entity_name: form.entity_name.trim(),
+        company_id: form.company_id.trim(),
         entity_uscc: form.entity_uscc.trim() || undefined,
         fiscal_year: Number(form.fiscal_year),
       });
@@ -73,6 +76,7 @@ export function CreateCaseDialog({ open, onOpenChange, onCreated }: Props) {
   const canSubmit =
     form.case_name.trim().length > 0 &&
     form.entity_name.trim().length > 0 &&
+    form.company_id.trim().length > 0 &&
     Number(form.fiscal_year) >= 2000 &&
     !submitting;
 
@@ -113,6 +117,15 @@ export function CreateCaseDialog({ open, onOpenChange, onCreated }: Props) {
               value={form.entity_name}
               onChange={(e) => set("entity_name", e.target.value)}
               placeholder="请输入被审计单位全称"
+              className="w-full rounded-md border border-border/50 bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/40 outline-none focus:border-border"
+            />
+          </Field>
+
+          <Field label="机构标识" required>
+            <input
+              value={form.company_id}
+              onChange={(e) => set("company_id", e.target.value)}
+              placeholder="请输入公司/机构 ID"
               className="w-full rounded-md border border-border/50 bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/40 outline-none focus:border-border"
             />
           </Field>

@@ -12,6 +12,9 @@ interface AttachmentArtifact {
   file_name?: string;
   template_version?: string;
   template_fill_status?: string;
+  output_file_ext?: string;
+  result_placement?: string;
+  audit_result_included?: boolean;
   download_url?: string;
   preview_url?: string;
 }
@@ -24,25 +27,27 @@ export interface AnnualAttachmentPackage {
 }
 
 interface AttachmentPreview {
-  kind: "document" | "workbook" | "text" | "unsupported";
+  kind: "document" | "workbook" | "text" | "pdf" | "unsupported";
   file_name?: string;
   message?: string;
   paragraphs?: string[];
   tables?: string[][][];
   sheets?: Array<{ name: string; rows: string[][] }>;
   text?: string;
+  page_count?: number;
   truncated?: boolean;
 }
 
 const stagePrompts: Record<string, string[]> = {
   awaiting_result_review: ["没有问题", "有问题，请继续审计："],
   awaiting_artifact_confirmation: ["确认生成附件", "暂不生成"],
+  attachments_generated: ["重新生成附件", "生成工作底稿", "生成函证"],
 };
 
 function stageLabel(stage: string): string {
-  if (stage === "awaiting_result_review") return "请先确认审计结果";
+  if (stage === "awaiting_result_review") return "请确认审计结果";
   if (stage === "awaiting_artifact_confirmation") return "是否生成附件";
-  if (stage === "attachments_generated") return "附件已生成，可继续复核";
+  if (stage === "attachments_generated") return "附件已生成，可重新生成或补充过程资料";
   return "";
 }
 
@@ -148,7 +153,29 @@ export function AnnualAuditResultCard({
           <MessageCircleQuestion className="size-4 text-primary" aria-hidden="true" />
           <span className="mr-1 text-sm font-medium">{stageLabel(stage ?? "")}</span>
           {prompts.map((prompt) => (
-            <Button key={prompt} type="button" size="sm" variant="outline" onClick={() => aui.composer().setText(prompt)}>
+            <Button
+              key={prompt}
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                try {
+                  // 消息级别的 aui.composer() 返回编辑编辑器（EditComposer），
+                  // 在非编辑模式下会抛出 "Composer is not available" 错误。
+                  // 需要通过原型链访问线程级别的 composer。
+                  const threadComposer = aui.threads().thread("main").composer();
+                  threadComposer.setText(prompt);
+                  void threadComposer.send();
+                } catch {
+                  // 回退：尝试编辑编辑器（可能在编辑模式下可用）
+                  try {
+                    aui.composer().setText(prompt);
+                  } catch {
+                    /* composer 不可用，忽略 */
+                  }
+                }
+              }}
+            >
               {prompt}
             </Button>
           ))}
@@ -168,7 +195,12 @@ export function AnnualAuditResultCard({
                 <div key={`${fileName}-${index}`} className="flex min-w-0 items-center justify-between gap-2 rounded-lg border bg-background px-3 py-2">
                   <div className="min-w-0">
                     <div className="truncate text-sm" title={fileName}>{fileName}</div>
-                    <div className="truncate text-xs text-muted-foreground">{artifact.template_version || "模板版本未知"}{artifact.template_fill_status ? ` · ${artifact.template_fill_status}` : ""}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {artifact.template_version || "模板版本未知"}
+                      {artifact.output_file_ext ? ` · ${artifact.output_file_ext}` : ""}
+                      {artifact.template_fill_status ? ` · ${artifact.template_fill_status}` : ""}
+                    </div>
+                    {artifact.result_placement && <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">结果落点：{artifact.result_placement}</div>}
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <Button type="button" size="sm" variant="outline" aria-label={`预览${fileName}`} disabled={!artifact.preview_url || previewing === fileName} onClick={() => void previewArtifact(artifact)}>
@@ -182,7 +214,7 @@ export function AnnualAuditResultCard({
               );
             })}
           </div>
-          {!!effectivePackage?.errors?.length && <div className="text-xs text-amber-700 dark:text-amber-300">有 {effectivePackage.errors.length} 个文件未完成字段填充，请查看生成异常。</div>}
+          {!!effectivePackage?.errors?.length && <div className="text-xs text-amber-700 dark:text-amber-300">有 {effectivePackage.errors.length} 个模板文件未能安全生成，请查看生成异常。</div>}
         </div>
       )}
 
@@ -193,6 +225,7 @@ export function AnnualAuditResultCard({
             <DialogDescription>只读预览；正式交付前仍需项目组复核和签字。</DialogDescription>
           </DialogHeader>
           {preview?.kind === "unsupported" && <p className="text-sm text-muted-foreground">{preview.message || "该格式暂不支持在线预览，请下载查看。"}</p>}
+          {preview?.kind === "pdf" && <p className="text-sm text-muted-foreground">{preview.message || `PDF 共 ${preview.page_count ?? "-"} 页。`}</p>}
           {preview?.kind === "text" && <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 text-xs">{preview.text}</pre>}
           {preview?.kind === "document" && <div className="space-y-4 text-sm">
             {(preview.paragraphs || []).map((paragraph, index) => <p key={`p-${index}`}>{paragraph}</p>)}

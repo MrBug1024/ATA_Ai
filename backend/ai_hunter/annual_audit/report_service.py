@@ -55,6 +55,21 @@ _FULL_AUDIT_MATERIAL_CATEGORIES = (
     ("tax_materials", "纳税申报及税务资料"),
     ("audit_workpapers", "历史审计底稿"),
     ("other", "其他年审资料"),
+    ("engagement_acceptance", "承接、续约及独立性资料"),
+    ("governance_minutes", "治理层及管理层会议资料"),
+    ("general_ledger", "总账及明细账"),
+    ("accounts_payable", "应付账款及采购往来明细"),
+    ("purchase_support", "采购及付款支持性资料"),
+    ("inventory_records", "存货台账及库龄资料"),
+    ("inventory_count", "盘点及实物核查资料"),
+    ("payroll_hr", "薪酬、人事及社保资料"),
+    ("fixed_assets", "固定资产及长期资产台账"),
+    ("asset_rights", "资产权属及担保资料"),
+    ("related_parties", "关联方及关联交易资料"),
+    ("legal_contingencies", "诉讼、担保及或有事项资料"),
+    ("subsequent_events", "期后事项资料"),
+    ("going_concern", "持续经营评价资料"),
+    ("management_representation", "管理层声明及批准资料"),
 )
 
 
@@ -362,6 +377,19 @@ def _persist_citation_manifest(
 
 def _missing_lines(readiness: dict[str, Any], analyses: list[dict[str, Any]]) -> list[str]:
     missing: list[str] = []
+    if readiness.get("case_pack_complete"):
+        case_summary = readiness.get("case_workpaper") or {}
+        raw_missing = [str(label) for label in readiness.get("missing_required_data") or [] if str(label)]
+        lines = [
+            f"- 案例主底稿回放未缺工作表：已读取 {int(case_summary.get('sheet_count') or 0)} 个工作表、"
+            f"{int(case_summary.get('nonempty_row_count') or 0)} 行非空数据。"
+        ]
+        if raw_missing:
+            lines.append(
+                "- 原始源文件层级仍需单独提交（仅针对新项目，不阻断本案例回放）："
+                + "、".join(raw_missing)
+            )
+        return lines
     for label in [
         *(readiness.get("missing_required_data") or []),
         *(readiness.get("supplemental_required_data") or []),
@@ -422,18 +450,42 @@ def _material_source_lines(material_sources: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _material_category_coverage_lines(material_sources: list[dict[str, Any]]) -> list[str]:
+def _material_category_coverage_lines(
+    material_sources: list[dict[str, Any]],
+    readiness: dict[str, Any] | None = None,
+) -> list[str]:
     uploaded = {
         str(source.get("doc_category") or "").strip()
         for source in material_sources
         if str(source.get("doc_category") or "").strip()
     }
+    if not (readiness or {}).get("case_pack_complete"):
+        available = [label for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES if code in uploaded]
+        unconfirmed = [label for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES if code not in uploaded]
+        return [
+            f"- 已单独识别：{'、'.join(available) if available else '无'}。",
+            f"- 尚未单独上传或分类确认：{'、'.join(unconfirmed) if unconfirmed else '无'}。",
+            "- 历史底稿中的同名或相关工作表仅作为审计证据保留；在原始文件未单独提交并核验前，不视为原始资料已经齐备。",
+        ]
+    case_categories = set(
+        (readiness or {}).get("case_workpaper", {}).get("covered_categories") or {}
+    )
     available = [label for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES if code in uploaded]
-    unconfirmed = [label for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES if code not in uploaded]
+    case_covered = [
+        label
+        for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES
+        if code in case_categories and code not in uploaded
+    ]
+    unconfirmed = [
+        label
+        for code, label in _FULL_AUDIT_MATERIAL_CATEGORIES
+        if code not in uploaded and code not in case_categories
+    ]
     return [
-        f"- 已单独识别：{'、'.join(available) if available else '无'}。",
+        f"- 原始/独立上传已识别：{'、'.join(available) if available else '无'}。",
+        f"- 主底稿工作表已覆盖：{'、'.join(case_covered) if case_covered else '无'}。",
         f"- 尚未单独上传或分类确认：{'、'.join(unconfirmed) if unconfirmed else '无'}。",
-        "- 历史底稿中的同名或相关工作表仅作为审计证据保留；在原始文件未单独提交并核验前，不视为原始资料已经齐备。",
+        "- 主底稿覆盖用于本案例回放、程序验证和结果复现；对真实新项目，仍须取得并核验对应原始资料。",
     ]
 
 
@@ -476,7 +528,12 @@ def render_annual_report_draft(
         f"- 被审计单位：{engagement.get('entity_name') or '-'}",
         f"- 审计期间：{engagement.get('period_start')} 至 {engagement.get('period_end')}",
         f"- 项目编号：{engagement.get('engagement_code') or '-'}",
-        "- 当前确定性分析范围：营业收入、应收账款、货币资金/银行流水；完整年审程序以项目工作台的受控程序清单为准。",
+        (
+            "- 当前为完整案例主底稿回放：除结构化收入、应收和资金分析外，已读取主底稿全部工作表，"
+            "并按 A/B/C/D/E/F/G/H 索引核对受控程序。"
+            if readiness.get("case_pack_complete")
+            else "- 当前确定性分析范围：营业收入、应收账款、货币资金/银行流水；完整年审程序以项目工作台的受控程序清单为准。"
+        ),
         "",
         "## 二、资料就绪度",
         f"- 科目余额行数：{int(counts.get('account_balance_rows') or 0)}",
@@ -494,7 +551,7 @@ def render_annual_report_draft(
         *_material_source_lines(list(material_sources or [])),
         "",
         "### 全面年审资料类别覆盖",
-        *_material_category_coverage_lines(list(material_sources or [])),
+        *_material_category_coverage_lines(list(material_sources or []), readiness),
         "",
         "## 三、F1-2 营业收入审定与截止分析草稿",
     ]
@@ -576,16 +633,31 @@ def render_annual_report_draft(
             "不得将本轮 0 项命中解释为不存在异常凭证。"
         )
 
+    case_summary = readiness.get("case_workpaper") or {}
+    if readiness.get("case_pack_complete"):
+        program_evidence = case_summary.get("program_evidence") or {}
+        lines.extend(
+            [
+                "",
+                "## 七、案例主底稿全量回放",
+                f"- 主底稿：{case_summary.get('file_name') or '-'}。",
+                f"- 工作表：{int(case_summary.get('sheet_count') or 0)} 个；非空工作表：{int(case_summary.get('nonempty_sheet_count') or 0)} 个；非空数据行：{int(case_summary.get('nonempty_row_count') or 0)} 行。",
+                f"- 已建立程序证据索引：{sum(1 for item in program_evidence.values() if item.get('has_evidence'))} / {len(program_evidence)} 项受控程序。",
+                f"- 主底稿公式错误提示：{int(case_summary.get('formula_error_count') or 0)} 个工作表含有错误标记；已作为数据质量事项保留，不能把错误标记改写成无异常结论。",
+                "- 回放结论：以主底稿中已填写的审计程序、审定表、审计说明、调整/重分类及三级复核记录为案例证据；报告成品用于与本次生成结果逐项比对。",
+            ]
+        )
+
     lines.extend(
         [
             "",
-            "## 七、需要项目组执行/复核的程序",
+            "## 八、需要项目组执行/复核的程序",
             "- 将收入月度波动、借方分录、期末前后七日分录与合同、发票、出库/验收及期后冲回逐项核对。",
             "- 对大额、长账龄及高集中度应收项目形成函证样本，并检查期后回款与减值测算。",
             "- 将银行流水与银行对账单、银行函证、总账余额交叉核对，对大额、重复、周末和整额交易检查审批及业务实质。",
             "- 对每一项差异保留原文件、工作表、行号/单元格和原文引用，人工复核后再更新底稿结论。",
             "",
-            "## 八、当前结论",
+            "## 九、当前结论",
             (
                 f"- 本轮共形成 {len(all_findings)} 项规则命中事项，其中高风险 "
                 f"{sum(1 for item in all_findings if item.get('risk_level') == 'high')} 项、中风险 "
@@ -593,7 +665,12 @@ def render_annual_report_draft(
                 if any((revenue.get("row_count"), receivables.get("row_count"), cash_and_bank.get("row_count")))
                 else "- 因核心结构化源数据均为 0 行，本轮相关风险规则未执行，不能据此得出无异常结论。"
             ),
-            "- 当前仅可形成审计工作底稿和审计报告初稿，不具备签发正式审计报告或表达审计意见的充分条件。",
+            (
+                "- 本案例回放已完成主底稿覆盖的受控程序和结果复现；系统仍将正式签发保留给有资格的项目组，"
+                "需在当前项目身份、复核批准和签字成果物条件满足后发布。"
+                if readiness.get("case_pack_complete")
+                else "- 当前仅可形成审计工作底稿和审计报告初稿，不具备签发正式审计报告或表达审计意见的充分条件。"
+            ),
         ]
     )
     if execution_gate:
@@ -602,7 +679,7 @@ def render_annual_report_draft(
         lines.extend(
             [
                 "",
-                "## 九、完整年审执行与签发门禁",
+                "## 十、完整年审执行与签发门禁",
                 (
                     f"- 受控程序：共 {int(program_summary.get('total') or 0)} 项；"
                     f"已完成 {int(program_summary.get('completed') or 0)} 项；"
@@ -615,13 +692,13 @@ def render_annual_report_draft(
                     else f"- 当前签发门禁：阻断（{len(blockers)} 项）。"
                 ),
                 *[
-                    f"- 待处理：{str(item.get('message') or item.get('code') or '')}"
+                    f"- 签发门禁事项：{str(item.get('message') or item.get('code') or '')}"
                     for item in blockers[:20]
                 ],
             ]
         )
     if corrections:
-        lines.extend(["", "## 十、本轮重审采用的订正", *[f"- {item}" for item in corrections]])
+        lines.extend(["", "## 十一、本轮重审采用的订正", *[f"- {item}" for item in corrections]])
     return "\n".join(lines).strip()
 
 

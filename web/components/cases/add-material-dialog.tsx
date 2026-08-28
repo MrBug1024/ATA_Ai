@@ -121,7 +121,10 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
     return map;
   }, [caseDocCategories]);
   const uploadedCategoryCount = useMemo(
-    () => categories.filter((category) => categoryMap.get(category.code)?.uploaded).length,
+    () => categories.filter((category) => {
+      const item = categoryMap.get(category.code);
+      return item?.uploaded || item?.covered_by_case_workpaper;
+    }).length,
     [categories, categoryMap]
   );
 
@@ -138,7 +141,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
         const result = await validate({
           case_id: caseItem.case_id,
           doc_category: selectedCategory,
-          filename: selected[0].name,
+          file_names: selected.map((file) => file.name),
         });
         dispatch({ type: "VALIDATION_RESULT", result });
       } catch (err) {
@@ -165,7 +168,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
       const result = await validate({
         case_id: caseItem.case_id,
         doc_category: selectedCategory,
-        filename: files[0].name,
+        file_names: files.map((file) => file.name),
       });
       dispatch({ type: "VALIDATION_RESULT", result });
       if (validationOutcome(result) === "proceed") {
@@ -274,10 +277,11 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
               {categories.map((cat) => {
                 const caseCat = categoryMap.get(cat.code);
                 const uploaded = caseCat?.uploaded ?? false;
+                const coveredByCase = caseCat?.covered_by_case_workpaper && !caseCat?.raw_uploaded;
                 return (
                   <div
                     key={cat.code}
-                    title={`${cat.name}\n文件数: ${caseCat?.file_count ?? 0}\n记录数: ${caseCat?.record_count ?? 0}`}
+                    title={`${cat.name}\n文件数: ${caseCat?.file_count ?? 0}\n记录数: ${caseCat?.record_count ?? 0}${coveredByCase ? "\n来源: 主底稿工作表覆盖" : ""}`}
                     className={cn(
                       "flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-center",
                       uploaded
@@ -291,7 +295,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
                       <div className="size-4 rounded-full border-2 border-muted-foreground/20" />
                     )}
                     <span className={cn("text-[10px] leading-tight", uploaded ? "text-emerald-600" : "text-muted-foreground/60")}>
-                      {cat.name}
+                      {cat.name}{coveredByCase ? "（主底稿）" : ""}
                     </span>
                   </div>
                 );
@@ -319,6 +323,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
                 {categories.map((cat) => {
                   const caseCat = categoryMap.get(cat.code);
                   const uploaded = caseCat?.uploaded ?? false;
+                  const coveredByCase = caseCat?.covered_by_case_workpaper && !caseCat?.raw_uploaded;
                   return (
                     <SelectItem key={cat.code} value={cat.code}>
                       <span className="flex items-center gap-2">
@@ -326,6 +331,7 @@ export function AddMaterialDialog({ open, onOpenChange, caseItem }: Props) {
                         {uploaded && (
                           <CheckCircle2 className="size-3.5 text-emerald-500" />
                         )}
+                        {coveredByCase && <span className="text-[10px] text-emerald-600">主底稿</span>}
                       </span>
                     </SelectItem>
                   );

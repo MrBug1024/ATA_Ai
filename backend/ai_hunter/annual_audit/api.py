@@ -391,6 +391,26 @@ def list_cases(
         raise _storage_http_error(exc) from exc
 
 
+@router.delete("/api/cases/{case_id}", tags=["年审项目"], summary="软删除年审项目")
+def delete_case(
+    case_id: int,
+    identity: Identity = Depends(_require_report),
+) -> dict[str, Any]:
+    """Remove one project from the active UI while retaining audit evidence."""
+
+    require_case_access(case_id, identity)
+    _require_project_control(identity)
+    try:
+        return engagements.soft_delete_engagement(
+            case_id,
+            deleted_by=identity.user_id or "system",
+        )
+    except engagements.EngagementNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AnnualAuditStorageError as exc:
+        raise _storage_http_error(exc) from exc
+
+
 @router.post("/api/ingest/case", tags=["年审项目"], summary="按原建案契约创建年审项目")
 def create_case(
     request: CreateEngagementRequest,
@@ -1607,6 +1627,17 @@ def preview_annual_attachment(
                 "content_type": artifact.get("content_type") or "application/vnd.ms-excel",
                 "sheets": sheets,
                 "truncated": len(workbook.sheets()) > 12,
+            })
+        if extension == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(content))
+            return JSONResponse({
+                "kind": "pdf",
+                "file_name": file_name,
+                "content_type": artifact.get("content_type") or "application/pdf",
+                "page_count": len(reader.pages),
+                "message": "PDF 已保留模板原页，并附加本次审计结果说明页。完整版式请下载附件查看。",
             })
         if extension in {".txt", ".md", ".markdown", ".csv"}:
             text = content.decode("utf-8-sig", errors="replace")

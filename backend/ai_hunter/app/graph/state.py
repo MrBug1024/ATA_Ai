@@ -119,6 +119,7 @@ class AuditGraphState(TypedDict, total=False):
     audit_review_stage: str
     active_template_versions: dict[str, str]
     attachment_package: dict[str, Any]
+    attachment_preflight: dict[str, Any]
     messages: Annotated[list[AnyMessage], add_messages]
     # Append-only, display-only conversation log holding the FULL assistant
     # answer per turn. Kept separate from `messages` (which stays lean for LLM

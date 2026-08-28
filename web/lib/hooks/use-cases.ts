@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import useSWR from "swr";
-import { casesKey, listCases, type Case, type CasesPage } from "@/lib/backend/cases";
+import { casesKey, deleteCase, listCases, type Case, type CasesPage } from "@/lib/backend/cases";
 
 export type { Case };
 
@@ -17,6 +17,7 @@ export interface UseCasesResult {
   setKeyword: (k: string) => void;
   retry: () => void;
   refresh: () => void;
+  remove: (caseId: number) => Promise<void>;
 }
 
 export function useCases(): UseCasesResult {
@@ -48,6 +49,12 @@ export function useCases(): UseCasesResult {
     setPageRaw(1);
     mutate();
   }, [mutate]);
+  const remove = useCallback(async (caseId: number) => {
+    await deleteCase(caseId);
+    setCases((current) => current.filter((item) => item.case_id !== caseId));
+    setTotal((current) => Math.max(0, current - 1));
+    await mutate();
+  }, [mutate]);
 
   useEffect(() => {
     if (!data) return;
@@ -70,5 +77,6 @@ export function useCases(): UseCasesResult {
     setKeyword,
     retry,
     refresh,
+    remove,
   };
 }

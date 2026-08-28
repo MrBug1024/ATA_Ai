@@ -224,6 +224,57 @@ def get_engagement(case_id: int, *, settings: Settings | None = None) -> dict[st
     return dict(row)
 
 
+def soft_delete_engagement(
+    case_id: int,
+    *,
+    deleted_by: str = "system",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Hide an engagement from the active project surface without erasing audit data.
+
+    Annual-audit projects are audit records.  A project removal therefore uses
+    the existing ``deleted_at`` tombstone instead of a physical delete so
+    source files, findings, reports, and audit trails remain recoverable by
+    controlled maintenance tooling.
+    """
+
+    resolved = settings or get_settings()
+    actor = str(deleted_by or "system").strip() or "system"
+    with mysql_connection(resolved) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, entity_name, fiscal_year
+                FROM audit_engagement
+                WHERE id = %s AND deleted_at IS NULL
+                FOR UPDATE
+                """,
+                (case_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise EngagementNotFoundError(f"年审项目 {case_id} 不存在")
+            cursor.execute(
+                """
+                UPDATE audit_engagement
+                SET deleted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND deleted_at IS NULL
+                """,
+                (case_id,),
+            )
+        connection.commit()
+
+    return {
+        "case_id": int(row["id"]),
+        "deleted": True,
+        "deleted_by": actor,
+        "message": f"已移除年审项目：{row['name']}",
+        "entity_name": row.get("entity_name") or "",
+        "fiscal_year": int(row.get("fiscal_year") or 0),
+    }
+
+
 def get_engagement_profile(
     case_id: int,
     *,

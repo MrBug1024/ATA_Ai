@@ -330,19 +330,11 @@ def _extract_agent_output(response: dict, *, capability: str = "") -> dict:
 
 
 def _fallback_agent_output(state: AuditGraphState) -> dict:
-    """Placeholder when the agent cannot run."""
-    case_id = state.get("current_case_id", 0)
-    query = state.get("query", "")
-    memory_context = state.get("memory_context", "")
-    report_part_b = resolve_report_part_b(state)
+    """Return a user-readable response when the agent cannot be constructed."""
     return {
         "agent_output": (
-            f"【年审分析暂不可用】\n项目编号={case_id}\n问题={query}\n"
-            f"memory_context={memory_context[:200]}\n"
-            f"case_snapshot={_build_case_snapshot(state)[:200]}\n"
-            f"kg_summary={resolve_kg_snapshot(state).get('summary', '')[:200]}\n"
-            f"report_part_b={report_part_b[:200]}\n"
-            "当前模型不可用，请稍后重试；本轮未写入任何分析结论。"
+            "当前暂时无法完成这项审计分析，因为分析服务未能连接。"
+            "为避免把未经核验的信息当作审计结论，本轮未生成分析结果，请稍后重试。"
         )
     }
 
@@ -361,10 +353,8 @@ def _fallback_domain_agent_output(state: AuditGraphState, capability: str) -> di
     label = labels.get(capability, "领域分析")
     return {
         "agent_output": (
-            f"【{label}降级结果】\n"
-            f"年审项目编号：{state.get('current_case_id', 0)}\n"
-            f"问题：{state.get('query', '')}\n"
-            "当前领域模型不可用，未执行工具调用，请稍后重试。"
+            f"当前暂时无法完成{label}，因为分析服务未能连接。"
+            "为避免输出未经核验的信息，本轮未执行分析，请稍后重试。"
         ),
         "business_line_result": {
             "capability": capability,

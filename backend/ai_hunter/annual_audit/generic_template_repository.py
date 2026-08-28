@@ -33,6 +33,12 @@ ANNUAL_TEMPLATE_USAGE_LABELS = {
     "confirmations": "函证模板（过程资料）",
 }
 
+CORE_ANNUAL_TEMPLATE_USAGES = (
+    "annual_report",
+    "financial_statements",
+    "notes",
+)
+
 # Business-line/template-type keys are intentionally shared by the generic
 # registry.  Only annual_audit is wired to the current AI delivery flow; the
 # other keys keep the registry ready for later business lines without making
@@ -69,6 +75,19 @@ _TEMPLATE_TYPE_ALIASES = {
     "代理记账业务": "bookkeeping",
     "税务申报": "tax_filing",
 }
+
+
+def _json_load(value: Any, default: Any) -> Any:
+    """Decode JSON columns while keeping old rows backward compatible."""
+
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return default
 
 
 def normalize_template_usage(value: str) -> str:
@@ -136,7 +155,28 @@ def _normalize_file(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _template_contract(files: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe the minimum core package without inspecting or changing files."""
+
+    usage_counts: dict[str, int] = {}
+    for file in files:
+        usage = normalize_template_usage(str(file.get("template_usage") or ""))
+        if usage:
+            usage_counts[usage] = usage_counts.get(usage, 0) + 1
+    missing = [usage for usage in CORE_ANNUAL_TEMPLATE_USAGES if not usage_counts.get(usage)]
+    return {
+        "required_usages": list(CORE_ANNUAL_TEMPLATE_USAGES),
+        "present_usages": sorted(usage_counts),
+        "usage_counts": usage_counts,
+        "missing_usages": missing,
+        "ready_for_core_delivery": not missing,
+    }
+
+
 def _normalize_version(row: dict[str, Any], files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    content = _json_load(row.get("content_json"), {})
+    field_schema = _json_load(row.get("field_schema_json"), {})
+    normalized_files = list(files or [])
     return {
         "id": int(row.get("version_id") or row.get("id") or 0),
         "template_id": int(row.get("template_id") or 0),
@@ -149,9 +189,12 @@ def _normalize_version(row: dict[str, Any], files: list[dict[str, Any]] | None =
         "version_no": int(row.get("version_no") or 0),
         "version_label": str(row.get("version_label") or ""),
         "status": str(row.get("version_status") or row.get("status") or "draft"),
+        "content": content if isinstance(content, dict) else {},
+        "field_schema": field_schema if isinstance(field_schema, (dict, list)) else {},
         "content_hash": str(row.get("content_hash") or ""),
-        "file_count": int(row.get("file_count") or len(files or [])),
-        "files": list(files or []),
+        "file_count": int(row.get("file_count") or len(normalized_files)),
+        "files": normalized_files,
+        "template_contract": _template_contract(normalized_files),
         "created_by": str(row.get("version_created_by") or row.get("created_by") or ""),
         "published_by": str(row.get("published_by") or ""),
         "published_at": _safe_value(row.get("published_at")),
@@ -186,7 +229,8 @@ def list_template_versions(*, settings: Settings | None = None) -> dict[str, Any
                 SELECT t.id AS template_id, t.template_code, t.name AS template_name,
                        t.business_line, t.description, t.status AS template_status,
                        t.active_version_no, v.id AS version_id, v.version_no,
-                       v.version_label, v.status AS version_status, v.content_hash,
+                       v.version_label, v.status AS version_status,
+                       v.content_json, v.field_schema_json, v.content_hash,
                        v.created_by AS version_created_by, v.published_by,
                        v.published_at, v.created_at AS version_created_at,
                        (SELECT COUNT(*) FROM annual_audit_template_file f
@@ -197,7 +241,11 @@ def list_template_versions(*, settings: Settings | None = None) -> dict[str, Any
                 ORDER BY v.created_at DESC, v.id DESC
                 """
             )
-            versions = [_normalize_version(dict(row)) for row in cursor.fetchall()]
+            versions = []
+            for row in cursor.fetchall():
+                normalized = dict(row)
+                files = _files_for_version(cursor, int(normalized.get("version_id") or 0))
+                versions.append(_normalize_version(normalized, files))
     return {
         "versions": versions,
         "business_lines": sorted({item["business_line"] for item in versions if item["business_line"]}),
@@ -220,7 +268,8 @@ def get_template_version(
                 SELECT t.id AS template_id, t.template_code, t.name AS template_name,
                        t.business_line, t.description, t.status AS template_status,
                        t.active_version_no, v.id AS version_id, v.version_no,
-                       v.version_label, v.status AS version_status, v.content_hash,
+                       v.version_label, v.status AS version_status,
+                       v.content_json, v.field_schema_json, v.content_hash,
                        v.created_by AS version_created_by, v.published_by,
                        v.published_at, v.created_at AS version_created_at
                 FROM annual_audit_template t
@@ -242,6 +291,7 @@ def create_template_version_record(
     version_label: str = "",
     template_code: str = "",
     description: str = "",
+    field_schema: dict[str, Any] | list[Any] | None = None,
     created_by: str = "system",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -309,7 +359,15 @@ def create_template_version_record(
                    field_schema_json, content_hash, created_by)
                 VALUES (%s, %s, %s, 'draft', %s, %s, %s, %s)
                 """,
-                (int(template["id"]), version_no, label, _json_dump({}), _json_dump({}), content_hash, created_by or "system"),
+                (
+                    int(template["id"]),
+                    version_no,
+                    label,
+                    _json_dump({}),
+                    _json_dump(field_schema or {}),
+                    content_hash,
+                    created_by or "system",
+                ),
             )
         connection.commit()
     return {"template_code": code, "template_name": name, "business_line": line, "version_no": version_no, "version_label": label, "status": "draft", "file_count": 0}
@@ -442,6 +500,26 @@ def activate_template_version(template_code: str, version_no: int, *, published_
             file_count = int((cursor.fetchone() or {}).get("file_count") or 0)
             if not file_count:
                 raise ValueError("版本至少上传一个文件后才能激活")
+            if is_annual_audit_business_line(str(template.get("business_line") or "")):
+                cursor.execute(
+                    """
+                    SELECT DISTINCT template_usage
+                    FROM annual_audit_template_file
+                    WHERE template_version_id = %s AND status = 'active'
+                    """,
+                    (int(target["id"]),),
+                )
+                present = {
+                    normalize_template_usage(str(row.get("template_usage") or ""))
+                    for row in cursor.fetchall()
+                }
+                missing = [usage for usage in CORE_ANNUAL_TEMPLATE_USAGES if usage not in present]
+                if missing:
+                    labels = "、".join(ANNUAL_TEMPLATE_USAGE_LABELS[usage] for usage in missing)
+                    raise ValueError(
+                        f"年度审计模板版本缺少核心交付文件：{labels}。"
+                        "核心交付必须同时配置审计报告、财务报表和财务报表附注。"
+                    )
             aliases = _template_type_aliases(str(template.get("business_line") or ""))
             placeholders = ", ".join(["%s"] * len(aliases))
             cursor.execute(
@@ -514,7 +592,11 @@ def get_active_template_catalog(
         files_by_usage: dict[str, list[dict[str, Any]]] = {}
         for file in detail.get("files") or []:
             usage = normalize_template_usage(str(file.get("template_usage") or ""))
-            if usage not in ANNUAL_TEMPLATE_USAGE_LABELS:
+            # Keep the registry extensible: a future business attachment may
+            # declare its own usage key.  The renderer will still require an
+            # explicit template slot/data mapping before publication; this
+            # catalog layer must not silently discard a valid uploaded file.
+            if not usage:
                 continue
             files_by_usage.setdefault(usage, []).append(file)
         for usage, files in files_by_usage.items():
@@ -523,7 +605,7 @@ def get_active_template_catalog(
             catalog[usage] = {
                 **detail,
                 "template_type": usage,
-                "template_type_label": ANNUAL_TEMPLATE_USAGE_LABELS[usage],
+                "template_type_label": ANNUAL_TEMPLATE_USAGE_LABELS.get(usage, usage),
                 "version_label": detail.get("version_label") or template_version_ref(detail),
                 "version_no": detail.get("version_no"),
                 "files": files,
@@ -535,6 +617,7 @@ def get_active_template_catalog(
 __all__ = [
     "ANNUAL_TEMPLATE_USAGE_LABELS",
     "ANNUAL_TEMPLATE_BUSINESS_LINES",
+    "CORE_ANNUAL_TEMPLATE_USAGES",
     "TEMPLATE_TYPE_LABELS",
     "SUPPORTED_TEMPLATE_EXTENSIONS",
     "activate_template_version",

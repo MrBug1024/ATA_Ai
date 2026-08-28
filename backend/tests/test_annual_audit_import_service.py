@@ -15,6 +15,7 @@ from ai_hunter.annual_audit.import_service import (
     is_audit_workpaper_workbook,
     normalize_sheet_rows,
 )
+from ai_hunter.annual_audit.workpaper_case import summarize_workpaper_sheets
 from ai_hunter.app.graph.nodes.load_chunks import _build_chunk_batch_pages
 from ai_hunter.app.subgraphs.ingest_graph import (
     _build_file_cache_key,
@@ -166,6 +167,24 @@ def test_plain_accounting_export_is_not_mistaken_for_workpaper():
     ]
 
     assert is_audit_workpaper_workbook(sheets) is False
+
+
+def test_complete_case_workpaper_pack_is_indexed_without_becoming_raw_ledger():
+    sheets = [
+        TabularSheet(name="封皮", rows=[["京创会审字[2024]第3999号"]]),
+        TabularSheet(name="C1-2货币资金审定", rows=[["审计结论："], ["√", 2521324.82]]),
+        TabularSheet(name="F1-2主营业务收入审定表", rows=[["审计结论："], ["合计", 48036043.11]]),
+        TabularSheet(name="三级复核", rows=[["审计工作底稿三级复核记录"]]),
+    ] + [TabularSheet(name=f"C9-{index}", rows=[["项目", index]]) for index in range(1, 98)]
+
+    summary = summarize_workpaper_sheets(sheets, file_name="北京有限公司2023年年审底稿.xlsx")
+
+    assert summary["is_complete_case"] is True
+    assert summary["case_pack_type"] == "full_annual_audit_case"
+    assert summary["sheet_count"] == 101
+    assert "financial_statements" not in summary["covered_categories"]
+    assert summary["program_evidence"]["C1"]["has_evidence"] is True
+    assert summary["program_evidence"]["F1"]["has_conclusion"] is True
 
 
 def test_spreadsheet_evidence_extraction_reads_every_sheet_without_remote_ocr():

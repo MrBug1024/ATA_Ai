@@ -5,6 +5,7 @@ from langchain_core.messages.tool import ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from ...settings import get_settings
+from ...response_safety import friendly_no_result_response, sanitize_user_response
 from ..context_loader import (
     resolve_citation_coverage,
     resolve_final_report,
@@ -89,27 +90,27 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     existing_messages = list(state.get("messages") or [])
     existing_summary = (state.get("memory_summary") or "").strip()
     current_case_id = state.get("current_case_id", 0)
-    current_entity_name = state.get("current_entity_name", "")
     parse_summary = (state.get("parse_summary") or "").strip()
     final_report = resolve_final_report(state).strip()
     agent_output = (state.get("agent_output") or "").strip()
     intent = state.get("intent", "drilldown")
 
-    assistant_summary_parts = [
-        f"intent={intent}",
-        f"case_id={current_case_id}",
-    ]
-    if current_entity_name:
-        assistant_summary_parts.append(f"entity_name={current_entity_name}")
-    if parse_summary:
-        assistant_summary_parts.append(f"ingest={parse_summary[:160]}")
-    elif final_report:
-        assistant_summary_parts.append(f"report_generated chars={len(final_report)}")
+    if final_report:
+        summary_line = "已生成本轮审计结果。"
     elif agent_output:
-        assistant_summary_parts.append(f"agent={agent_output[:160]}")
+        summary_line = "已完成本轮分析并返回结果。"
+    elif parse_summary:
+        summary_line = "已完成本轮资料处理。"
+    else:
+        summary_line = "本轮未形成可展示的结果。"
 
-    summary_line = " | ".join(assistant_summary_parts)
-    full_answer = final_report or agent_output or summary_line
+    # ``summary_line`` is only the compact LLM-memory message.  It must never
+    # be used as the display/history answer: doing so previously leaked values
+    # such as ``intent=... | case_id=... | report_generated chars=...``.
+    full_answer = sanitize_user_response(
+        final_report or agent_output or state.get("final_report_summary", ""),
+        fallback=friendly_no_result_response(state),
+    )
 
     # 本轮图谱关联快照：随 assistant 消息一起落库，使刷新历史会话时
     # 角标证据预览 / 覆盖率警告条 / 待补件 badge 不丢失（issue #8）。
@@ -143,6 +144,10 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
                         "file_name",
                         "template_version",
                         "template_fill_status",
+                        "output_file_ext",
+                        "result_placement",
+                        "format_validation",
+                        "audit_result_included",
                         "download_url",
                         "preview_url",
                     )

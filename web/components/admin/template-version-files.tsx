@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRef, useState } from "react";
-import { ArrowLeft, FileUp, RefreshCw, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, FileUp, RefreshCw, Trash2, Zap } from "lucide-react";
 import useSWR from "swr";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -32,6 +32,21 @@ const TEMPLATE_TYPE_LABELS: Record<string, string> = {
   annual_audit: "年度审计",
   bookkeeping: "代理记账",
   tax_filing: "税务业务",
+};
+
+const CORE_USAGE_LABELS: Record<string, string> = {
+  annual_report: "审计报告",
+  financial_statements: "财务报表",
+  notes: "财务报表附注",
+};
+
+const PLACEMENT_LABELS: Record<string, string> = {
+  annual_report: "填充报告正文中的主体、年度、编号和意见草稿位置",
+  financial_statements: "填充科目行及期末/期初、本期/上期金额列",
+  notes: "填充附注正文占位和报表项目表格",
+  management_letter: "仅填充模板显式结果字段或字段映射",
+  audit_workpaper: "过程资料，按模板字段填充",
+  confirmations: "过程资料，按模板字段填充",
 };
 
 function formatBytes(size: number): string {
@@ -94,7 +109,14 @@ export function TemplateVersionFiles({ templateCode, versionNo }: { templateCode
       {error && <Alert variant="destructive"><RefreshCw aria-hidden="true" /><div><AlertTitle>模板版本加载失败</AlertTitle><AlertDescription>{error.message}</AlertDescription></div></Alert>}
       {isLoading && <p className="text-sm text-muted-foreground">正在加载模板文件…</p>}
       {data && <>
-        <div><h2 className="text-xl font-semibold">{TEMPLATE_TYPE_LABELS[data.business_line] || data.business_line}模板 {data.version_label || `v${data.version_no}`}</h2><p className="mt-1 text-sm text-muted-foreground">{TEMPLATE_TYPE_LABELS[data.business_line] || data.business_line} · {data.file_count} 个文件 · {data.status}</p></div>
+        <div>
+          <h2 className="text-xl font-semibold">{TEMPLATE_TYPE_LABELS[data.business_line] || data.business_line}模板 {data.version_label || `v${data.version_no}`}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{TEMPLATE_TYPE_LABELS[data.business_line] || data.business_line} · {data.file_count} 个文件 · {data.status}</p>
+          {data.business_line === "annual_audit" && <div className={`mt-3 flex items-start gap-2 rounded-md border p-3 text-sm ${data.template_contract?.ready_for_core_delivery ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+            {data.template_contract?.ready_for_core_delivery ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> : <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />}
+            <span>{data.template_contract?.ready_for_core_delivery ? "核心三份交付附件已齐全。" : `不能激活：缺少${(data.template_contract?.missing_usages ?? []).map((item) => CORE_USAGE_LABELS[item] ?? item).join("、")}。`}</span>
+          </div>}
+        </div>
         <Card>
           <CardHeader><CardTitle className="text-base">上传模板文件</CardTitle></CardHeader>
           <CardContent className="grid gap-3">
@@ -126,7 +148,7 @@ export function TemplateVersionFiles({ templateCode, versionNo }: { templateCode
           <CardHeader><CardTitle className="text-base">版本文件</CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-2">
             {!data.files.length && <p className="text-sm text-muted-foreground">暂无模板文件。</p>}
-            {data.files.map((file) => <div key={file.id} className="flex flex-wrap items-center justify-between gap-3 rounded border p-3"><div><div className="flex flex-wrap items-center gap-2 font-medium"><span>{file.file_name}</span><Badge variant="outline">{file.file_ext.replace('.', '').toUpperCase() || "未知格式"}</Badge><span className="text-xs font-normal text-muted-foreground">{formatBytes(file.file_size)}</span></div><div className="mt-1 text-xs text-muted-foreground">用途：{file.template_usage_label || file.template_usage || "未备注"} · {file.remark || "无备注"} · 生成时保持此文件格式</div></div>{canEdit && <Button type="button" size="sm" variant="ghost" disabled={busyKey === `delete:${file.id}`} onClick={() => void removeFile(file.id)}><Trash2 data-icon="inline-start" />删除</Button>}</div>)}
+            {data.files.map((file) => <div key={file.id} className="flex flex-wrap items-center justify-between gap-3 rounded border p-3"><div><div className="flex flex-wrap items-center gap-2 font-medium"><span>{file.file_name}</span><Badge variant="outline">{file.file_ext.replace('.', '').toUpperCase() || "未知格式"}</Badge><span className="text-xs font-normal text-muted-foreground">{formatBytes(file.file_size)}</span></div><div className="mt-1 text-xs text-muted-foreground">用途：{file.template_usage_label || file.template_usage || "未备注"} · {file.remark || "无备注"} · 交付保持 {file.file_ext.toLowerCase()} 格式</div><div className="mt-1 text-xs text-foreground/70">结果落点：{PLACEMENT_LABELS[file.template_usage] || "模板显式字段或结构化表格位置"}；不会追加整段 AI 对话。</div></div>{canEdit && <Button type="button" size="sm" variant="ghost" disabled={busyKey === `delete:${file.id}`} onClick={() => void removeFile(file.id)}><Trash2 data-icon="inline-start" />删除</Button>}</div>)}
           </CardContent>
         </Card>
       </>}

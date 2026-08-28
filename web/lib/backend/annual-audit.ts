@@ -42,6 +42,9 @@ export interface AnnualAuditDocumentCategory {
   code: string;
   name: string;
   uploaded: boolean;
+  raw_uploaded?: boolean;
+  covered_by_case_workpaper?: boolean;
+  coverage_basis?: "uploaded" | "case_workpaper" | "missing" | string;
   file_count: number;
   record_count: number;
   last_uploaded_at?: string | null;
@@ -333,6 +336,14 @@ export interface GenericTemplateFile {
   created_at?: string | null;
 }
 
+export interface GenericTemplateContract {
+  required_usages: string[];
+  present_usages: string[];
+  usage_counts: Record<string, number>;
+  missing_usages: string[];
+  ready_for_core_delivery: boolean;
+}
+
 export interface GenericTemplateVersion {
   id: number;
   template_id: number;
@@ -348,6 +359,7 @@ export interface GenericTemplateVersion {
   content_hash: string;
   file_count: number;
   files: GenericTemplateFile[];
+  template_contract?: GenericTemplateContract;
   created_by: string;
   published_by: string;
   published_at?: string | null;

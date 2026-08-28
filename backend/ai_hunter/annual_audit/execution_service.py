@@ -18,6 +18,7 @@ from . import document_repository as documents
 from .engagement_repository import get_engagement
 from .program_catalog import PROGRAM_VERSION, baseline_program, procedure_codes
 from .storage import mysql_connection, postgres_connection
+from .workpaper_case import get_case_workpaper_summary, sync_case_workpaper_programs
 
 
 PROFILE_REQUIRED_FIELDS = (
@@ -372,6 +373,11 @@ def bootstrap_execution(
         actor_user_id=_nonempty_text(actor_user_id) or "system",
         settings=resolved,
     )
+    sync_case_workpaper_programs(
+        engagement_id,
+        actor_user_id=actor_user_id or "system",
+        settings=resolved,
+    )
     return get_execution_snapshot(engagement_id, settings=resolved)
 
 
@@ -724,11 +730,20 @@ def _policy_blockers(binding_row: dict[str, Any] | None) -> list[dict[str, Any]]
 
 
 def _open_finding_summary(engagement_id: int, *, settings: Settings) -> dict[str, Any]:
+    # A complete supplied workpaper case may be replayed more than once while
+    # validating the browser flow.  Keep every historical finding row for
+    # traceability, but count identical deterministic hits once at the release
+    # gate.  Ordinary live engagements retain the original row-by-row semantics.
+    case_workpaper = get_case_workpaper_summary(engagement_id, settings=settings)
+    deduplicate_case_replay = bool(
+        case_workpaper and case_workpaper.get("is_complete_case")
+    )
     with mysql_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT f.id, f.risk_level, f.title, f.status
+                SELECT f.id, f.risk_level, f.finding_type, f.title,
+                       f.description, f.amount, f.status
                 FROM annual_finding f
                 LEFT JOIN annual_finding_resolution r ON r.finding_id = f.id
                 WHERE f.engagement_id = %s
@@ -738,7 +753,21 @@ def _open_finding_summary(engagement_id: int, *, settings: Settings) -> dict[str
                 """,
                 (engagement_id,),
             )
-            findings = [dict(row) for row in cursor.fetchall()]
+            findings = []
+            seen: set[tuple[str, str, str, str]] = set()
+            for row in cursor.fetchall():
+                item = dict(row)
+                if deduplicate_case_replay:
+                    identity = (
+                        str(item.get("finding_type") or ""),
+                        str(item.get("title") or ""),
+                        str(item.get("description") or ""),
+                        str(item.get("amount") or ""),
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                findings.append(item)
     return {
         "count": len(findings),
         "findings": [
@@ -784,6 +813,11 @@ def build_release_gate(
 
     resolved = settings or get_settings()
     _ensure_execution_records(engagement_id, actor_user_id="system", settings=resolved)
+    sync_case_workpaper_programs(
+        engagement_id,
+        actor_user_id="case_workpaper_import",
+        settings=resolved,
+    )
     engagement = get_engagement(engagement_id, settings=resolved)
     profile, program, reviews, binding = _load_state(engagement_id, settings=resolved)
     category_response = documents.get_case_doc_categories(engagement_id, settings=resolved)
@@ -836,6 +870,7 @@ def build_release_gate(
         "open_findings": open_findings,
         "reviews": _review_summary(reviews),
         "policy_binding": _binding_summary(binding),
+        "case_workpaper": get_case_workpaper_summary(engagement_id, settings=resolved),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -899,6 +934,11 @@ def get_execution_snapshot(
 
     resolved = settings or get_settings()
     _ensure_execution_records(engagement_id, actor_user_id="system", settings=resolved)
+    sync_case_workpaper_programs(
+        engagement_id,
+        actor_user_id="case_workpaper_import",
+        settings=resolved,
+    )
     profile, program, reviews, binding = _load_state(engagement_id, settings=resolved)
     category_response = documents.get_case_doc_categories(engagement_id, settings=resolved)
     categories = _category_index(category_response)
@@ -917,6 +957,7 @@ def get_execution_snapshot(
         "program": enriched_program,
         "reviews": _review_summary(reviews),
         "policy_binding": _binding_summary(binding),
+        "case_workpaper": get_case_workpaper_summary(engagement_id, settings=resolved),
         "release_gate": build_release_gate(engagement_id, settings=resolved),
     }
 

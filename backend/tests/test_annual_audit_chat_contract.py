@@ -12,6 +12,7 @@ from ai_hunter.app.api.routes_chat import (
     _build_graph_input,
     _merge_response_final_state,
     _require_existing_annual_engagement,
+    _sanitize_history_assistant_content,
     _stream_chat_events,
 )
 from ai_hunter.app.api import routes_chat
@@ -64,6 +65,40 @@ def test_missing_thread_detail_uses_safe_audit_history_guidance(monkeypatch):
     assert "当前年审存储中不可用" in detail
     assert "不能作为审计依据" in detail
     assert "other-tenant-thread" not in detail
+
+
+def test_legacy_machine_summary_is_hidden_from_history(monkeypatch):
+    monkeypatch.setattr(routes_chat, "resolve_final_report", lambda _state: "")
+
+    content = _sanitize_history_assistant_content(
+        "intent=drilldown | case_id=2 | report_generated chars=6",
+        final_report_ref="",
+    )
+
+    assert "intent=" not in content
+    assert "case_id=" not in content
+    assert "历史回复" in content
+
+
+def test_final_api_response_replaces_machine_summary_with_friendly_text():
+    payload = ChatRequest(
+        thread_id="annual-thread-safe-response",
+        query="执行年度审计，生成底稿",
+        current_case_id=2,
+        stream=False,
+    )
+
+    response = _build_final_response(
+        payload,
+        {
+            "current_case_id": 2,
+            "final_report": "intent=drilldown | case_id=2 | report_generated chars=6",
+        },
+    )
+
+    assert "intent=" not in response.final_report
+    assert "case_id=" not in response.final_report
+    assert "审计" in response.final_report
 
 
 def test_chat_input_keeps_audited_entity_fields_in_graph_state():

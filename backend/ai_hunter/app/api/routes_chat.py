@@ -152,6 +152,14 @@ from ..graph.routers import extract_case_id, is_explicit_case_create_request
 from ..graph.state import FileItem
 from ..logging_utils import build_request_logger, preview_text
 from ..repositories import get_conversation_message_repo
+from ..response_safety import (
+    LEGACY_UNAVAILABLE_RESPONSE,
+    filter_stream_debug_text,
+    friendly_execution_failure_response,
+    friendly_no_result_response,
+    is_internal_debug_response,
+    sanitize_user_response,
+)
 from ..services.conversation_service import get_conversation_service
 from ..settings import get_settings
 from ..utils.pg_lock import thread_advisory_lock
@@ -478,14 +486,27 @@ async def invoke_chat(payload: ChatRequest, request: Request,
             )
 
         graph_input = _build_graph_input(payload, identity)
-        result = await anyio.to_thread.run_sync(
-            lambda: _run_graph_with_logging(
-                graph_input,
-                payload.thread_id,
-                logger,
-                identity,
+        try:
+            result = await anyio.to_thread.run_sync(
+                lambda: _run_graph_with_logging(
+                    graph_input,
+                    payload.thread_id,
+                    logger,
+                    identity,
+                )
             )
-        )
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("chat_invoke_graph_failed")
+            return _build_final_response(
+                payload,
+                {
+                    "current_case_id": payload.current_case_id,
+                    "final_report": friendly_execution_failure_response(),
+                },
+                section_codes,
+            )
 
     logger.info(
         "chat_invoke_completed intent=%s capability=%s route_source=%s entity=%s final_report_chars=%s",
@@ -714,6 +735,7 @@ async def _stream_chat_events(
             streaming_graph = await _ensure_async_graph()
             started_sections: set[str] = set()
             reasoning_stream_states: dict[str, dict[str, str]] = {}
+            default_stream_guard: dict[str, Any] = {}
             terminal_response_state: dict[str, Any] = {}
             async for event in streaming_graph.astream_events(
                 graph_input,
@@ -747,15 +769,16 @@ async def _stream_chat_events(
                     if name == "classify_intent" and identity is not None:
                         try:
                             _require_route_module(identity, node_payload)
-                        except HTTPException as exc:
+                        except HTTPException:
                             yield _sse_event(
-                                "error",
+                                "final",
                                 {
                                     "thread_id": payload.thread_id,
-                                    "status_code": exc.status_code,
-                                    "message": exc.detail,
+                                    "current_case_id": payload.current_case_id,
+                                    "final_report": "当前账号没有权限执行这项年审操作，请联系管理员开通相应权限。",
                                 },
                             )
+                            yield _sse_event("done", {"thread_id": payload.thread_id})
                             return
                     logger.info(
                         "chat_stream_node node=%s summary=%s",
@@ -811,11 +834,17 @@ async def _stream_chat_events(
                         if part_kind == "reasoning":
                             yield _sse_event("reasoning_chunk", {"text": part_text})
                         else:
-                            yield _sse_event("text_chunk", {"text": part_text})
+                            safe_text = filter_stream_debug_text(part_text, default_stream_guard)
+                            if safe_text:
+                                yield _sse_event("text_chunk", {"text": safe_text})
                     if isinstance(reasoning, str) and reasoning:
                         # 思考过程走独立事件，前端可与正文 text_chunk 分区/折叠渲染。
                         yield _sse_event("reasoning_chunk", {"text": reasoning})
                     continue
+
+            buffered_stream_text = str(default_stream_guard.get("buffer") or "")
+            if buffered_stream_text and not default_stream_guard.get("suppressed"):
+                yield _sse_event("text_chunk", {"text": buffered_stream_text})
 
             # Fetch the complete final state from the checkpointer so that
             # fields only present in the checkpoint (trace_items, citation_coverage,
@@ -851,12 +880,14 @@ async def _stream_chat_events(
         except Exception as exc:
             logger.exception("chat_stream_failed error=%s", exc)
             yield _sse_event(
-                "error",
+                "final",
                 {
                     "thread_id": payload.thread_id,
-                    "message": str(exc),
+                    "current_case_id": payload.current_case_id,
+                    "final_report": friendly_execution_failure_response(),
                 },
             )
+            yield _sse_event("done", {"thread_id": payload.thread_id})
 
 
 def _run_graph_with_logging(
@@ -937,7 +968,10 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
     visible_section_codes=None → 不过滤（向后兼容）；否则按可见 section_code 过滤报告段落。
     """
     unresolved_items = resolve_unresolved_graph_items(result)
-    final_report = resolve_final_report(result) or result.get("final_report", "")
+    final_report = sanitize_user_response(
+        resolve_final_report(result) or result.get("final_report", ""),
+        fallback=friendly_no_result_response(result),
+    )
     if visible_section_codes is not None:
         final_report = filter_report_text_by_sections(final_report, visible_section_codes)
     return ChatInvokeResponse(
@@ -1173,8 +1207,7 @@ def _summarize_node_update(node_name: str, payload: Any) -> str:
         created = payload.get("task_create_result", {})
         return f"督办任务已处理：{str(created)[:120]}"
     if node_name == "drilldown_agent_graph":
-        agent_output = (payload.get("agent_output") or "").strip()
-        return f"下钻追问已完成：{agent_output[:80]}" if agent_output else "下钻追问已完成"
+        return "下钻分析已完成"
     if node_name in {"operator_subgraph", "audit_analysis_subgraph", "supervision_subgraph", "common_subgraph"}:
         decision = payload.get("route_decision") or {}
         capability = str(decision.get("capability") or "") if isinstance(decision, dict) else ""
@@ -1182,8 +1215,7 @@ def _summarize_node_update(node_name: str, payload: Any) -> str:
             return "业务线完整审计已完成"
         if capability == "audit.reaudit":
             return "业务线修正重审已完成"
-        agent_output = (payload.get("agent_output") or "").strip()
-        return f"业务线能力执行已完成：{agent_output[:80]}" if agent_output else "业务线能力执行已完成"
+        return "相关审计处理已完成"
     if node_name == "finalize_answer":
         return "已整理最终答复"
     if node_name == "persist_conversation_memory":
@@ -1215,15 +1247,20 @@ def _dehydrate_node_payload(node_name: str, payload: Any) -> dict[str, Any]:
         "report_part_a_summary",
         "report_part_b_summary",
         "final_report_summary",
-        "memory_context",
         "task_create_result",
-        "agent_output",
     ):
         value = payload.get(key)
         if isinstance(value, str) and value:
             compact[key] = value[:400]
         elif value not in (None, "", [], {}):
             compact[key] = value
+
+    # A node trace is diagnostic metadata, not a second answer channel. Do not
+    # echo raw agent output here: an old or failed node could otherwise leak a
+    # machine summary into the visible trace panel.
+    agent_output = sanitize_user_response(payload.get("agent_output"), fallback="")
+    if agent_output:
+        compact["agent_output"] = agent_output[:400]
 
     if "categories_found" in payload:
         compact["categories_found"] = payload.get("categories_found", [])[:10]
@@ -1483,7 +1520,11 @@ async def get_thread_messages(thread_id: str,
         # 报告段落分权：历史里 assistant 报告正文按可见 section_code 过滤
         visible_sections = visible_report_sections(identity)
         for msg in messages:
-            if msg.get("role") == "assistant" and msg.get("content"):
+            if msg.get("role") == "assistant":
+                msg["content"] = _sanitize_history_assistant_content(
+                    msg.get("content"),
+                    final_report_ref=str(msg.get("final_report_ref") or ""),
+                )
                 msg["content"] = filter_report_text_by_sections(msg["content"], visible_sections)
 
         message_items = [MessageItem(**msg) for msg in messages]
@@ -1642,6 +1683,26 @@ def _turn_graph_context(raw_context: Any) -> dict[str, Any]:
     }
 
 
+def _sanitize_history_assistant_content(
+    content: Any,
+    *,
+    final_report_ref: str = "",
+) -> str:
+    """Hide legacy orchestration summaries while recovering real report text."""
+
+    raw = str(content or "")
+    if not is_internal_debug_response(raw):
+        return sanitize_user_response(raw, fallback=LEGACY_UNAVAILABLE_RESPONSE)
+
+    # Some older replies have a valid heavy-payload reference even though the
+    # dedicated history row accidentally stored the compact debug summary.
+    # Prefer that authoritative report when it is still available.
+    recovered = resolve_final_report({"final_report_ref": final_report_ref})
+    if recovered and not is_internal_debug_response(recovered):
+        return recovered
+    return LEGACY_UNAVAILABLE_RESPONSE
+
+
 def _recover_legacy_attachment_package(case_id: int, content: str) -> dict[str, Any]:
     """Recover package actions for replies written before metadata persistence.
 
@@ -1684,6 +1745,10 @@ def _recover_legacy_attachment_package(case_id: int, content: str) -> dict[str, 
                         "file_name",
                         "template_version",
                         "template_fill_status",
+                        "output_file_ext",
+                        "result_placement",
+                        "format_validation",
+                        "audit_result_included",
                     )
                     if item.get(key) is not None
                 }
@@ -1756,10 +1821,14 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                     if recovered_package:
                         graph_context["attachment_package"] = recovered_package
                         graph_context["audit_review_stage"] = "attachments_generated"
+                assistant_content = _sanitize_history_assistant_content(
+                    a.get("content"),
+                    final_report_ref=str(a.get("final_report_ref") or ""),
+                )
                 assistants.append(
                     AssistantTurnItem(
                         turn_id=t["turn_id"],
-                        content=filter_report_text_by_sections(a["content"], visible_sections),
+                        content=filter_report_text_by_sections(assistant_content, visible_sections),
                         final_report_ref=a.get("final_report_ref") or "",
                         intent=a.get("intent") or "",
                         case_id=a.get("case_id") or 0,

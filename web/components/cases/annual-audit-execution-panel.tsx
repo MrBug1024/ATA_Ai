@@ -1063,13 +1063,13 @@ function DocumentMatrix({ categories }: { categories: AnnualAuditDocumentCategor
       <div className="flex items-center gap-2">
         <FileCheck2 className="size-4 text-muted-foreground" />
         <h2 id="annual-documents-title" className="text-sm font-medium">资料类别矩阵</h2>
-        <span className="text-xs text-muted-foreground">{ordered.filter((item) => item.uploaded).length}/{ordered.length} 已上传</span>
+        <span className="text-xs text-muted-foreground">{ordered.filter((item) => item.uploaded || item.covered_by_case_workpaper).length}/{ordered.length} 已覆盖</span>
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
         {ordered.map((category) => (
-          <Badge key={category.code} variant={category.uploaded ? "outline" : "destructive"} title={category.code}>
-            {category.uploaded ? <CheckCircle2 data-icon="inline-start" /> : <FileWarning data-icon="inline-start" />}
-            {category.name} {category.uploaded ? `(${category.file_count})` : ""}
+          <Badge key={category.code} variant={category.uploaded || category.covered_by_case_workpaper ? "outline" : "destructive"} title={category.code}>
+            {category.uploaded || category.covered_by_case_workpaper ? <CheckCircle2 data-icon="inline-start" /> : <FileWarning data-icon="inline-start" />}
+            {category.name} {category.uploaded ? `(${category.file_count})` : category.covered_by_case_workpaper ? "（主底稿）" : ""}
           </Badge>
         ))}
       </div>

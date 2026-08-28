@@ -275,7 +275,7 @@ def test_annual_report_graph_node_returns_original_agent_output_contract(monkeyp
     )
 
     assert result["agent_output"].startswith("年审报告初稿正文")
-    assert "报告草稿 v2" in result["agent_output"]
+    assert "报告草稿版本：v2" in result["agent_output"]
     assert "F1-2 v3" in result["agent_output"]
     assert result["response_trace_candidates"][0]["claim_text"] == "本轮现金异常"
     assert result["extracted_tasks"] == []

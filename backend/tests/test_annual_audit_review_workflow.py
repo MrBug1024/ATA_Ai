@@ -44,4 +44,22 @@ def test_attachment_confirmation_routes_to_the_existing_report_capability():
 
     assert decision is not None
     assert decision.capability == "audit.full"
-    assert decision.action == "generate_attachments"
+    # The first confirmation opens a template/data preflight.  File creation
+    # requires the separate explicit mapping confirmation.
+    assert decision.action == "prepare_attachments"
+
+
+def test_regenerate_attachment_is_available_without_an_in_memory_stage():
+    """A browser action remains usable after the graph service restarts."""
+
+    decision = _review_confirmation_route(
+        {
+            "current_case_id": 7,
+            "audit_review_stage": "",
+            "query": "重新生成附件",
+        }
+    )
+
+    assert decision is not None
+    assert decision.capability == "audit.full"
+    assert decision.action == "prepare_attachments"

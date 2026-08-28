@@ -46,10 +46,26 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function CasesPage() {
-  const { cases, isLoading, error, total, page, setPage, keyword, setKeyword, retry, refresh } = useCases();
+  const { cases, isLoading, error, total, page, setPage, keyword, setKeyword, retry, refresh, remove } = useCases();
   const [inputValue, setInputValue] = useState("");
   const [materialCase, setMaterialCase] = useState<Case | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [removingCaseId, setRemovingCaseId] = useState<number | null>(null);
+
+  const handleRemove = async (caseItem: Case) => {
+    const confirmed = window.confirm(
+      `确认移除年审项目“${caseItem.case_name}”吗？\n\n项目会从当前项目列表隐藏，原始材料、审计底稿和审计留痕会保留。`
+    );
+    if (!confirmed) return;
+    setRemovingCaseId(caseItem.case_id);
+    try {
+      await remove(caseItem.case_id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "移除年审项目失败");
+    } finally {
+      setRemovingCaseId(null);
+    }
+  };
 
   useEffect(() => {
     const t = setTimeout(() => setKeyword(inputValue), 300);
@@ -199,6 +215,14 @@ export default function CasesPage() {
                           >
                             项目工作台 →
                           </Link>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemove(c)}
+                            disabled={removingCaseId === c.case_id}
+                            className="text-xs text-destructive/70 hover:text-destructive transition-colors whitespace-nowrap disabled:opacity-50"
+                          >
+                            {removingCaseId === c.case_id ? "移除中…" : "移除项目"}
+                          </button>
                         </div>
                       </td>
                     </tr>

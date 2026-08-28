@@ -9,6 +9,7 @@ from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
 from .storage import mysql_connection, postgres_connection
+from .workpaper_case import case_workpaper_category_codes, get_case_workpaper_summary
 
 
 _STRUCTURED_TABLES = {
@@ -71,6 +72,8 @@ def get_case_doc_categories(
     resolved = settings or get_settings()
     get_engagement(engagement_id, settings=resolved)
     record_counts = _structured_record_counts(engagement_id, resolved)
+    case_workpaper = get_case_workpaper_summary(engagement_id, settings=resolved)
+    case_covered_categories = case_workpaper_category_codes(case_workpaper)
     with postgres_connection(resolved) as connection:
         rows = connection.execute(
             """
@@ -94,7 +97,9 @@ def get_case_doc_categories(
         code = str(row["code"])
         file_count = int(row["file_count"] or 0)
         record_count = int(record_counts.get(code, 0))
-        uploaded = file_count > 0 or record_count > 0
+        raw_uploaded = file_count > 0 or record_count > 0
+        covered_by_case_workpaper = code in case_covered_categories
+        uploaded = raw_uploaded or covered_by_case_workpaper
         if not uploaded:
             missing.append(code)
         categories.append(
@@ -102,6 +107,11 @@ def get_case_doc_categories(
                 "code": code,
                 "name": row["name"],
                 "uploaded": uploaded,
+                "raw_uploaded": raw_uploaded,
+                "covered_by_case_workpaper": covered_by_case_workpaper,
+                "coverage_basis": (
+                    "uploaded" if raw_uploaded else "case_workpaper" if covered_by_case_workpaper else "missing"
+                ),
                 "file_count": file_count,
                 "record_count": record_count,
                 "last_uploaded_at": (

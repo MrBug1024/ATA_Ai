@@ -30,7 +30,6 @@ DEFAULT_ATTACHMENT_TYPES = (
     "annual_report",
     "financial_statements",
     "notes",
-    "management_letter",
 )
 
 
@@ -190,6 +189,7 @@ def generate_annual_attachment_package(
     created_by: str = "ai_agent",
     requested_types: list[str] | None = None,
     settings: Settings | None = None,
+    preflight_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate all confirmed annual-audit attachments from active templates."""
 
@@ -203,6 +203,7 @@ def generate_annual_attachment_package(
         created_by=created_by,
         requested_types=requested_types,
         settings=settings,
+        preflight_plan=preflight_plan,
     )
 
     resolved = settings or get_settings()

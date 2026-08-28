@@ -39,8 +39,8 @@ def _parse_tool_output(tool_name: str, raw: str) -> dict[str, Any]:
         payload = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         payload = {
-            "summary": f"{tool_name} 返回了无法解析的结果。",
-            "key_facts": {"raw": str(raw or "")[:240]},
+            "summary": "系统返回了无法解析的审计数据。",
+            "key_facts": {},
             "truncated": True,
             "next_hint": "请稍后重试。",
         }

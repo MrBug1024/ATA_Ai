@@ -25,6 +25,11 @@ from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
 from .storage import mysql_connection, postgres_connection
+from .workpaper_case import (
+    CASE_WORKPAPER_SOURCE_TYPE,
+    persist_case_workpaper_summary,
+    summarize_workpaper_sheets,
+)
 
 
 DatasetType = Literal[
@@ -750,12 +755,43 @@ def import_uploaded_files(
             source_ref = str(file_item.get("storage_ref") or file_item.get("content_ref") or file_name)
             sheets = read_tabular_sheets(file_name, data)
             if is_audit_workpaper_workbook(sheets):
-                skipped.append(
-                    {
-                        "file_name": file_name,
-                        "reason": "识别为审计底稿/模板，仅进入原知识与模板链路，不写结构化事实表",
-                    }
-                )
+                case_summary = summarize_workpaper_sheets(sheets, file_name=file_name)
+                if case_summary.get("is_complete_case"):
+                    replay = persist_case_workpaper_summary(
+                        engagement_id=engagement_id,
+                        source_ref=source_ref,
+                        source_sha256=source_sha256,
+                        summary=case_summary,
+                        created_by=actor or "ai_agent",
+                        settings=resolved,
+                    )
+                    imported.append(
+                        {
+                            "file_name": file_name,
+                            "sheet_count": int(case_summary.get("sheet_count") or 0),
+                            "row_count": int(case_summary.get("nonempty_row_count") or 0),
+                            "dataset": CASE_WORKPAPER_SOURCE_TYPE,
+                            "dataset_label": "完整年度审计案例主底稿",
+                            "deduplicated": bool(replay.get("deduplicated")),
+                            "case_pack": True,
+                        }
+                    )
+                    skipped.append(
+                        {
+                            "file_name": file_name,
+                            "reason": (
+                                "识别为完整年度审计案例主底稿：保留为可追溯工作底稿证据，"
+                                "不把派生审计表误写入原始账务事实表"
+                            ),
+                        }
+                    )
+                else:
+                    skipped.append(
+                        {
+                            "file_name": file_name,
+                            "reason": "识别为审计底稿/模板，仅进入原知识与模板链路，不写结构化事实表",
+                        }
+                    )
                 continue
             matched = 0
             for sheet in sheets:

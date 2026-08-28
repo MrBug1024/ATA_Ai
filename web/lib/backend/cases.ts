@@ -1,5 +1,5 @@
 import { casesUrl } from "@/lib/api/client";
-import { getJson, postJson } from "./http";
+import { deleteJson, getJson, postJson } from "./http";
 import type {
   CaseDocCategoriesResp,
   DocCategoriesResp,
@@ -51,6 +51,7 @@ export interface CreateCasePayload {
   case_name: string;
   case_type: string;
   entity_name: string;
+  company_id?: string;
   entity_uscc?: string;
   fiscal_year?: number;
 }
@@ -59,6 +60,10 @@ export async function createCase(
   payload: CreateCasePayload
 ): Promise<{ case_id: number; message?: string }> {
   return postJson(casesUrl("/api/ingest/case"), payload, "创建失败");
+}
+
+export async function deleteCase(caseId: number): Promise<void> {
+  return deleteJson(casesUrl(`/api/cases/${caseId}`), "移除年审项目失败");
 }
 
 // ── Doc categories ───────────────────────────────────────────────────────────

@@ -17,6 +17,9 @@ export interface CaseDocCategoryItem {
   code: string;
   name: string;
   uploaded: boolean;
+  raw_uploaded?: boolean;
+  covered_by_case_workpaper?: boolean;
+  coverage_basis?: "uploaded" | "case_workpaper" | "missing" | string;
   file_count: number;
   record_count: number;
   last_uploaded_at: string | null;
@@ -32,7 +35,9 @@ export interface CaseDocCategoriesResp {
 export interface ValidateDocCategoryReq {
   case_id: number;
   doc_category: string;
-  filename: string;
+  file_names?: string[];
+  /** Legacy single-file callers are still accepted by the client contract. */
+  filename?: string;
   preview_text?: string;
 }
 

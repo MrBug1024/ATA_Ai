@@ -461,6 +461,7 @@ def finalize_annual_ingest(state: AuditGraphState) -> AuditGraphState:
         "journal_entry": "journal_entries",
         "receivable_item": "receivables",
         "bank_transaction": "bank_statements",
+        "audit_workpaper_pack": "audit_workpapers",
     }
     categories = [
         dataset_categories[item]
