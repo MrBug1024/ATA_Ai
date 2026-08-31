@@ -66,26 +66,6 @@ MIGRATIONS = (
         SQL_DIR / "annual_audit_mysql_v11.sql",
         "immutable annual report citation delivery references",
     ),
-    (
-        "012",
-        SQL_DIR / "annual_audit_mysql_v12.sql",
-        "versioned annual-audit templates and confirmed attachment packages",
-    ),
-    (
-        "013",
-        SQL_DIR / "annual_audit_mysql_v13.sql",
-        "file-backed annual-audit template versions",
-    ),
-    (
-        "014",
-        SQL_DIR / "annual_audit_mysql_v14.sql",
-        "generic template version and file management",
-    ),
-    (
-        "015",
-        SQL_DIR / "annual_audit_mysql_v15.sql",
-        "normalize selectable template types and annual-audit type key",
-    ),
 )
 
 POSTGRES_MIGRATIONS = (

@@ -299,6 +299,26 @@ def query_tasks(state: AuditGraphState) -> dict[str, Any]:
     }
 
 
+def answer_common_general(state: AuditGraphState) -> dict[str, Any]:
+    case_id = _case_id(state)
+    case_line = f"当前已绑定年审项目 {case_id}。" if case_id > 0 else "当前尚未绑定年审项目。"
+    output = (
+        "你好。我可以直接理解自然语言中的年度审计目标，并在同一会话里继续处理上一轮结果。\n\n"
+        "我能处理项目与资料状态、资料完整性校验、完整年审、审计循环下钻、证据回溯、"
+        "审计任务查询。对于会改写报告或任务的操作，我会先确认项目和必要参数。\n\n"
+        + case_line
+    )
+    return {
+        "agent_output": output,
+        "business_line_result": {
+            "capability": "common.general",
+            "read_only": True,
+            "ok": True,
+            "tool_calls": [],
+        },
+    }
+
+
 READ_ONLY_EXECUTOR_NODES: dict[str, ReadNode] = {
     "query_case_profile": query_case_profile,
     "query_material_status": query_material_status,
@@ -306,6 +326,7 @@ READ_ONLY_EXECUTOR_NODES: dict[str, ReadNode] = {
     "query_evidence": query_evidence,
     "query_workflow_guide": query_workflow_guide,
     "query_tasks": query_tasks,
+    "answer_common_general": answer_common_general,
 }
 
 READ_ONLY_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
@@ -319,4 +340,5 @@ READ_ONLY_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "query_evidence": (),
     "query_workflow_guide": (),
     "query_tasks": ("list_annual_tasks",),
+    "answer_common_general": (),
 }

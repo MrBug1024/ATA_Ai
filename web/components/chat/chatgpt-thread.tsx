@@ -45,11 +45,9 @@ import {
 } from "@/lib/assistant-ui/evidence-context";
 import { useDebugMode } from "@/lib/hooks/use-debug-mode";
 import { isLegacyUnauditableAuditDrilldownReply } from "@/lib/assistant-ui/annual-audit-reply-safety";
-import { AnnualAuditResultCard, type AnnualAttachmentPackage } from "./annual-audit-result-card";
 
 interface ChatThreadProps {
   suggestions?: string[];
-  caseId?: number;
   hasInitialMessages?: boolean;
   initialComposerValue?: string;
   attachmentDisabled?: boolean;
@@ -97,7 +95,6 @@ function ComposerInitializer({ value }: { value: string }) {
 
 export function ChatThread({
   suggestions,
-  caseId,
   hasInitialMessages,
   initialComposerValue,
   attachmentDisabled,
@@ -136,7 +133,7 @@ export function ChatThread({
           <ThreadWelcome suggestions={suggestions} />
         </AuiIf>
 
-        <ThreadPrimitive.Messages>{() => <ThreadMessage caseId={caseId} />}</ThreadPrimitive.Messages>
+        <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
 
         <ThreadPrimitive.ViewportFooter className="relative sticky bottom-0 mx-auto mt-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-3 overflow-visible rounded-t-3xl bg-background pb-4">
           <div
@@ -284,12 +281,12 @@ const ComposerAction: FC<{
   </div>
 );
 
-const ThreadMessage: FC<{ caseId?: number }> = ({ caseId }) => {
+const ThreadMessage: FC = () => {
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
   if (isEditing) return <EditComposer />;
   if (role === "user") return <UserMessage />;
-  return <AssistantMessage caseId={caseId} />;
+  return <AssistantMessage />;
 };
 
 const UserMessage: FC = () => (
@@ -360,7 +357,7 @@ const ReasoningText: FC<{ text: string }> = ({ text }) => {
   );
 };
 
-const AssistantMessage: FC<{ caseId?: number }> = ({ caseId }) => {
+const AssistantMessage: FC = () => {
   const thinkingMap = useContext(ThinkingContext);
   const evidenceContext = useEvidenceContext();
   const messageId = useAuiState((s) => s.message.id);
@@ -375,24 +372,6 @@ const AssistantMessage: FC<{ caseId?: number }> = ({ caseId }) => {
       | undefined;
     const value = custom?.finalReportRef;
     return typeof value === "string" && value.trim().length > 0 ? value : null;
-  });
-  const annualAuditStage = useAuiState((s) => {
-    const custom = s.message.metadata.custom as {
-      auditReviewStage?: unknown;
-    } | undefined;
-    return typeof custom?.auditReviewStage === "string" ? custom.auditReviewStage : "";
-  });
-  const annualAttachmentPackage = useAuiState((s) => {
-    const custom = s.message.metadata.custom as {
-      attachmentPackage?: unknown;
-    } | undefined;
-    return custom?.attachmentPackage as AnnualAttachmentPackage | undefined;
-  });
-  const messageContent = useAuiState((s) => {
-    if (typeof s.message.content === "string") return s.message.content;
-    return (s.message.content ?? [])
-      .map((part) => (typeof part === "string" ? part : "text" in part ? part.text : ""))
-      .join("\n");
   });
   const thinking = messageId
     ? thinkingMap.get(messageId) ?? (isRunning ? [...thinkingMap.values()].find((t) => !t.isComplete) : undefined)
@@ -420,14 +399,6 @@ const AssistantMessage: FC<{ caseId?: number }> = ({ caseId }) => {
         >
           <MessagePrimitive.Parts components={{ Text: MarkdownText, Reasoning: ReasoningText }} />
         </EvidenceContextProvider>
-        {!isRunning && (
-          <AnnualAuditResultCard
-            stage={annualAuditStage}
-            attachmentPackage={annualAttachmentPackage}
-            caseId={caseId ?? evidenceContext.caseId}
-            messageContent={messageContent}
-          />
-        )}
         <MessageError />
         <AuiIf condition={(s) => s.thread.isRunning && s.message.content.length === 0}>
           <div className="flex items-center gap-2 text-muted-foreground">

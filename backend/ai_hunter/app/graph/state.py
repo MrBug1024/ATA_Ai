@@ -114,12 +114,6 @@ class AuditGraphState(TypedDict, total=False):
     client_turn_id: str
     regenerate: bool
     selected_assistant_turn_id: str
-    # Full-audit human confirmation gate.  Values are persisted in the
-    # checkpoint so a follow-up chat turn can be routed deterministically.
-    audit_review_stage: str
-    active_template_versions: dict[str, str]
-    attachment_package: dict[str, Any]
-    attachment_preflight: dict[str, Any]
     messages: Annotated[list[AnyMessage], add_messages]
     # Append-only, display-only conversation log holding the FULL assistant
     # answer per turn. Kept separate from `messages` (which stays lean for LLM
@@ -127,6 +121,10 @@ class AuditGraphState(TypedDict, total=False):
     conversation_log: Annotated[list[dict[str, Any]], merge_conversation_log]
     memory_context: str
     memory_summary: str
+    # Structured, compact multi-turn focus used to resolve phrases such as
+    # "这些结果" and "按刚才的计划继续" without trusting the browser to resend
+    # the entire conversation. Heavy report/evidence payloads remain behind refs.
+    conversation_focus: dict[str, Any]
     case_switched: bool
 
     current_case_id: int

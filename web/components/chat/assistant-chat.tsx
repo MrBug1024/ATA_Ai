@@ -92,7 +92,6 @@ export function AssistantChat({
             <div className="flex min-h-0 flex-1">
               <div className="min-w-0 flex-1 overflow-hidden">
                 <ChatThread
-                  caseId={caseId}
                   hasInitialMessages={!!initialMessages?.length}
                   attachmentDisabled={attachmentDisabled}
                   attachmentDisabledReason={attachmentDisabledReason}

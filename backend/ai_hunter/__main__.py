@@ -14,15 +14,11 @@ def configure_event_loop_policy() -> None:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
-def selector_event_loop_factory() -> asyncio.AbstractEventLoop:
-    """Return the selector loop required by psycopg async connections on Windows."""
-    return asyncio.SelectorEventLoop()
-
-
 def uvicorn_loop_setting() -> str:
-    """Override Uvicorn's explicit Windows Proactor factory when necessary."""
+    """Keep the configured Selector policy when Uvicorn creates its loop."""
+
     if sys.platform == "win32":
-        return "ai_hunter.__main__:selector_event_loop_factory"
+        return "asyncio"
     return "auto"
 
 

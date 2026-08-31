@@ -12,8 +12,9 @@ import hashlib
 import json
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+from ai_hunter.app.services.minio_service import get_minio_service
 from ai_hunter.app.settings import Settings, get_settings
 
 from .storage import mysql_connection
@@ -155,46 +156,256 @@ def _normalize_file(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _template_contract(files: list[dict[str, Any]]) -> dict[str, Any]:
-    """Describe the minimum core package without inspecting or changing files."""
+def _template_contract(
+    files: list[dict[str, Any]],
+    *,
+    field_schema: Any = None,
+    business_line: str = "",
+    version_status: str = "draft",
+) -> dict[str, Any]:
+    """Expose file, contract and delivery readiness as separate states.
+
+    ``ready_for_core_delivery`` used to mean only that three file usages were
+    present.  That was unsafe for annual-audit DOCX templates: a draft could
+    look delivery-ready even though it had no executable slot contract.  The
+    actual document-byte binding remains an activation-time validation, so a
+    draft may be eligible to *request* activation without being described as
+    ready for customer delivery.
+    """
 
     usage_counts: dict[str, int] = {}
     for file in files:
         usage = normalize_template_usage(str(file.get("template_usage") or ""))
         if usage:
             usage_counts[usage] = usage_counts.get(usage, 0) + 1
-    missing = [usage for usage in CORE_ANNUAL_TEMPLATE_USAGES if not usage_counts.get(usage)]
+    annual_audit = is_annual_audit_business_line(business_line)
+    required_usages = list(CORE_ANNUAL_TEMPLATE_USAGES) if annual_audit else []
+    missing = [usage for usage in required_usages if not usage_counts.get(usage)]
+    slot_contract_error = (
+        _core_docx_slot_contract_error(field_schema, files)
+        if annual_audit
+        else None
+    )
+    activation_blockers: list[str] = []
+    if annual_audit and missing:
+        labels = "、".join(ANNUAL_TEMPLATE_USAGE_LABELS[usage] for usage in missing)
+        activation_blockers.append(f"年度审计模板版本缺少核心交付文件：{labels}。")
+    legacy_doc_names = [
+        Path(str(file.get("file_name") or "")).name
+        for file in files
+        if normalize_template_usage(str(file.get("template_usage") or ""))
+        in ANNUAL_TEMPLATE_USAGE_LABELS
+        and str(file.get("file_ext") or Path(str(file.get("file_name") or "")).suffix)
+        .lower()
+        == ".doc"
+    ]
+    if annual_audit and legacy_doc_names:
+        activation_blockers.append(
+            "年度审计客户附件不支持旧版 .doc 模板，请转换为 DOCX 后重新上传："
+            f"{'、'.join(legacy_doc_names)}。"
+        )
+    if slot_contract_error:
+        activation_blockers.append(slot_contract_error)
+
+    has_annual_docx = any(
+        normalize_template_usage(str(file.get("template_usage") or ""))
+        in ANNUAL_TEMPLATE_USAGE_LABELS
+        and str(file.get("file_ext") or Path(str(file.get("file_name") or "")).suffix).lower() == ".docx"
+        for file in files
+    )
+    eligible_for_activation_check = (
+        not activation_blockers
+        and (not annual_audit or bool(files))
+    )
+    if activation_blockers:
+        slot_contract_validation = "blocked"
+    elif not has_annual_docx:
+        slot_contract_validation = "not_required"
+    elif str(version_status or "").lower() == "active":
+        slot_contract_validation = "passed_on_activation"
+    else:
+        slot_contract_validation = "required_on_activation"
+
     return {
-        "required_usages": list(CORE_ANNUAL_TEMPLATE_USAGES),
+        "required_usages": required_usages,
         "present_usages": sorted(usage_counts),
         "usage_counts": usage_counts,
         "missing_usages": missing,
-        "ready_for_core_delivery": not missing,
+        "core_files_ready": not missing,
+        "declared_docx_slot_contract_ready": annual_audit and not slot_contract_error,
+        "activation_blockers": activation_blockers,
+        "eligible_for_activation_check": eligible_for_activation_check,
+        "slot_contract_validation": slot_contract_validation,
+        "ready_for_core_delivery": bool(
+            annual_audit
+            and str(version_status or "").lower() == "active"
+            and not activation_blockers
+        ),
     }
+
+
+def _has_declared_docx_slot_contract(value: Any) -> bool:
+    """Check the minimum executable shape before a template is activated.
+
+    The document preflight still validates addresses, source text and SHA-256
+    bindings against the actual DOCX.  Activation must at least reject an
+    arbitrary nonempty object or an empty slots array, both of which would
+    otherwise publish a template that can never be rendered.
+    """
+
+    slots = value if isinstance(value, list) else value.get("slots") if isinstance(value, Mapping) else None
+    if not isinstance(slots, list) or not slots:
+        return False
+    return all(
+        isinstance(item, Mapping)
+        and bool(str(item.get("slot_id") or "").strip())
+        and bool(str(item.get("target") or item.get("address") or "").strip())
+        for item in slots
+    )
+
+
+def _core_docx_slot_contract_error(
+    field_schema: Any,
+    files: list[dict[str, Any]],
+) -> str | None:
+    """Return the activation blocker for any annual-audit DOCX contract gap."""
+
+    docx_files = [
+        file
+        for file in files
+        if normalize_template_usage(str(file.get("template_usage") or ""))
+        in ANNUAL_TEMPLATE_USAGE_LABELS
+        and str(file.get("file_ext") or Path(str(file.get("file_name") or "")).suffix)
+        .lower()
+        == ".docx"
+    ]
+    if not docx_files:
+        return None
+
+    docx_schema = (
+        field_schema.get("docx")
+        if isinstance(field_schema, Mapping)
+        else None
+    )
+    if not isinstance(docx_schema, Mapping):
+        docx_schema = field_schema if isinstance(field_schema, Mapping) else {}
+    file_names = [Path(str(file.get("file_name") or "")).name for file in docx_files]
+    named_contracts = docx_schema.get("slot_contracts") or docx_schema.get("contracts")
+
+    if len(docx_files) == 1:
+        has_single_contract = _has_declared_docx_slot_contract(
+            docx_schema.get("slot_contract")
+        )
+        has_named_contract = isinstance(named_contracts, Mapping) and _has_declared_docx_slot_contract(
+            named_contracts.get(file_names[0])
+        )
+        if has_single_contract or has_named_contract:
+            return None
+        return (
+            f"年度审计 DOCX 模板缺少显式槽位契约：{file_names[0]}。"
+            "请在 field_schema_json.docx.slot_contract 中配置该文件，"
+            "或在 field_schema_json.docx.slot_contracts 中按文件名配置。"
+        )
+
+    missing_names = (
+        file_names
+        if not isinstance(named_contracts, Mapping)
+        else [
+            file_name
+            for file_name in file_names
+            if not _has_declared_docx_slot_contract(named_contracts.get(file_name))
+        ]
+    )
+    if not missing_names:
+        return None
+    return (
+        "年度审计 DOCX 模板必须在 "
+        "field_schema_json.docx.slot_contracts 中按文件名分别配置："
+        f"{'、'.join(missing_names)}。"
+    )
+
+
+def _validate_annual_docx_slot_contracts(
+    field_schema: Any,
+    files: list[dict[str, Any]],
+) -> None:
+    """Bind every publishable annual-audit DOCX contract to its exact file.
+
+    A nonempty JSON object is not a usable contract.  Before activation, load
+    each final Word template and validate target grammar, source allowlisting,
+    original text fingerprints and optional template SHA bindings.  This is a
+    read-only check inside the draft-to-active transaction; no invalid version
+    can be published and deferred to a customer generation job.
+    """
+
+    from .attachment_blueprint_service import bind_docx_slot_contract
+
+    docx_files = [
+        file
+        for file in files
+        if normalize_template_usage(str(file.get("template_usage") or ""))
+        in ANNUAL_TEMPLATE_USAGE_LABELS
+        and str(file.get("file_ext") or Path(str(file.get("file_name") or "")).suffix)
+        .lower()
+        == ".docx"
+    ]
+    if not docx_files:
+        return
+    minio = get_minio_service()
+    for file in docx_files:
+        name = Path(str(file.get("file_name") or "")).name
+        storage_ref = str(file.get("storage_ref") or "")
+        if not storage_ref:
+            raise ValueError(f"年度审计 DOCX 模板缺少对象存储引用：{name}")
+        try:
+            data = minio.get_object_bytes(storage_ref)
+        except Exception as exc:
+            raise ValueError(f"无法读取年度审计 DOCX 模板：{name}") from exc
+        stored_sha = str(file.get("storage_sha256") or "").lower()
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if stored_sha and stored_sha != actual_sha:
+            raise ValueError(f"年度审计 DOCX 模板对象 SHA-256 不一致：{name}")
+        try:
+            contract = bind_docx_slot_contract(
+                data,
+                field_schema=field_schema,
+                file_name=name,
+            )
+        except ValueError as exc:
+            raise ValueError(f"年度审计 DOCX 槽位契约无效：{name}：{exc}") from exc
+        if not contract.get("declared") or not contract.get("slots"):
+            raise ValueError(f"年度审计 DOCX 模板缺少可执行槽位契约：{name}")
 
 
 def _normalize_version(row: dict[str, Any], files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     content = _json_load(row.get("content_json"), {})
     field_schema = _json_load(row.get("field_schema_json"), {})
     normalized_files = list(files or [])
+    business_line = normalize_template_type(str(row.get("business_line") or ""))
+    version_status = str(row.get("version_status") or row.get("status") or "draft")
     return {
         "id": int(row.get("version_id") or row.get("id") or 0),
         "template_id": int(row.get("template_id") or 0),
         "template_code": str(row.get("template_code") or ""),
         "template_name": str(row.get("template_name") or row.get("name") or ""),
-        "business_line": normalize_template_type(str(row.get("business_line") or "")),
+        "business_line": business_line,
         "description": str(row.get("description") or ""),
         "template_status": str(row.get("template_status") or row.get("status") or "active"),
         "active_version_no": int(row.get("active_version_no") or 0),
         "version_no": int(row.get("version_no") or 0),
         "version_label": str(row.get("version_label") or ""),
-        "status": str(row.get("version_status") or row.get("status") or "draft"),
+        "status": version_status,
         "content": content if isinstance(content, dict) else {},
         "field_schema": field_schema if isinstance(field_schema, (dict, list)) else {},
         "content_hash": str(row.get("content_hash") or ""),
         "file_count": int(row.get("file_count") or len(normalized_files)),
         "files": normalized_files,
-        "template_contract": _template_contract(normalized_files),
+        "template_contract": _template_contract(
+            normalized_files,
+            field_schema=field_schema,
+            business_line=business_line,
+            version_status=version_status,
+        ),
         "created_by": str(row.get("version_created_by") or row.get("created_by") or ""),
         "published_by": str(row.get("published_by") or ""),
         "published_at": _safe_value(row.get("published_at")),
@@ -413,6 +624,13 @@ def add_template_file(
             normalized_usage = normalize_template_usage(template_usage)
             if is_annual_audit_business_line(str(version.get("business_line") or "")) and not normalized_usage:
                 raise ValueError("年度审计模板文件必须填写模板用途")
+            if (
+                is_annual_audit_business_line(str(version.get("business_line") or ""))
+                and normalized_ext == ".doc"
+            ):
+                raise ValueError(
+                    "年度审计客户附件不支持旧版 .doc 模板，请转换为 DOCX 后重新上传"
+                )
             cursor.execute(
                 """
                 INSERT INTO annual_audit_template_file
@@ -427,6 +645,58 @@ def add_template_file(
             _refresh_version_content_hash(cursor, int(version["id"]))
         connection.commit()
     return {"id": file_id, "template_code": template_code, "version_no": version_no, "file_name": normalized_name, "file_ext": normalized_ext, "content_type": content_type or "application/octet-stream", "storage_ref": storage_ref, "storage_sha256": storage_sha256, "file_size": int(file_size), "template_usage": normalize_template_usage(template_usage), "remark": remark.strip(), "status": "active"}
+
+
+def update_template_version_field_schema(
+    template_code: str,
+    version_no: int,
+    *,
+    field_schema: dict[str, Any] | list[Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Replace the declared field schema for one *draft* template version.
+
+    The schema is versioned alongside the uploaded files.  It is deliberately
+    editable only before activation so a published template and its explicit
+    DOCX slot contract remain immutable.
+    """
+
+    if not isinstance(field_schema, (dict, list)):
+        raise ValueError("字段配置必须是 JSON 对象或数组")
+    try:
+        serialized_schema = _json_dump(field_schema)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("字段配置必须可序列化为 JSON") from exc
+
+    normalized_code = template_code.strip()
+    resolved = settings or get_settings()
+    with mysql_connection(resolved) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT v.id, v.status
+                FROM annual_audit_template_version v
+                JOIN annual_audit_template t ON t.id = v.template_id
+                WHERE t.template_code = %s AND v.version_no = %s FOR UPDATE
+                """,
+                (normalized_code, version_no),
+            )
+            version = dict(cursor.fetchone() or {})
+            if not version:
+                raise ValueError(f"未找到模板版本：{template_code} v{version_no}")
+            if version.get("status") != "draft":
+                raise ValueError("已激活或已归档的版本不可修改，请新建版本")
+            cursor.execute(
+                "UPDATE annual_audit_template_version SET field_schema_json = %s WHERE id = %s",
+                (serialized_schema, int(version["id"])),
+            )
+        connection.commit()
+    return {
+        "template_code": normalized_code,
+        "version_no": version_no,
+        "status": "draft",
+        "field_schema": field_schema,
+    }
 
 
 def delete_template_file(file_id: int, *, deleted_by: str = "system", settings: Settings | None = None) -> dict[str, Any]:
@@ -503,15 +773,30 @@ def activate_template_version(template_code: str, version_no: int, *, published_
             if is_annual_audit_business_line(str(template.get("business_line") or "")):
                 cursor.execute(
                     """
-                    SELECT DISTINCT template_usage
+                    SELECT file_name, file_ext, storage_ref, storage_sha256, template_usage
                     FROM annual_audit_template_file
                     WHERE template_version_id = %s AND status = 'active'
                     """,
                     (int(target["id"]),),
                 )
+                active_files = [dict(row) for row in cursor.fetchall()]
+                legacy_doc_names = [
+                    Path(str(row.get("file_name") or "")).name
+                    for row in active_files
+                    if str(
+                        row.get("file_ext")
+                        or Path(str(row.get("file_name") or "")).suffix
+                    ).lower()
+                    == ".doc"
+                ]
+                if legacy_doc_names:
+                    raise ValueError(
+                        "年度审计客户附件不支持旧版 .doc 模板，请转换为 DOCX 后重新上传："
+                        f"{'、'.join(legacy_doc_names)}。"
+                    )
                 present = {
                     normalize_template_usage(str(row.get("template_usage") or ""))
-                    for row in cursor.fetchall()
+                    for row in active_files
                 }
                 missing = [usage for usage in CORE_ANNUAL_TEMPLATE_USAGES if usage not in present]
                 if missing:
@@ -520,6 +805,16 @@ def activate_template_version(template_code: str, version_no: int, *, published_
                         f"年度审计模板版本缺少核心交付文件：{labels}。"
                         "核心交付必须同时配置审计报告、财务报表和财务报表附注。"
                     )
+                slot_contract_error = _core_docx_slot_contract_error(
+                    _json_load(target.get("field_schema_json"), {}),
+                    active_files,
+                )
+                if slot_contract_error:
+                    raise ValueError(slot_contract_error)
+                _validate_annual_docx_slot_contracts(
+                    _json_load(target.get("field_schema_json"), {}),
+                    active_files,
+                )
             aliases = _template_type_aliases(str(template.get("business_line") or ""))
             placeholders = ", ".join(["%s"] * len(aliases))
             cursor.execute(
@@ -633,4 +928,5 @@ __all__ = [
     "normalize_template_type",
     "template_type_label",
     "template_version_ref",
+    "update_template_version_field_schema",
 ]

@@ -207,7 +207,12 @@ _CAPABILITY_SPEC_LIST = (
         access="write",
         requires_case=True,
     ),
-    _spec("common.general", "处理年审帮助、导航和通用问答", "common"),
+    _spec(
+        "common.general",
+        "处理年审帮助、导航和通用问答",
+        "common",
+        business_executor="answer_common_general",
+    ),
     _spec(
         "clarify",
         "澄清年审项目、资料、循环或操作目标",

@@ -209,9 +209,6 @@ export function useLanggraphRuntime(
                   const responseAnalysisRuns = responseMetadata?.responseAnalysisRuns;
                   const unresolvedRelations = responseMetadata?.unresolvedRelations ?? [];
                   const unresolvedClaims = responseMetadata?.unresolvedClaims ?? [];
-                  const auditReviewStage = responseMetadata?.auditReviewStage ?? "";
-                  const activeTemplateVersions = responseMetadata?.activeTemplateVersions ?? {};
-                  const attachmentPackage = responseMetadata?.attachmentPackage ?? {};
                   const routeDecision = responseMetadata?.routeDecision ?? null;
                   const assistantMessageId = responseMetadata?.assistantMessageId ?? "";
                   messages[messageIndex] = {
@@ -237,9 +234,6 @@ export function useLanggraphRuntime(
                       response_analysis_runs: responseAnalysisRuns,
                       unresolved_relations: unresolvedRelations,
                       unresolved_claims: unresolvedClaims,
-                      audit_review_stage: auditReviewStage,
-                      active_template_versions: activeTemplateVersions,
-                      attachment_package: attachmentPackage,
                       custom: {
                         ...existingCustom,
                         finalReportRef: ref || null,
@@ -250,9 +244,6 @@ export function useLanggraphRuntime(
                         responseAnalysisRuns,
                         unresolvedRelations,
                         unresolvedClaims,
-                        auditReviewStage,
-                        activeTemplateVersions,
-                        attachmentPackage,
                       },
                     },
                   };

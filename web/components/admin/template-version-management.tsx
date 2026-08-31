@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { annualAuditTemplateReadiness } from "@/lib/admin-template-contract-readiness";
 import {
   activateTemplateVersion,
   createTemplateVersion,
@@ -28,12 +29,6 @@ const USAGE_OPTIONS = [
   ["management_letter", "管理建议书（管理建议书模板.docx）"],
   ["confirmations", "函证（过程资料）"],
 ] as const;
-const CORE_USAGE_LABELS: Record<string, string> = {
-  annual_report: "审计报告",
-  financial_statements: "财务报表",
-  notes: "财务报表附注",
-};
-
 const TEMPLATE_TYPE_OPTIONS = [
   ["annual_audit", "年度审计"],
   ["bookkeeping", "代理记账"],
@@ -53,12 +48,6 @@ function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function contractSummary(version: GenericTemplateVersion): string {
-  const missing = version.template_contract?.missing_usages ?? [];
-  if (!missing.length) return "核心三份交付附件已配置";
-  return `缺少核心附件：${missing.map((item) => CORE_USAGE_LABELS[item] ?? item).join("、")}`;
 }
 
 function inferUsage(fileName: string): string {
@@ -143,7 +132,7 @@ export function TemplateVersionManagement() {
     <section className="flex flex-col gap-6" aria-labelledby="template-management-title">
       <div className="flex flex-col gap-1">
         <h2 id="template-management-title" className="text-xl font-semibold">模板管理</h2>
-        <p className="text-sm text-muted-foreground">模板类型由系统选择；同一类型同一时间只允许一个激活版本。年度审计核心交付必须同时配置审计报告、财务报表和财务报表附注。系统只在模板原有字段、段落或表格位置填充结果，并按源文件扩展名交付，不追加通用审计正文。</p>
+        <p className="text-sm text-muted-foreground">模板类型由系统选择；同一类型同一时间只允许一个激活版本。年度审计核心交付必须同时配置审计报告、财务报表和财务报表附注。模板用于定义附件应包含的章节、字体、段落、表格和页面样式；系统结合项目审计结果与全部证据独立编制内容，并按源文件格式交付，不会把模板业务正文原样作为项目结论返回。</p>
       </div>
 
       {error && <Alert variant="destructive"><RefreshCw aria-hidden="true" /><div><AlertTitle>模板目录加载失败</AlertTitle><AlertDescription>{error.message}</AlertDescription></div></Alert>}
@@ -194,21 +183,21 @@ export function TemplateVersionManagement() {
           {versions.map((version) => {
             const isActive = version.active_version_no === version.version_no && version.status === "active";
             const isAnnualAudit = version.business_line === "annual_audit";
-            const ready = version.template_contract?.ready_for_core_delivery ?? false;
+            const readiness = isAnnualAudit ? annualAuditTemplateReadiness(version.template_contract) : null;
             return (
               <div key={version.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
                 <Link href={`/admin/templates/${encodeURIComponent(version.template_code)}/versions/${version.version_no}`} className="min-w-0 flex-1 hover:underline">
                   <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{versionTitle(version)}</span>{isActive && <Badge>当前激活</Badge>}<Badge variant="outline">{version.status}</Badge></div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{templateTypeLabel(version.business_line)} · {version.file_count} 个模板文件 · {version.created_at || ""}</span>
-                    {isAnnualAudit && <span className={ready ? "inline-flex items-center gap-1 text-emerald-700" : "inline-flex items-center gap-1 text-amber-700"}>
-                      {ready ? <CheckCircle2 className="size-3" aria-hidden="true" /> : <AlertTriangle className="size-3" aria-hidden="true" />}
-                      {contractSummary(version)}
+                    {isAnnualAudit && readiness && <span className={readiness.tone === "ready" ? "inline-flex items-center gap-1 text-emerald-700" : readiness.tone === "pending" ? "inline-flex items-center gap-1 text-sky-700" : "inline-flex items-center gap-1 text-amber-700"}>
+                      {readiness.tone === "ready" ? <CheckCircle2 className="size-3" aria-hidden="true" /> : <AlertTriangle className="size-3" aria-hidden="true" />}
+                      {readiness.message}
                     </span>}
                   </div>
                 </Link>
                 <div className="flex flex-wrap gap-2">
-                  {!isActive && <Button type="button" size="sm" variant="outline" disabled={!version.file_count || busyKey === `activate:${version.id}`} onClick={() => void activate(version)}><Zap data-icon="inline-start" />激活</Button>}
+                  {!isActive && <Button type="button" size="sm" variant="outline" title={readiness?.activationBlocked ? readiness.message : undefined} disabled={!version.file_count || Boolean(readiness?.activationBlocked) || busyKey === `activate:${version.id}`} onClick={() => void activate(version)}><Zap data-icon="inline-start" />激活</Button>}
                   <Button type="button" size="sm" variant="ghost" disabled={busyKey === `delete:${version.id}`} onClick={() => void removeVersion(version)}><Trash2 data-icon="inline-start" />删除版本</Button>
                 </div>
               </div>

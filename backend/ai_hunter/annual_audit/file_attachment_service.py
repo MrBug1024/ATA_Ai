@@ -1,4 +1,4 @@
-"""Render confirmed annual-audit attachments from uploaded template files."""
+"""Compose evidence-grounded annual-audit attachments from template blueprints."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import re
 import tempfile
 import zipfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
@@ -20,17 +22,22 @@ from ai_hunter.app.settings import Settings, get_settings
 from ai_hunter.platform_core import ArtifactRef
 
 from .storage import mysql_connection
+from .attachment_fact_policy import filter_unavailable_statement_sources
+from .attachment_quality_service import (
+    evaluate_attachment_quality,
+    preflight_attachment_quality_blockers,
+)
 from .generic_template_repository import get_active_template_catalog, template_version_ref
 
 
-_TEMPLATE_PLAN_VERSION = "template-fill-plan-v3"
+_TEMPLATE_PLAN_VERSION = "complete-attachment-composition-plan-v7"
 # All attachment types and future business templates enter this contract before
 # their format-specific writer runs.  ``template_type`` is intentionally not a
 # part of the placement algorithm: it only selects business release rules and
 # user-facing names.  Values are always resolved through the same periodised,
 # source-prioritised fact registry and are written only into slots discovered
 # from the uploaded template structure.
-_TEMPLATE_RENDER_CONTRACT_VERSION = "template-structure-fact-registry-v1"
+_TEMPLATE_RENDER_CONTRACT_VERSION = "template-structure-fact-registry-v2"
 _CASE_MATERIAL_MAX_LABELS = 2500
 _MATERIAL_NOISE_LABELS = frozenset(
     {
@@ -122,6 +129,12 @@ _TOKEN_RE = re.compile(r"\{\{\s*([\w.-]+)\s*\}\}|\[\[\s*([\w.-]+)\s*\]\]|\$\{\s*
 _SINGLE_BRACKET_TOKEN_RE = re.compile(r"\[([\w.-]+)\]")
 _BRACKET_PLACEHOLDER_RE = re.compile(r"[\[【](?:被审计单位名称|项目合伙人姓名|注册会计师签名|日期|日期|XXXX|XX)[\]】]")
 _INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_CLIENT_DELIVERY_TRACE_PATTERNS = (
+    re.compile(r"(?i)\b(?:evidence(?:[_ -]?id|[_ -]?entries)?|source[_ -]?(?:chunk|file|page|locator)|chunk:[\w.-]+|claim:[\w.-]+)\b"),
+    re.compile(r"(?:项目证据|结构化事实|证据(?:编号|id|ID|定位|来源|条目)|来源(?:文件|工作表|页码|行号|单元格)|内部程序编号|审计程序编号)"),
+    re.compile(r"(?:工作底稿(?:编号)?\s*[:：]?\s*[A-Za-z]{1,5}\d{1,4}(?:-\d+)?|\b(?:[A-Z]{1,5}\d{1,4}(?:-\d+)?|TBA\d{2,})\b)"),
+    re.compile(r"(?i)\b(?:fact|statement|audit|material|engagement|finding):[a-z0-9_.-]+\b"),
+)
 
 _ATTACHMENT_NAME_LABELS = {
     "annual_report": "财务报表审计报告",
@@ -188,8 +201,19 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _exact_decimal_text(value: Any) -> str:
+    """Preserve database DECIMAL values for deterministic accounting checks."""
+
+    if value in (None, ""):
+        return "0"
+    try:
+        return format(Decimal(str(value).replace(",", "").strip()), "f")
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value)
+
+
 def _load_trial_balance(engagement_id: int, settings: Settings) -> dict[str, Any]:
-    """从数据库加载科目余额表，用于填充财务报表模板。
+    """从数据库加载科目余额表，作为财务报表重建的结构化事实来源。
 
     返回结构：
     {
@@ -204,23 +228,64 @@ def _load_trial_balance(engagement_id: int, settings: Settings) -> dict[str, Any
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT account_code, account_name,
-                           opening_debit, opening_credit,
-                           period_debit, period_credit,
-                           closing_debit, closing_credit
-                    FROM annual_account_balance
-                    WHERE engagement_id = %s
-                    ORDER BY account_code
+                    SELECT balances.account_code, balances.account_name,
+                           balances.opening_debit, balances.opening_credit,
+                           balances.period_debit, balances.period_credit,
+                           balances.closing_debit, balances.closing_credit,
+                           batches.id AS import_batch_id,
+                           batches.source_ref, batches.source_sha256
+                    FROM annual_account_balance AS balances
+                    JOIN annual_import_batch AS batches
+                      ON batches.id = balances.import_batch_id
+                    JOIN (
+                      SELECT latest.source_sha256,
+                             SUBSTRING_INDEX(latest.source_ref, '#', 1) AS source_object_ref
+                      FROM annual_import_batch AS latest
+                      WHERE latest.engagement_id = %s
+                        AND latest.source_type = 'account_balance'
+                        AND latest.status = 'completed'
+                      ORDER BY latest.completed_at DESC, latest.id DESC
+                      LIMIT 1
+                    ) AS active_revision
+                      ON active_revision.source_sha256 = batches.source_sha256
+                     AND active_revision.source_object_ref =
+                         SUBSTRING_INDEX(batches.source_ref, '#', 1)
+                    WHERE balances.engagement_id = %s
+                      AND batches.status = 'completed'
+                    ORDER BY balances.account_code
                     """,
-                    (engagement_id,),
+                    (engagement_id, engagement_id),
                 )
                 rows = cursor.fetchall()
     except Exception:
-        return {"accounts": [], "by_name": {}}
+        return {
+            "accounts": [],
+            "exact_accounts": [],
+            "by_name": {},
+            "authoritative_batch": {},
+        }
 
     accounts: list[dict[str, Any]] = []
+    exact_accounts: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
     for row in rows:
+        exact_accounts.append(
+            {
+                "account_code": str(row.get("account_code") or ""),
+                "account_name": str(row.get("account_name") or "").strip(),
+                **{
+                    key: _exact_decimal_text(row.get(key))
+                    for key in (
+                        "opening_debit",
+                        "opening_credit",
+                        "period_debit",
+                        "period_credit",
+                        "closing_debit",
+                        "closing_credit",
+                    )
+                },
+            }
+        )
         item = {
             "account_code": str(row.get("account_code") or ""),
             "account_name": str(row.get("account_name") or "").strip(),
@@ -241,14 +306,33 @@ def _load_trial_balance(engagement_id: int, settings: Settings) -> dict[str, Any
             else:
                 by_name[name] = dict(item)
 
-    return {"accounts": accounts, "by_name": by_name}
+    first = rows[0] if rows else {}
+    batch_ids = sorted(
+        {int(row.get("import_batch_id") or 0) for row in rows}
+        - {0}
+    )
+    return {
+        "accounts": accounts,
+        "exact_accounts": exact_accounts,
+        "by_name": by_name,
+        "authoritative_batch": {
+            "import_batch_id": batch_ids[-1] if batch_ids else 0,
+            "import_batch_ids": batch_ids,
+            "source_ref": str(first.get("source_ref") or ""),
+            "source_sha256": str(first.get("source_sha256") or ""),
+        },
+    }
 
 
 def _normalize_material_label(value: Any) -> str:
     """Normalize a workbook label for deterministic template matching."""
 
     text = str(value or "").strip()
-    text = re.sub(r"[\s　\t\r\n:：()（）\[\]【】]", "", text)
+    text = re.sub(
+        r"[\s　\t\r\n:：()（）\[\]【】\"'“”‘’\-—–+，,。．.；;、/\\]",
+        "",
+        text,
+    )
     text = text.replace("合计", "").replace("小计", "")
     return text
 
@@ -842,6 +926,7 @@ def _load_case_material_index(
         "labels": compact_labels,
         "active_labels": active_labels,
         "trial_balance_account_names": account_names,
+        "trial_balance": trial_balance,
         "entity_profile": entity_profile,
         "statement_values": statement_values,
         "read_all_sheets": True,
@@ -1023,15 +1108,21 @@ def _template_field_plan(
                 matched_labels += 1
 
     blockers: list[str] = []
+    quality_issues: list[str] = []
+    warnings: list[str] = []
     if material_index.get("status") != "ready":
-        blockers.append(str(material_index.get("message") or "主底稿未读取"))
+        quality_issues.append(str(material_index.get("message") or "主底稿尚未读取完整"))
     if case_reference:
-        blockers.append("当前有效文件疑似案例产出物，不是空白/结构模板；不能直接作为本次生成模板。")
+        warnings.append("模板含案例业务正文；生成时保留其结构与版式，仅在已声明字段写入本项目数据。")
     missing_required = [item["field"] for item in fields if item["field"] in required_fields and item["status"] == "missing"]
     if missing_required:
-        blockers.append("缺少必填数据映射：" + "、".join(missing_required))
+        quality_issues.append("缺少必填数据映射：" + "、".join(missing_required))
     if template_type in {"financial_statements", "notes"} and matched_labels == 0:
-        blockers.append("模板中的财务项目没有找到主底稿/报表数据映射。")
+        quality_issues.append("模板财务项目未命中任何结构化事实")
+    if int(material_index.get("formula_error_count") or 0) > 0:
+        quality_issues.append(
+            f"主底稿存在 {int(material_index.get('formula_error_count') or 0)} 个公式错误"
+        )
 
     return {
         "template_type": template_type,
@@ -1047,6 +1138,7 @@ def _template_field_plan(
         "required_fields": sorted(required_fields),
         "candidate_label_count": len(candidate_labels),
         "matched_material_label_count": matched_labels,
+        "composition_mode": "template_in_place_slots_only",
         "material_source": {
             "file_name": material_index.get("file_name"),
             "source_sha256": material_index.get("source_sha256"),
@@ -1056,6 +1148,8 @@ def _template_field_plan(
         },
         "status": "blocked" if blockers else "ready",
         "blockers": blockers,
+        "quality_issues": quality_issues,
+        "warnings": warnings,
     }
 
 
@@ -1070,39 +1164,77 @@ def _context_identity(snapshot: dict[str, Any], report_text: str) -> dict[str, A
     }
 
 
+def _stable_snapshot_hash(snapshot: dict[str, Any]) -> str:
+    volatile = {"evaluated_at", "generated_at", "observed_at", "heartbeat_at", "updated_at"}
+
+    def stable(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: stable(item) for key, item in value.items() if key not in volatile}
+        if isinstance(value, list):
+            return [stable(item) for item in value]
+        return value
+
+    encoded = json.dumps(stable(snapshot), ensure_ascii=False, sort_keys=True, default=_json_default)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def plan_annual_attachment_package(
     engagement_id: int,
     *,
     requested_types: list[str] | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Parse templates and map project materials before any file is generated."""
+    """Freeze an existing audit result and map templates without mutating it."""
 
     resolved = settings or get_settings()
     selected_types = tuple(requested_types or DEFAULT_ATTACHMENT_TYPES)
-    from .report_service import generate_annual_report_draft
-
-    generated = generate_annual_report_draft(
-        engagement_id,
-        recompute=False,
-        created_by="ai_agent",
-        settings=resolved,
-    )
     latest_report = _load_latest_report(engagement_id, resolved)
     snapshot = dict(latest_report.get("snapshot") or {})
+    report_text = str(snapshot.pop("report_text", "") or "").strip()
+    if not report_text:
+        raise ValueError("当前项目的最新审计结果缺少报告正文，不能生成附件")
+    snapshot.update(
+        {
+            "report_id": int(latest_report.get("id") or 0),
+            "report_version": int(latest_report.get("report_version") or 0),
+            "report_status": str(latest_report.get("status") or "draft"),
+        }
+    )
     material_index = _load_case_material_index(engagement_id, settings=resolved)
+    try:
+        from .attachment_material_service import load_case_material_catalog
+
+        material_catalog = load_case_material_catalog(engagement_id, settings=resolved)
+    except Exception as exc:
+        material_catalog = {
+            "material_context_version": "unavailable",
+            "engagement_id": engagement_id,
+            "catalog_sha256": "",
+            "files": [],
+            "warnings": [f"全项目材料目录暂不可用：{str(exc)[:240]}"],
+        }
     catalog = get_active_template_catalog(settings=resolved)
-    report_text = str(generated.get("report_text") or "")
     identity = _context_identity(snapshot, report_text)
     engagement_name = str(snapshot.get("engagement_name") or "")
     if not engagement_name:
         from .engagement_repository import get_engagement
 
         engagement_name = str((get_engagement(engagement_id, settings=resolved) or {}).get("name") or "")
+    snapshot["engagement_name"] = engagement_name
     report_number_match = re.search(r"京创会审字\[\d{4}\]第\s*\d+号", engagement_name)
     identity["report_number"] = report_number_match.group(0) if report_number_match else ""
     templates: list[dict[str, Any]] = []
-    blockers: list[str] = []
+    quality_issues: list[str] = preflight_attachment_quality_blockers(
+        snapshot=snapshot,
+        material_index=material_index,
+        requested_types=selected_types,
+    )
+    # A client attachment may not be queued merely because the template can
+    # be parsed. Release, accounting and source-data defects are delivery
+    # blockers, not advisory warnings. The old v6 path kept these in a
+    # separate list and incorrectly advertised the plan as ready.
+    global_quality_blockers = list(dict.fromkeys(quality_issues))
+    blockers: list[str] = list(global_quality_blockers)
     for template_type in selected_types:
         template = catalog.get(template_type) or {}
         files = list(template.get("files") or [])
@@ -1111,6 +1243,7 @@ def plan_annual_attachment_package(
             continue
         for source_file in files:
             source_name = str(source_file.get("file_name") or "template")
+            source_extension = Path(source_name).suffix.lower()
             source_bytes = get_minio_service().get_object_bytes(str(source_file.get("storage_ref") or ""))
             text, structure = _template_text_and_structure(source_bytes, source_name)
             context = {**identity, "notes_disclosure": material_index.get("status") == "ready", "financial_statement_line_items": material_index.get("status") == "ready"}
@@ -1128,10 +1261,99 @@ def plan_annual_attachment_package(
                     "template_file_id": source_file.get("id"),
                     "source_template_sha256": hashlib.sha256(source_bytes).hexdigest(),
                     "source_template_size": len(source_bytes),
+                    "source_storage_ref": source_file.get("storage_ref"),
+                    "source_content_type": source_file.get("content_type"),
+                    "source_file_ext": source_file.get("file_ext") or source_extension,
+                    "template_snapshot": {
+                        "template_code": template.get("template_code"),
+                        "template_type": template_type,
+                        "version_no": int(template.get("version_no") or 0),
+                        "version_label": template_version_ref(template),
+                        "content_hash": template.get("content_hash") or "",
+                        "content": template.get("content") or {},
+                        "field_schema": template.get("field_schema") or {},
+                        "template_contract": template.get("template_contract") or {},
+                    },
                 }
             )
+            try:
+                from .attachment_blueprint_service import (
+                    distill_attachment_template,
+                    public_blueprint_summary,
+                )
+                from .attachment_document_author_service import (
+                    authoring_preflight,
+                    freeze_attachment_authoring_context,
+                )
+
+                blueprint = distill_attachment_template(
+                    source_bytes,
+                    source_name,
+                    template_type,
+                    field_schema=template.get("field_schema") or {},
+                )
+                authoring_gate = authoring_preflight(blueprint, settings=resolved)
+                item["blueprint"] = blueprint
+                item["blueprint_summary"] = public_blueprint_summary(blueprint)
+                item["authoring"] = authoring_gate
+                if source_extension == ".docx":
+                    slot_contract = (
+                        (blueprint.get("structure") or {}).get("slot_contract") or {}
+                    )
+                    if not (
+                        slot_contract.get("declared")
+                        and slot_contract.get("slots")
+                    ):
+                        message = (
+                            "DOCX 模板未配置经确认的 slot_contract，"
+                            "拒绝猜测正文或表格写入位置"
+                        )
+                        item.setdefault("blockers", []).append(message)
+                        item["status"] = "blocked"
+                if authoring_gate.get("required") and authoring_gate.get("ready"):
+                    item["frozen_authoring_context"] = freeze_attachment_authoring_context(
+                        engagement_id,
+                        blueprint=blueprint,
+                        snapshot=snapshot,
+                        report_text=report_text,
+                        material_index=material_index,
+                        material_catalog=material_catalog,
+                        settings=resolved,
+                    )
+                elif authoring_gate.get("required"):
+                    message = str(authoring_gate.get("reason") or "附件 AI 完整编制不可用")
+                    item.setdefault("blockers", []).append(message)
+                    item["status"] = "blocked"
+            except Exception as exc:
+                message = f"模板蓝图/冻结证据构建失败：{str(exc)[:300]}"
+                item.setdefault("blockers", []).append(message)
+                item["status"] = "blocked"
             templates.append(item)
             blockers.extend(f"{source_name}：{message}" for message in item.get("blockers") or [])
+            item_quality_issues = [
+                f"{source_name}：{message}"
+                for message in item.get("quality_issues") or []
+            ]
+            if item_quality_issues:
+                item["status"] = "blocked"
+                item["blocking_quality_issues"] = item_quality_issues
+                quality_issues.extend(item_quality_issues)
+                blockers.extend(item_quality_issues)
+    if global_quality_blockers:
+        for item in templates:
+            if item.get("status") == "ready":
+                item["status"] = "blocked"
+            item["global_quality_blockers"] = list(global_quality_blockers)
+    blockers = list(dict.fromkeys(str(item) for item in blockers if str(item).strip()))
+    frozen_report = {
+        "report_id": int(latest_report.get("id") or 0),
+        "report_version": int(latest_report.get("report_version") or 0),
+        "template_version": str(latest_report.get("template_version") or ""),
+        "status": str(latest_report.get("status") or "draft"),
+        "fact_snapshot": snapshot,
+        "report_text": report_text,
+        "snapshot_sha256": _stable_snapshot_hash(snapshot),
+    }
     plan = {
         "plan_version": _TEMPLATE_PLAN_VERSION,
         "status": "blocked" if blockers else "ready",
@@ -1144,8 +1366,11 @@ def plan_annual_attachment_package(
             if key not in {"labels"}
         },
         "material_index": material_index,
+        "material_catalog": material_catalog,
+        "frozen_report": frozen_report,
         "templates": templates,
         "blockers": blockers,
+        "quality_issues": list(dict.fromkeys(quality_issues)),
         "summary": {
             "template_count": len(templates),
             "mapped_field_count": sum(sum(field.get("status") == "mapped" for field in item.get("fields") or []) for item in templates),
@@ -1261,15 +1486,15 @@ def _replace_template_markers(value: str, context: dict[str, Any]) -> str:
     """
 
     result = _replace_tokens(value, context)
-    entity_name = str(context.get("entity_name") or "待补充被审计单位")
+    entity_name = str(context.get("entity_name") or "")
     fiscal_year = int(context.get("fiscal_year") or 0)
     issue_year = int(context.get("issue_year") or (fiscal_year + 1 if fiscal_year else 0))
-    period_end = str(context.get("period_end") or "待补充日期")
-    period_start = str(context.get("period_start") or "待补充日期")
+    period_end = str(context.get("period_end") or "")
+    period_start = str(context.get("period_start") or "")
     audit_period = str(context.get("audit_period") or "")
-    engagement_code = str(context.get("engagement_code") or "待补充项目编号")
+    engagement_code = str(context.get("engagement_code") or "")
     report_number = str(context.get("report_number") or "").strip()
-    engagement_partner = str(context.get("engagement_partner") or "待补充项目合伙人")
+    engagement_partner = str(context.get("engagement_partner") or "")
     if fiscal_year:
         result = result.replace("二〇二五年度", f"{_chinese_year(fiscal_year)}年度")
         result = result.replace("二○二五年度", f"{_chinese_year(fiscal_year)}年度")
@@ -1294,9 +1519,9 @@ def _replace_template_markers(value: str, context: dict[str, Any]) -> str:
     result = re.sub(r"一般企业(?=(?:模板|报表|附注))", entity_name, result)
     result = result.replace("【被审计单位名称】", entity_name)
     result = result.replace("[被审计单位名称]", entity_name)
-    result = result.replace("【年度】", f"{fiscal_year}年度" if fiscal_year else "待补充年度")
-    result = result.replace("【20XX年度】", f"{fiscal_year}年度" if fiscal_year else "待补充年度")
-    result = result.replace("20XX年度", f"{fiscal_year}年度" if fiscal_year else "待补充年度")
+    result = result.replace("【年度】", f"{fiscal_year}年度" if fiscal_year else "")
+    result = result.replace("【20XX年度】", f"{fiscal_year}年度" if fiscal_year else "")
+    result = result.replace("20XX年度", f"{fiscal_year}年度" if fiscal_year else "")
     result = result.replace("【日期】", period_end)
     result = result.replace("[日期]", period_end)
     result = result.replace("【资产负债日】", period_end)
@@ -1312,18 +1537,23 @@ def _replace_template_markers(value: str, context: dict[str, Any]) -> str:
         if report_year_match:
             result = re.sub(
                 r"20\d{2}年\s*月\s*日",
-                f"{report_year_match.group(1)}年待项目组签字日期",
+                "",
                 result,
             )
-    result = result.replace("[注册会计师签名]", "待项目组签字")
-    result = result.replace("【注册会计师签名】", "待项目组签字")
+    result = result.replace("[注册会计师签名]", "")
+    result = result.replace("【注册会计师签名】", "")
     result = result.replace("[项目合伙人姓名]", engagement_partner)
     result = result.replace("【项目合伙人姓名】", engagement_partner)
-    result = result.replace("[北京今创会计师事务所（普通合伙）盖章]", "待事务所盖章")
-    result = result.replace("【北京今创会计师事务所（普通合伙）盖章】", "待事务所盖章")
-    result = result.replace("[在此处报告与业务经营、税务、管理实务相关的建议和说明。]", "详见当前审计结果摘要及后续复核任务。")
-    result = result.replace("【在此处报告与业务经营、税务、管理实务相关的建议和说明。】", "详见当前审计结果摘要及后续复核任务。")
-    result = _BRACKET_PLACEHOLDER_RE.sub("待管理层确认", result)
+    result = result.replace("[北京今创会计师事务所（普通合伙）盖章]", "")
+    result = result.replace("【北京今创会计师事务所（普通合伙）盖章】", "")
+    result = result.replace("[在此处报告与业务经营、税务、管理实务相关的建议和说明。]", "")
+    result = result.replace("【在此处报告与业务经营、税务、管理实务相关的建议和说明。】", "")
+    result = _BRACKET_PLACEHOLDER_RE.sub("", result)
+    result = result.replace("[或适用]", "适用")
+    result = result.replace("20XX", str(fiscal_year) if fiscal_year else "")
+    # A template marker without a mapped fact must become a blank slot, never
+    # an internal workflow sentence or copied sample value.
+    result = re.sub(r"(?<![A-Za-z])X{2,}(?![A-Za-z])", "", result)
     # Do not turn an unresolved template marker into prose such as
     # “主底稿未提供元”.  That looks like a populated disclosure but is neither
     # a number nor an auditable conclusion.  Unsupported optional sections are
@@ -1349,10 +1579,175 @@ def _replace_docx_paragraph(paragraph: Any, context: dict[str, Any]) -> bool:
     if not original:
         return False
     replaced = _replace_template_markers(original, context)
-    if replaced == original:
+    return _rewrite_docx_paragraph_runs(
+        paragraph,
+        original=original,
+        replacement=replaced,
+    )
+
+
+def _replace_docx_paragraph_exact_replacements(
+    paragraph: Any,
+    replacements: list[tuple[str, str]],
+) -> bool:
+    """Apply administrator-approved inline substitutions without global rules.
+
+    The scanner always consumes the source paragraph, never a previously
+    substituted value.  This prevents a value that happens to contain another
+    source phrase from being rewritten by a later replacement.
+    """
+
+    runs = list(paragraph.runs)
+    original = "".join(run.text or "" for run in runs)
+    if not original:
+        return False
+    if original != str(paragraph.text or ""):
+        raise ValueError("DOCX 行内槽位不能包含未建模的域、制表符或换行")
+    if any(
+        any(control in value for control in ("\t", "\r", "\n"))
+        or any(control in expected_text for control in ("\t", "\r", "\n"))
+        for expected_text, value in replacements
+    ):
+        raise ValueError("DOCX 行内槽位 replacement 不能跨越或写入制表符、换行")
+    ordered = sorted(replacements, key=lambda item: len(item[0]), reverse=True)
+    position = 0
+    output: list[str] = []
+    while position < len(original):
+        matched = False
+        for expected_text, value in ordered:
+            if original.startswith(expected_text, position):
+                output.append(value)
+                position += len(expected_text)
+                matched = True
+                break
+        if not matched:
+            output.append(original[position])
+            position += 1
+    replacement = "".join(output)
+    if _docx_paragraph_has_direct_tabs(paragraph):
+        return _rewrite_docx_paragraph_inline_replacements_preserving_tabs(
+            paragraph,
+            original=original,
+            replacement=replacement,
+            replacements=ordered,
+        )
+    return _rewrite_docx_paragraph_runs(
+        paragraph,
+        original=original,
+        replacement=replacement,
+    )
+
+
+def _docx_paragraph_has_direct_tabs(paragraph: Any) -> bool:
+    """Return whether a writer-safe direct run includes a Word tab element."""
+
+    from docx.oxml.ns import qn
+
+    tab_tag = qn("w:tab")
+    return any(run._r.find(tab_tag) is not None for run in paragraph.runs)
+
+
+def _rewrite_docx_paragraph_inline_replacements_preserving_tabs(
+    paragraph: Any,
+    *,
+    original: str,
+    replacement: str,
+    replacements: list[tuple[str, str]],
+) -> bool:
+    """Rewrite direct text while retaining every ``w:tab`` element in place.
+
+    ``Run.text`` presents a tab as ``\t``. Writing that value back into a run
+    can leave both a real ``w:tab`` and a literal tab in ``w:t``. This path
+    maps the source stream to concrete direct text nodes, treats tab elements
+    as immutable separators, and writes only those text nodes.
+    """
+
+    if replacement == original:
+        return False
+
+    from docx.oxml.ns import qn
+
+    text_tag = qn("w:t")
+    tab_tag = qn("w:tab")
+    text_nodes: list[Any] = []
+    text_node_indexes: dict[int, int] = {}
+    stream: list[tuple[int | None, str]] = []
+    for run in paragraph.runs:
+        for child in run._r:
+            if child.tag == text_tag:
+                node_index = text_node_indexes.get(id(child))
+                if node_index is None:
+                    node_index = len(text_nodes)
+                    text_node_indexes[id(child)] = node_index
+                    text_nodes.append(child)
+                stream.extend(
+                    (node_index, character) for character in child.text or ""
+                )
+            elif child.tag == tab_tag:
+                stream.append((None, "\t"))
+
+    if "".join(character for _node_index, character in stream) != original:
+        raise ValueError("DOCX 行内槽位不能安全保留制表符位置")
+
+    output_by_text_node = ["" for _node in text_nodes]
+    position = 0
+    while position < len(original):
+        matched = False
+        for expected_text, value in replacements:
+            if not original.startswith(expected_text, position):
+                continue
+            match_end = position + len(expected_text)
+            match_tokens = stream[position:match_end]
+            start_node_index = stream[position][0] if position < len(stream) else None
+            if (
+                start_node_index is None
+                or any(node_index is None for node_index, _character in match_tokens)
+            ):
+                raise ValueError("DOCX 行内槽位 replacement 不能跨越制表符")
+            output_by_text_node[start_node_index] += value
+            position = match_end
+            matched = True
+            break
+        if matched:
+            continue
+        node_index, character = stream[position]
+        if node_index is not None:
+            output_by_text_node[node_index] += character
+        position += 1
+
+    for text_node, value in zip(text_nodes, output_by_text_node):
+        if value != str(text_node.text or ""):
+            _set_docx_text_node_value(text_node, value)
+    if str(paragraph.text or "") != replacement:
+        raise ValueError("DOCX 行内槽位不能安全保留制表符位置")
+    _clear_docx_authoring_annotations(paragraph)
+    return True
+
+
+def _set_docx_text_node_value(text_node: Any, value: str) -> None:
+    """Update one text node without rebuilding its containing run."""
+
+    text_node.text = value
+    space_attr = "{http://www.w3.org/XML/1998/namespace}space"
+    if value[:1].isspace() or value[-1:].isspace():
+        text_node.set(space_attr, "preserve")
+    else:
+        text_node.attrib.pop(space_attr, None)
+
+
+def _rewrite_docx_paragraph_runs(
+    paragraph: Any,
+    *,
+    original: str,
+    replacement: str,
+) -> bool:
+    """Move a text diff through existing Word runs without flattening style."""
+
+    runs = list(paragraph.runs)
+    if replacement == original:
         return False
     if not runs:
-        paragraph.add_run(replaced)
+        paragraph.add_run(replacement)
         return True
 
     boundaries: list[tuple[int, int]] = []
@@ -1379,17 +1774,55 @@ def _replace_docx_paragraph(paragraph: Any, context: dict[str, Any]) -> bool:
             if left < right:
                 output_by_run[index] += original[left:right]
 
-    matcher = SequenceMatcher(a=original, b=replaced, autojunk=False)
+    matcher = SequenceMatcher(a=original, b=replacement, autojunk=False)
     for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
         if tag == "equal":
             append_original(old_start, old_end)
             continue
         if tag in {"replace", "insert"} and new_start < new_end:
-            output_by_run[run_index_for(old_start)] += replaced[new_start:new_end]
+            output_by_run[run_index_for(old_start)] += replacement[new_start:new_end]
 
     for run, text in zip(runs, output_by_run):
-        run.text = text
+        if text != (run.text or ""):
+            _set_docx_run_text_in_place(run, text)
+    # A highlight on a placeholder is a drafting cue, not a customer-facing
+    # style.  Leave all untouched template styling alone, but clear the cue on
+    # the one paragraph whose value was actually replaced.
+    _clear_docx_authoring_annotations(paragraph)
     return True
+
+
+def _set_docx_run_text_in_place(run: Any, value: str) -> None:
+    """Change a run's text nodes without flattening fields, tabs or breaks.
+
+    ``Run.text = ...`` reconstructs the run's contents and silently drops
+    inline ``w:fldChar``, ``w:instrText``, ``w:tab`` and ``w:br`` elements.
+    A financial-statement template relies heavily on those elements for its
+    titles, page layout and calculated fields, so only existing ``w:t`` nodes
+    are changed here.
+    """
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    text_nodes = list(run._r.findall(qn("w:t")))
+    if not text_nodes:
+        if not value:
+            return
+        text_node = OxmlElement("w:t")
+        text_node.text = value
+        if value[:1].isspace() or value[-1:].isspace():
+            text_node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        run._r.append(text_node)
+        return
+
+    text_nodes[0].text = value
+    if value[:1].isspace() or value[-1:].isspace():
+        text_nodes[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    else:
+        text_nodes[0].attrib.pop("{http://www.w3.org/XML/1998/namespace}space", None)
+    for text_node in text_nodes[1:]:
+        text_node.text = ""
 
 
 def _replace_docx_container(container: Any, context: dict[str, Any]) -> int:
@@ -1481,7 +1914,7 @@ def _ensure_docx_table_outer_borders(document: Any, context: dict[str, Any]) -> 
 
 
 def _docx_document_text(document: Any) -> str:
-    """Collect document text used for result-token checks, including headers."""
+    """Collect body/table text without materialising new header/footer parts."""
 
     parts = [paragraph.text or "" for paragraph in document.paragraphs]
     parts.extend(
@@ -1490,16 +1923,41 @@ def _docx_document_text(document: Any) -> str:
         for row in table.rows
         for cell in row.cells
     )
-    for section in document.sections:
-        for container in (section.header, section.footer):
-            parts.extend(paragraph.text or "" for paragraph in container.paragraphs)
-            parts.extend(
-                cell.text or ""
-                for table in _iter_docx_tables(container)
-                for row in table.rows
-                for cell in row.cells
-            )
     return "\n".join(parts)
+
+
+def _docx_ooxml_text_parts(data: bytes) -> dict[str, str]:
+    """Read client-visible text from every relevant DOCX story part.
+
+    python-docx's ``Document.paragraphs`` intentionally exposes only the main
+    body.  Delivery validation must additionally inspect headers, footers,
+    footnotes, endnotes, comments and text boxes (which live inside those XML
+    parts), otherwise an internal source locator can leak outside the body.
+    """
+
+    from xml.etree import ElementTree
+
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    visible_tags = {
+        f"{namespace}t",
+        f"{namespace}delText",
+        f"{namespace}instrText",
+    }
+    part_name = re.compile(
+        r"^word/(?:document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml$"
+    )
+    result: dict[str, str] = {}
+    with zipfile.ZipFile(BytesIO(data)) as archive:
+        for name in archive.namelist():
+            if not part_name.fullmatch(name):
+                continue
+            try:
+                root = ElementTree.fromstring(archive.read(name))
+            except ElementTree.ParseError:
+                continue
+            values = [node.text or "" for node in root.iter() if node.tag in visible_tags]
+            result[name] = "".join(values)
+    return result
 
 
 def _set_docx_cell_text(cell: Any, value: Any) -> None:
@@ -1516,18 +1974,92 @@ def _set_docx_cell_text(cell: Any, value: Any) -> None:
     _set_docx_paragraph_text(cell.paragraphs[0], text)
 
 
-def _set_docx_paragraph_text(paragraph: Any, value: str) -> None:
-    """Replace paragraph text without replacing its paragraph/style object."""
+def _materialize_docx_docvariable_fields(paragraph: Any) -> bool:
+    """Turn declared DOCVARIABLE results into stable literal Word text.
 
-    if paragraph.runs:
-        # Keep the first run (and therefore its character formatting) as the
-        # carrier for the replacement. Clearing only run text preserves the
-        # paragraph style, numbering, borders and surrounding layout.
-        paragraph.runs[0].text = value
-        for run in paragraph.runs[1:]:
-            run.text = ""
-    else:
-        paragraph.add_run(value)
+    The supplied notes master uses DOCVARIABLE fields for the entity and year
+    in its header.  Editing only their cached ``w:t`` result lets Word restore
+    the original variable when fields are refreshed.  We materialise only
+    DOCVARIABLE fields; PAGE, REF and other field types carry document
+    behavior and are deliberately rejected for client-slot replacement.
+    """
+
+    from docx.oxml.ns import qn
+
+    instr_tag = qn("w:instrText")
+    field_tag = qn("w:fldChar")
+    simple_field_tag = qn("w:fldSimple")
+    simple_instr_attr = qn("w:instr")
+    field_type_attr = qn("w:fldCharType")
+    field_nodes = list(paragraph._p.iter(field_tag))
+    instruction_nodes = list(paragraph._p.iter(instr_tag))
+    simple_fields = list(paragraph._p.iter(simple_field_tag))
+    if not field_nodes and not simple_fields:
+        return False
+    commands: list[str] = []
+    stack: list[list[str]] = []
+    for node in paragraph._p.iter():
+        if node.tag == field_tag:
+            field_type = str(node.get(field_type_attr) or "").lower()
+            if field_type == "begin":
+                stack.append([])
+            elif field_type == "end" and stack:
+                commands.append("".join(stack.pop()))
+        elif node.tag == instr_tag and stack:
+            stack[-1].append(str(node.text or ""))
+        elif node.tag == simple_field_tag:
+            commands.append(str(node.get(simple_instr_attr) or ""))
+    if stack or not commands or any(
+        not re.match(r"^\s*DOCVARIABLE(?:\s|$)", command, re.IGNORECASE)
+        for command in commands
+    ):
+        raise ValueError("DOCX 槽位不能改写非 DOCVARIABLE 的 Word 域")
+
+    # A simple field owns its cached result runs.  Lift those runs into the
+    # paragraph before removing the field wrapper so the normal in-place text
+    # writer can preserve their font and paragraph design.
+    for simple_field in simple_fields:
+        parent = simple_field.getparent()
+        if parent is None:
+            continue
+        position = parent.index(simple_field)
+        for child in list(simple_field):
+            simple_field.remove(child)
+            parent.insert(position, child)
+            position += 1
+        parent.remove(simple_field)
+    for node in [*field_nodes, *instruction_nodes]:
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+    return True
+
+
+def _set_docx_paragraph_text(paragraph: Any, value: str) -> None:
+    """Replace paragraph text without replacing its paragraph/style object.
+
+    Only the written paragraph loses direct highlight/shading used to signal a
+    template author's editable slot.  Other template paragraphs remain
+    byte-for-byte equivalent at the layout level.
+    """
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    text_nodes = list(paragraph._p.findall(".//" + qn("w:t")))
+    if not text_nodes:
+        if not value:
+            return
+        run = OxmlElement("w:r")
+        text_node = OxmlElement("w:t")
+        run.append(text_node)
+        paragraph._p.append(run)
+        text_nodes = [text_node]
+    text_nodes[0].text = str(value)
+    text_nodes[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    for text_node in text_nodes[1:]:
+        text_node.text = ""
+    _clear_docx_authoring_annotations(paragraph)
 
 
 def _normalize_template_label(value: Any) -> str:
@@ -1542,7 +2074,28 @@ def _normalize_template_label(value: Any) -> str:
 
 def _is_total_template_label(label: str) -> bool:
     compact = _normalize_template_label(label)
-    return compact in {"合计", "小计", "总计"} or compact.endswith("合计")
+    return compact in {"合计", "小计", "总计"} or compact.endswith(("合计", "总计"))
+
+
+_INDEPENDENT_STATEMENT_TOTALS = frozenset(
+    {
+        "资产总计",
+        "负债合计",
+        "所有者权益合计",
+        "股东权益合计",
+        "负债和所有者权益总计",
+        "负债及所有者权益总计",
+        "负债和股东权益总计",
+        "负债及股东权益总计",
+        "利润总额",
+        "净利润",
+        "现金及现金等价物净增加额",
+    }
+)
+
+
+def _is_independent_statement_total(label: str) -> bool:
+    return _normalize_template_label(label) in _INDEPENDENT_STATEMENT_TOTALS
 
 
 def _fact_registry_from_context(context: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1574,7 +2127,6 @@ def _fact_registry_from_context(context: dict[str, Any]) -> dict[str, dict[str, 
             continue
         entry = registry.setdefault(normalized, {"label": label, "current": None, "opening": None, "source": "project_fact"})
         entry[period] = value
-    _add_derived_cash_movement_fact(registry)
     context["__fact_registry__"] = registry
     return registry
 
@@ -1606,7 +2158,7 @@ def _prepare_template_render_context(
             "source_priority": "workpaper_or_statement>trial_balance>analysis_snapshot",
             "placement_policy": "discovered_template_slots_only",
             "format_preservation_policy": "edit_in_place_no_append_no_rebuild",
-            "authoring_annotation_policy": "clear_template_authoring_marks",
+            "authoring_annotation_policy": "clear_written_slot_authoring_marks",
         }
     )
     return contract
@@ -1655,9 +2207,11 @@ def _template_render_contract_evidence(context: dict[str, Any]) -> dict[str, Any
         "render_status",
         "audit_result_mapped",
         "audit_result_mapping_reason",
+        "declared_slot_semantic_coverage",
         "discovered_table_count",
         "mapped_table_count",
         "mapped_value_cell_count",
+        "docx_field_schema_slot_count",
         "output_table_count",
         "sheet_count",
         "content_profile",
@@ -1665,23 +2219,6 @@ def _template_render_contract_evidence(context: dict[str, Any]) -> dict[str, Any
         "notes_outer_border_side_count",
     }
     return {key: value for key, value in contract.items() if key in allowed}
-
-
-def _add_derived_cash_movement_fact(registry: dict[str, dict[str, Any]]) -> None:
-    """Derive the standard cash movement only when both source balances exist."""
-
-    cash, _ = _resolve_template_fact(registry, "货币资金")
-    if not cash or not isinstance(cash.get("current"), (int, float)) or not isinstance(cash.get("opening"), (int, float)):
-        return
-    key = _normalize_material_label("现金及现金等价物净增加额")
-    if key in registry and any(isinstance(registry[key].get(period), (int, float)) and abs(float(registry[key].get(period) or 0)) > 1e-9 for period in ("current", "opening")):
-        return
-    registry[key] = {
-        "label": "现金及现金等价物净增加额",
-        "current": float(cash["current"]) - float(cash["opening"]),
-        "opening": None,
-        "source": "derived:货币资金期末减期初",
-    }
 
 
 def _build_periodised_fact_registry(
@@ -1735,8 +2272,8 @@ def _build_periodised_fact_registry(
     for label, account in (balance_by_name or {}).items():
         if not isinstance(account, dict):
             continue
-        current = account.get("closing_debit") or account.get("closing_credit")
-        opening = account.get("opening_debit") or account.get("opening_credit")
+        current = abs(float(account.get("closing_debit") or 0) - float(account.get("closing_credit") or 0))
+        opening = abs(float(account.get("opening_debit") or 0) - float(account.get("opening_credit") or 0))
         add(label, current, opening, source="trial_balance", priority=60)
 
     for label, item in (statement_values or {}).items():
@@ -1753,7 +2290,6 @@ def _build_periodised_fact_registry(
     for item in registry.values():
         item.pop("_current_priority", None)
         item.pop("_opening_priority", None)
-    _add_derived_cash_movement_fact(registry)
     return registry
 
 
@@ -1773,13 +2309,36 @@ def _resolve_template_fact(
     direct = registry.get(normalized)
     if isinstance(direct, dict):
         return direct, 1
-    alias = _STANDARD_FACT_ALIASES.get(normalized)
+    alias_key = re.sub(r"[\"'“”‘’\-—–]", "", normalized)
+    alias = _STANDARD_FACT_ALIASES.get(normalized) or _STANDARD_FACT_ALIASES.get(
+        alias_key
+    )
     if alias:
         source, multiplier = alias
         fact = registry.get(_normalize_material_label(source))
         if isinstance(fact, dict):
             return fact, multiplier
     return None, 1
+
+
+def _remember_rendered_asset_total(
+    registry: dict[str, dict[str, Any]],
+    *,
+    period: str,
+    value: Any,
+) -> None:
+    """Share an asset-side total with the later liabilities/equity side."""
+
+    if period not in {"current", "opening"} or not isinstance(value, (int, float)):
+        return
+    key = _normalize_material_label("资产总计")
+    fact = dict(registry.get(key) or {})
+    if isinstance(fact.get(period), (int, float)):
+        return
+    fact.setdefault("label", "资产总计")
+    fact[period] = float(value)
+    fact[f"{period}_source"] = "derived:rendered_asset_rows"
+    registry[key] = fact
 
 
 def _docx_table_sections(document: Any) -> list[str]:
@@ -2006,6 +2565,12 @@ def _fill_docx_tables(document: Any, context: dict[str, Any]) -> int:
 
     registry = _fact_registry_from_context(context)
     table_contexts = _docx_table_contexts(document)
+    composition_manifest = context.get("__attachment_composition_manifest__") or {}
+    prototype_bindings = {
+        int(item.get("output_table_index")): str(item.get("fact_section_key") or "")
+        for item in (composition_manifest.get("prototype_table_bindings") or [])
+        if isinstance(item, dict) and str(item.get("output_table_index", "")).isdigit()
+    }
     changed = 0
     table_stats: list[dict[str, Any]] = []
     for table_index, table in enumerate(document.tables):
@@ -2013,10 +2578,11 @@ def _fill_docx_tables(document: Any, context: dict[str, Any]) -> int:
         table_context = table_contexts[table_index] if table_index < len(table_contexts) else {"section": "", "parent": ""}
         section = str(table_context.get("section") or "")
         parent_section = str(table_context.get("parent") or "")
+        prototype_fact_section = prototype_bindings.get(table_index, "")
         fact_section = next(
             (
                 candidate
-                for candidate in (section, parent_section)
+                for candidate in (prototype_fact_section, section, parent_section)
                 if candidate and (
                     _resolve_template_fact(registry, candidate)[0]
                     or _detail_fact_candidates(registry, candidate)
@@ -2180,8 +2746,11 @@ def _fill_docx_tables(document: Any, context: dict[str, Any]) -> int:
                 elif metric in {"increase", "amortization", "decrease"}:
                     source_label, _ = _table_cell_source_label(total_label, fact_section, metric, registry)
                 if not source_label:
-                    source_label = fact_section
+                    source_label = _normalize_template_label(total_label)
                 fact, multiplier = _resolve_template_fact(registry, source_label)
+                if not fact and source_label != fact_section:
+                    source_label = fact_section
+                    fact, multiplier = _resolve_template_fact(registry, source_label)
                 value = (
                     fact.get(period) * multiplier
                     if fact and isinstance(fact.get(period), (int, float))
@@ -2223,10 +2792,22 @@ def _fill_docx_tables(document: Any, context: dict[str, Any]) -> int:
                     stats.setdefault("total_fallbacks", []).append(
                         {"label": total_label, "period": period, "source": "sum_of_mapped_detail_rows"}
                     )
-                elif isinstance(summed_value, (int, float)) and abs(float(value) - float(summed_value)) > 0.01:
-                    stats.setdefault("total_conflicts", []).append(
-                        {"label": total_label, "period": period, "statement_value": value, "detail_sum": summed_value}
-                    )
+                elif (
+                    stats["mapped_rows"]
+                    and isinstance(summed_value, (int, float))
+                    and abs(float(summed_value)) > 1e-9
+                    and abs(float(value) - float(summed_value)) > 0.01
+                ):
+                    conflict = {
+                        "label": total_label,
+                        "period": period,
+                        "statement_value": value,
+                        "detail_sum": summed_value,
+                    }
+                    stats.setdefault("total_conflicts", []).append(conflict)
+                    if not _is_independent_statement_total(total_label):
+                        stats.setdefault("auto_reconciled_totals", []).append(conflict)
+                        value = summed_value
                 if (
                     not has_non_total_row_slot
                     and not stats["mapped_rows"]
@@ -2258,7 +2839,7 @@ def _downgrade_formal_report_opinion(document: Any) -> int:
         elif "我们认为，后附的财务报表在所有重大方面" in text:
             _set_docx_paragraph_text(
                 paragraph,
-                "本文件为基于当前已导入资料形成的审计报告格式草稿，尚未完成全部审计程序，未形成正式审计意见。",
+                "本文件为基于当前已导入资料形成的审计报告格式草稿，尚未完成全部审计程序，未形成正式审计意见，未经项目组复核和批准，不得作为正式审计报告对外使用。",
             )
             changed += 1
     return changed
@@ -2646,6 +3227,28 @@ def _remove_generic_instruction_paragraphs(document: Any) -> int:
     return removed
 
 
+def _clear_generic_instruction_text(document: Any) -> int:
+    """Clear note-template drafting instructions without deleting body nodes."""
+
+    changed = 0
+    for paragraph in document.paragraphs:
+        text = (paragraph.text or "").strip()
+        if text and any(marker in text for marker in _GENERIC_NOTE_INSTRUCTION_MARKERS):
+            _set_docx_paragraph_text(paragraph, "")
+            changed += 1
+    for table in _iter_docx_tables(document):
+        for row in table.rows:
+            for cell in row.cells:
+                text = cell.text or ""
+                if any(marker in text for marker in _GENERIC_NOTE_INSTRUCTION_MARKERS):
+                    _set_docx_cell_text(cell, "")
+                    changed += 1
+                elif "[或适用]" in text:
+                    _set_docx_cell_text(cell, text.replace("[或适用]", "适用"))
+                    changed += 1
+    return changed
+
+
 def _docx_run_authoring_annotations(run: Any) -> list[Any]:
     """Return direct run highlight/shading elements used as template cues."""
 
@@ -3001,27 +3604,78 @@ def _remove_unresolved_generic_note_components(document: Any, context: dict[str,
 
 def _render_docx(data: bytes, context: dict[str, Any]) -> tuple[bytes, str]:
     from docx import Document
+    from .attachment_document_composer import compose_attachment_from_context
+
+    strict_client_delivery = bool(context.get("__strict_client_delivery__"))
+    if strict_client_delivery:
+        # Bind the contract against this exact source package before any
+        # python-docx save operation.  A template revision cannot silently
+        # reuse an old paragraph address or source-text fingerprint.
+        from .attachment_blueprint_service import bind_docx_slot_contract
+
+        existing_contract = context.get("__attachment_slot_contract__")
+        if isinstance(existing_contract, dict) and existing_contract.get("declared"):
+            schema_for_contract: dict[str, Any] = {
+                "docx": {"slot_contract": existing_contract}
+            }
+        else:
+            schema_for_contract = context.get("__field_schema__") or {}
+        contract = bind_docx_slot_contract(
+            data,
+            field_schema=schema_for_contract,
+            file_name=str(context.get("__source_file_name__") or ""),
+        )
+        if not contract.get("declared") or not contract.get("slots"):
+            raise ValueError("DOCX 正式交付必须配置经确认的 slot_contract")
+        context["__attachment_slot_contract__"] = contract
+        context["__source_template_sha256__"] = hashlib.sha256(data).hexdigest()
 
     _prepare_template_render_context(
         context,
         file_name=str(context.get("__source_file_name__") or "template.docx"),
         extension=".docx",
     )
-    document = Document(BytesIO(data))
+    composed_data = compose_attachment_from_context(
+        data,
+        str(context.get("__source_file_name__") or "template.docx"),
+        context,
+    )
+    composition_manifest = context.get("__attachment_composition_manifest__") or {}
+    ai_authored_changes = (
+        int(composition_manifest.get("authored_block_count") or 0)
+        + int(bool(composition_manifest.get("title_written")))
+    )
+    document = Document(BytesIO(composed_data))
     original_document_text = _docx_document_text(document)
     has_result_token = _template_contains_result_token(original_document_text)
     source_name = str(context.get("__source_file_name__") or "")
-    is_generic_notes = bool(
-        context.get("__template_type__") == "notes"
-        and ("一般企业附注" in source_name or "披露要求" in original_document_text)
-        and not any(marker.lower() in source_name.lower() for marker in _CASE_REFERENCE_FILE_MARKERS)
-    )
+    # Removing generic-note sections rewrites the client's body and table
+    # sequence, so it is no longer part of the normal customer-facing path.
+    # It remains opt-in only for one-off legacy migration jobs that explicitly
+    # acknowledge that they are not template-fidelity renders.
+    is_generic_notes = bool(context.get("__legacy_generic_note_pruning__"))
+    if strict_client_delivery and is_generic_notes:
+        raise ValueError("DOCX 正式交付不允许启用遗留附注裁剪")
     if is_generic_notes:
         context["__template_render_contract__"]["content_profile"] = "evidence_selected_generic_note"
         _prune_generic_notes_sections(document, context)
         _fill_case_empty_disclosure_sections(document, context)
         _remove_generic_instruction_paragraphs(document)
-    changed = _replace_docx_container(document, context)
+    schema_changed = _apply_docx_field_schema(document, context)
+    declared_semantic_coverage = (
+        _declared_docx_semantic_coverage(
+            context,
+            template_type=str(context.get("__template_type__") or ""),
+        )
+        if strict_client_delivery
+        else {"mapped": False, "reason": "not_declared_contract", "structured_value_count": 0, "ai_value_count": 0, "slot_count": 0}
+    )
+    legacy_marker_changes = (
+        0 if strict_client_delivery else _replace_docx_container(document, context)
+    )
+    changed = ai_authored_changes + schema_changed + legacy_marker_changes
+    if context.get("__clear_generic_note_instruction_slots__") and not strict_client_delivery:
+        changed += _clear_generic_instruction_text(document)
     if is_generic_notes:
         changed += _fill_notes_entity_profile(document, context)
         changed += _normalise_generic_note_authoring_annotations(document, context)
@@ -3029,7 +3683,8 @@ def _render_docx(data: bytes, context: dict[str, Any]) -> tuple[bytes, str]:
     # 26-page case output.  Re-running the generic trial-balance table mapper
     # can alter values and pagination (for example, turning 26 pages into 27),
     # so preserve its tables and only apply explicit metadata replacements.
-    changed += _fill_docx_tables(document, context)
+    if not strict_client_delivery:
+        changed += _fill_docx_tables(document, context)
     if is_generic_notes:
         # An optional data grid with no fact mapping is not a reviewed blank
         # field; it is a generic-template disclosure that does not apply to
@@ -3038,38 +3693,32 @@ def _render_docx(data: bytes, context: dict[str, Any]) -> tuple[bytes, str]:
         changed += _remove_unmapped_note_tables(document, context)
         changed += _remove_unresolved_generic_note_components(document, context)
         changed += _remove_empty_financial_note_subsections(document, context)
-    if context.get("__template_type__") == "notes":
-        # The supplied note style often omits only the two outside edges.
-        # Apply the repair after pruning so every retained table is covered,
-        # including nested tables in a cell.
+    if context.get("__template_type__") == "notes" and is_generic_notes:
+        # Legacy generic-note cleanup can still use this narrowly scoped
+        # presentation repair.  Slot-based templates retain their original
+        # table borders exactly as supplied.
         changed += _ensure_docx_table_outer_borders(document, context)
-    if context.get("__template_type__") == "annual_report":
+    if context.get("__template_type__") == "annual_report" and not strict_client_delivery:
         opinion_changed = _downgrade_formal_report_opinion(document)
         changed += opinion_changed
     else:
         opinion_changed = 0
-    # Direct yellow/grey run shading in supplied files is normally a template
-    # author's drafting cue (for example, signature/date fields), not a
-    # customer-facing report style.  Clear it only in retained slots; paragraph
-    # and table geometry remains the template's own.
-    residual_authoring_annotations = _clear_document_authoring_annotations(document)
-    changed += residual_authoring_annotations
-    for section in document.sections:
-        changed += _replace_docx_container(section.header, context)
-        changed += _replace_docx_container(section.footer, context)
-        header_annotations = _clear_document_authoring_annotations(section.header)
-        footer_annotations = _clear_document_authoring_annotations(section.footer)
-        residual_authoring_annotations += header_annotations + footer_annotations
-        changed += header_annotations + footer_annotations
+    # Headers and footers are part of the template frame.  Accessing an
+    # inherited header/footer through python-docx can materialise a new part,
+    # so they deliberately remain read-only in a fidelity render.  Likewise,
+    # untouched body highlights and shading stay intact; replacement helpers
+    # clear authoring ink only on slots they actually write.
+    residual_authoring_annotations = 0
+    if is_generic_notes:
+        residual_authoring_annotations = _clear_document_authoring_annotations(document)
+        changed += residual_authoring_annotations
     total_authoring_annotations_cleared = (
         int(context.get("__notes_cleared_authoring_annotation_count__") or 0)
         + residual_authoring_annotations
     )
     context["__cleared_template_authoring_annotation_count__"] = total_authoring_annotations_cleared
-    # A DOCX template is the document contract.  Never append the whole AI
-    # report after the template: it breaks pagination, styles and the meaning
-    # of formal documents.  Structured placements happen through the existing
-    # paragraphs/tables above or through explicit field mappings.
+    # Authored text is written only into declared template slots.  No generic
+    # chat appendix, evidence trace or reconstructed document body is added.
     output = BytesIO()
     document.save(output)
     status = "filled" if changed else "copied_no_matching_placeholders"
@@ -3078,12 +3727,30 @@ def _render_docx(data: bytes, context: dict[str, Any]) -> tuple[bytes, str]:
         int(item.get("filled_cells") or 0) for item in table_stats if isinstance(item, dict)
     )
     result_token_replaced = has_result_token and not _template_contains_result_token(_docx_document_text(document))
-    audit_result_mapped = bool(result_token_replaced or opinion_changed or mapped_value_cell_count)
+    has_schema_result_mapping = _schema_contains_result_mapping(context.get("__field_schema__"))
+    declared_contract_result_mapping = bool(
+        strict_client_delivery
+        and context.get("__attachment_slot_contract__")
+        and declared_semantic_coverage.get("mapped")
+    )
+    audit_result_mapped = bool(
+        ai_authored_changes
+        or result_token_replaced
+        or opinion_changed
+        or mapped_value_cell_count
+        or declared_contract_result_mapping
+        or has_schema_result_mapping and schema_changed
+    )
     contract = context.get("__template_render_contract__") or {}
     contract["audit_result_mapped"] = audit_result_mapped
+    contract["declared_slot_semantic_coverage"] = declared_semantic_coverage
     contract["audit_result_mapping_reason"] = (
+        str(declared_semantic_coverage.get("reason") or "declared_slot_contract")
+        if declared_contract_result_mapping else
+        "template_slot_authoring" if ai_authored_changes else
         "explicit_result_token" if result_token_replaced else
         "formal_opinion_downgrade" if opinion_changed else
+        "field_schema" if has_schema_result_mapping and schema_changed else
         "structured_table_values" if mapped_value_cell_count else
         "none"
     )
@@ -3100,6 +3767,12 @@ def _render_docx(data: bytes, context: dict[str, Any]) -> tuple[bytes, str]:
             1 for item in table_stats if isinstance(item, dict) and int(item.get("filled_cells") or 0) > 0
         ),
         mapped_value_cell_count=mapped_value_cell_count,
+        docx_field_schema_slot_count=schema_changed,
+        ai_authored_block_count=max(
+            ai_authored_changes,
+            int(declared_semantic_coverage.get("ai_value_count") or 0),
+        ),
+        source_business_body_reused=composition_manifest.get("source_business_body_reused"),
         audit_result_mapped=audit_result_mapped,
         audit_result_mapping_reason=contract.get("audit_result_mapping_reason"),
         notes_outer_border_table_count=int(context.get("__notes_outer_border_table_count__") or 0),
@@ -3270,6 +3943,121 @@ def _is_literal_template_value(value: Any) -> bool:
     return True
 
 
+def _prepare_financial_semantic_authoring(
+    data: bytes,
+    extension: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Ask AI to bind cell semantics to fact IDs without sending amounts."""
+
+    from openpyxl import load_workbook
+    from .attachment_financial_author_service import (
+        author_financial_semantic_plan,
+        fact_id_for_label,
+    )
+
+    workbook = load_workbook(
+        BytesIO(data),
+        read_only=False,
+        data_only=False,
+        keep_vba=extension == ".xlsm",
+    )
+    registry = _fact_registry_from_context(context)
+    fact_catalog: list[dict[str, Any]] = []
+    fact_key_by_id: dict[str, str] = {}
+    fact_id_by_key: dict[str, str] = {}
+    fact_key_by_object_id = {id(fact): key for key, fact in registry.items()}
+    for key, fact in registry.items():
+        if not isinstance(fact, dict):
+            continue
+        fact_id = fact_id_for_label(key)
+        periods = [
+            period
+            for period in ("current", "opening")
+            if isinstance(fact.get(period), (int, float)) and not isinstance(fact.get(period), bool)
+        ]
+        if not periods:
+            continue
+        fact_catalog.append(
+            {
+                "fact_id": fact_id,
+                "label": str(fact.get("label") or key),
+                "available_periods": periods,
+                "source_kind": str(fact.get("source") or "frozen_fact_registry"),
+            }
+        )
+        fact_key_by_id[fact_id] = key
+        fact_id_by_key[key] = fact_id
+
+    candidate_cells: list[dict[str, Any]] = []
+    candidate_multipliers: dict[str, int] = {}
+    for plan in _xlsx_workbook_table_plans(workbook):
+        sheet = workbook[plan["sheet"]]
+        header_end = int(plan["header_row"]) + int(plan["header_rows"]) - 1
+        empty_streak = 0
+        for row in range(header_end + 1, int(sheet.max_row or 0) + 1):
+            label = str(sheet.cell(row=row, column=int(plan["label_column"])).value or "").strip()
+            if not label:
+                empty_streak += 1
+                if empty_streak >= 3:
+                    break
+                continue
+            empty_streak = 0
+            if _is_total_template_label(label):
+                continue
+            for column, (period, metric) in plan["value_columns"].items():
+                target = sheet.cell(row=row, column=column)
+                if target.__class__.__name__ == "MergedCell" or (
+                    isinstance(target.value, str) and target.value.startswith("=")
+                ):
+                    continue
+                row_label = _normalize_template_label(label)
+                source_label = _xlsx_value_source_label(row_label, metric)
+                resolved_fact, multiplier = _resolve_template_fact(
+                    registry,
+                    source_label,
+                )
+                resolved_key = (
+                    fact_key_by_object_id.get(id(resolved_fact))
+                    if resolved_fact is not None
+                    else ""
+                )
+                allowed_fact_id = fact_id_by_key.get(str(resolved_key or ""), "")
+                cell_id = f"{sheet.title}!{target.coordinate}|{period}|{metric}"
+                candidate_cells.append(
+                    {
+                        "cell_id": cell_id,
+                        "sheet": sheet.title,
+                        "coordinate": target.coordinate,
+                        "row_label": row_label,
+                        "period": period,
+                        "metric": metric or "balance",
+                        "allowed_fact_ids": [allowed_fact_id] if allowed_fact_id else [],
+                        "multiplier": int(multiplier),
+                    }
+                )
+                if allowed_fact_id:
+                    candidate_multipliers[cell_id] = int(multiplier)
+    workbook.close()
+    plan = author_financial_semantic_plan(
+        candidate_cells=candidate_cells,
+        fact_catalog=fact_catalog,
+    )
+    context["__financial_semantic_candidate_ids__"] = [item["cell_id"] for item in candidate_cells]
+    context["__financial_semantic_bindings__"] = dict(plan.get("bindings") or {})
+    context["__financial_fact_key_by_id__"] = fact_key_by_id
+    context["__financial_semantic_multipliers__"] = {
+        cell_id: candidate_multipliers.get(cell_id, 1)
+        for cell_id in (plan.get("bindings") or {})
+    }
+    context["__financial_semantic_manifest__"] = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"bindings"}
+    }
+    return plan
+
+
 def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
     """Fill discovered XLSX value cells from the shared fact registry.
 
@@ -3281,6 +4069,10 @@ def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
     """
 
     registry = _fact_registry_from_context(context)
+    semantic_candidate_ids = set(context.get("__financial_semantic_candidate_ids__") or [])
+    semantic_bindings = context.get("__financial_semantic_bindings__") or {}
+    fact_key_by_id = context.get("__financial_fact_key_by_id__") or {}
+    semantic_multipliers = context.get("__financial_semantic_multipliers__") or {}
     plans = _xlsx_workbook_table_plans(workbook)
     changed = 0
     stats: list[dict[str, Any]] = []
@@ -3295,6 +4087,8 @@ def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
         total_rows: list[tuple[int, str]] = []
         computed_totals: dict[int, dict[tuple[int, str], float]] = {}
         total_fallbacks: list[dict[str, Any]] = []
+        total_conflicts: list[dict[str, Any]] = []
+        auto_reconciled_totals: list[dict[str, Any]] = []
         data_rows: list[int] = []
         empty_streak = 0
         for row in range(header_end + 1, int(sheet.max_row or 0) + 1):
@@ -3333,14 +4127,22 @@ def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
             row_filled = False
             for column, (period, metric) in plan["value_columns"].items():
                 source_label = _xlsx_value_source_label(clean_label, metric)
-                fact, multiplier = _resolve_template_fact(registry, source_label)
+                target = sheet.cell(row=row, column=column)
+                cell_id = f"{sheet.title}!{target.coordinate}|{period}|{metric}"
+                bound_fact_id = str(semantic_bindings.get(cell_id) or "")
+                if bound_fact_id:
+                    fact = registry.get(str(fact_key_by_id.get(bound_fact_id) or ""))
+                    multiplier = int(semantic_multipliers.get(cell_id, 1) or 1)
+                elif cell_id in semantic_candidate_ids:
+                    fact, multiplier = None, 1
+                else:
+                    fact, multiplier = _resolve_template_fact(registry, source_label)
                 if not fact:
                     continue
                 fact_period = _table_fact_period_for_row(label, period)
                 value = fact.get(fact_period) if fact_period else None
                 if not isinstance(value, (int, float)):
                     continue
-                target = sheet.cell(row=row, column=column)
                 if target.__class__.__name__ == "MergedCell" or (
                     isinstance(target.value, str) and target.value.startswith("=")
                 ):
@@ -3394,6 +4196,18 @@ def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
                 elif summed_value and abs(float(value)) <= 1e-9 and abs(float(summed_value)) > 1e-9:
                     value = summed_value
                     stats_entry = {"label": total_label, "period": period, "source": "sum_of_mapped_detail_rows"}
+                elif summed_value and abs(float(value) - float(summed_value)) > 0.01:
+                    conflict = {
+                        "label": total_label,
+                        "period": period,
+                        "statement_value": value,
+                        "detail_sum": summed_value,
+                    }
+                    total_conflicts.append(conflict)
+                    if not _is_independent_statement_total(total_label):
+                        auto_reconciled_totals.append(conflict)
+                        value = summed_value
+                    stats_entry = None
                 else:
                     stats_entry = None
                 if stats_entry:
@@ -3423,6 +4237,8 @@ def _fill_xlsx_tables(workbook: Any, context: dict[str, Any]) -> int:
                 "mapped_value_cells": mapped_value_cells,
                 "cleared_template_default_cells": cleared_template_default_cells,
                 "total_fallbacks": total_fallbacks,
+                "total_conflicts": total_conflicts,
+                "auto_reconciled_totals": auto_reconciled_totals,
             }
         )
     context["__xlsx_table_render_stats__"] = stats
@@ -3465,7 +4281,11 @@ def _render_xlsx(data: bytes, extension: str, context: dict[str, Any]) -> tuple[
     # version of the supplied template.
     output = BytesIO()
     workbook.save(output)
-    status = "filled" if changed else "copied_no_matching_placeholders"
+    semantic_manifest = context.get("__financial_semantic_manifest__") or {}
+    semantic_planned = bool(
+        semantic_manifest and int(semantic_manifest.get("bound_count") or 0) > 0
+    )
+    status = "filled" if changed or semantic_planned else "copied_no_matching_placeholders"
     has_schema_result_mapping = _schema_contains_result_mapping(context.get("__field_schema__"))
     table_stats = context.get("__xlsx_table_render_stats__") or []
     mapped_value_cell_count = sum(
@@ -3482,10 +4302,16 @@ def _render_xlsx(data: bytes, extension: str, context: dict[str, Any]) -> tuple[
             if isinstance(cell.value, str)
         )
     )
-    audit_result_mapped = bool(result_token_replaced or has_schema_result_mapping and changed or mapped_value_cell_count)
+    audit_result_mapped = bool(
+        semantic_planned
+        or result_token_replaced
+        or has_schema_result_mapping and changed
+        or mapped_value_cell_count
+    )
     contract = context.get("__template_render_contract__") or {}
     contract["audit_result_mapped"] = audit_result_mapped
     contract["audit_result_mapping_reason"] = (
+        "ai_semantic_fact_plan" if semantic_planned else
         "explicit_result_token" if result_token_replaced else
         "field_schema" if has_schema_result_mapping and changed else
         "structured_table_values" if mapped_value_cell_count else
@@ -3503,6 +4329,9 @@ def _render_xlsx(data: bytes, extension: str, context: dict[str, Any]) -> tuple[
             1 for item in table_stats if isinstance(item, dict) and int(item.get("filled_cells") or 0) > 0
         ),
         mapped_value_cell_count=mapped_value_cell_count,
+        financial_semantic_plan_sha256=semantic_manifest.get("plan_sha256"),
+        financial_semantic_candidate_count=semantic_manifest.get("candidate_count"),
+        financial_semantic_bound_count=semantic_manifest.get("bound_count"),
         audit_result_mapped=audit_result_mapped,
         audit_result_mapping_reason=contract.get("audit_result_mapping_reason"),
         sheet_count=len(workbook.worksheets),
@@ -4065,22 +4894,37 @@ def _schema_contains_result_mapping(schema: Any) -> bool:
 def _render_text_template(data: bytes, extension: str, context: dict[str, Any]) -> tuple[bytes, str]:
     """Render text templates without changing encoding or the file suffix."""
 
+    from .attachment_document_composer import compose_attachment_from_context
+
+    data = compose_attachment_from_context(
+        data,
+        str(context.get("__source_file_name__") or f"template{extension}"),
+        context,
+    )
+    composition_manifest = context.get("__attachment_composition_manifest__") or {}
+    ai_authored_changes = int(composition_manifest.get("authored_block_count") or 0)
     has_bom = data.startswith(b"\xef\xbb\xbf")
     text = data.decode("utf-8-sig")
     replaced = _replace_template_markers(text, context)
     has_result_token = _template_contains_result_token(text)
     result_token_replaced = has_result_token and not _template_contains_result_token(replaced)
-    audit_result_mapped = bool(result_token_replaced)
-    status = "filled" if replaced != text else "copied_no_matching_placeholders"
+    audit_result_mapped = bool(ai_authored_changes or result_token_replaced)
+    status = "filled" if ai_authored_changes or replaced != text else "copied_no_matching_placeholders"
     if context.get("__enforce_result_mapping__") and not audit_result_mapped:
         status = "metadata_filled_no_result_mapping" if replaced != text else "copied_no_matching_placeholders"
     contract = context.get("__template_render_contract__") or {}
     contract["audit_result_mapped"] = audit_result_mapped
-    contract["audit_result_mapping_reason"] = "explicit_result_token" if result_token_replaced else "none"
+    contract["audit_result_mapping_reason"] = (
+        "template_slot_authoring" if ai_authored_changes else
+        "explicit_result_token" if result_token_replaced else
+        "none"
+    )
     _record_template_render_result(
         context,
         renderer="text",
-        changed=int(replaced != text),
+        changed=ai_authored_changes + int(replaced != text),
+        ai_authored_block_count=ai_authored_changes,
+        source_business_body_reused=composition_manifest.get("source_business_body_reused"),
         status=status,
         audit_result_mapped=audit_result_mapped,
         audit_result_mapping_reason=contract.get("audit_result_mapping_reason"),
@@ -4160,6 +5004,123 @@ def _field_schema_value(schema: Any, context: dict[str, Any], key: str) -> Any:
     return value
 
 
+def _format_docx_contract_value(value: Any, source: dict[str, Any]) -> Any:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        raise ValueError("DOCX 槽位 source 只能解析为客户可见的标量值")
+    presentation = str(source.get("format") or "").lower()
+    rendered: Any = value
+    if presentation == "money":
+        rendered = _money(value)
+    elif presentation == "integer":
+        try:
+            rendered = str(int(Decimal(str(value))))
+        except (InvalidOperation, TypeError, ValueError):
+            rendered = value
+    elif presentation == "percent":
+        try:
+            numeric = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            rendered = value
+        else:
+            if abs(numeric) <= 1:
+                numeric *= Decimal("100")
+            rendered = f"{numeric.quantize(Decimal('0.01'))}%"
+    elif presentation == "chinese_year":
+        try:
+            rendered = _chinese_year(int(str(value)))
+        except (TypeError, ValueError):
+            raise ValueError("DOCX 槽位 chinese_year source 必须是四位财务年度") from None
+    prefix = str(source.get("prefix") or "")
+    suffix = str(source.get("suffix") or "")
+    if prefix or suffix:
+        return f"{prefix}{rendered}{suffix}"
+    return rendered
+
+
+def _docx_contract_source_kind(source: Any) -> str:
+    if isinstance(source, str):
+        candidate = source.strip()
+        if candidate.startswith("fact:"):
+            return "fact"
+        if candidate.startswith("table_value:"):
+            return "table_value"
+        return "context"
+    if isinstance(source, dict):
+        return str(source.get("kind") or "context").lower()
+    return ""
+
+
+def _docx_contract_source_value(source: Any, context: dict[str, Any]) -> Any:
+    """Resolve one allowlisted deterministic field for a declared DOCX slot."""
+
+    if isinstance(source, str):
+        key = source.strip()
+        if key.startswith("fact:") or key.startswith("table_value:"):
+            kind, _, remainder = key.partition(":")
+            label, separator, period = remainder.rpartition(":")
+            if not separator:
+                label, period = remainder, "current"
+            source = {"kind": kind, "label": label, "period": period}
+        else:
+            return _format_docx_contract_value(context.get(key, ""), {})
+    if not isinstance(source, dict):
+        return ""
+    kind = str(source.get("kind") or "").lower()
+    if kind == "context":
+        return _format_docx_contract_value(context.get(str(source.get("key") or ""), ""), source)
+    label = str(source.get("label") or "")
+    period = str(source.get("period") or "current").lower()
+    if kind == "table_value":
+        values = context.get("__table_values__") or {}
+        if not isinstance(values, dict):
+            return ""
+        lookup = f"{label}_期初" if period == "opening" else label
+        return _format_docx_contract_value(values.get(lookup, ""), source)
+    if kind == "fact":
+        registry = context.get("__fact_registry__") or {}
+        if not isinstance(registry, dict):
+            return ""
+        key = _normalize_material_label(_normalize_template_label(label))
+        item = registry.get(key) or registry.get(label) or {}
+        if not isinstance(item, dict):
+            return ""
+        return _format_docx_contract_value(item.get(period, ""), source)
+    return ""
+
+
+def _declared_docx_semantic_coverage(
+    context: dict[str, Any],
+    *,
+    template_type: str,
+) -> dict[str, Any]:
+    """Classify what a declared DOCX contract actually placed in the file."""
+
+    raw_stats = context.get("__docx_slot_contract_stats__") or []
+    stats = [item for item in raw_stats if isinstance(item, dict)]
+    structured_value_count = sum(
+        int(item.get("structured_value_count") or 0) for item in stats
+    )
+    ai_value_count = sum(int(item.get("ai_value_count") or 0) for item in stats)
+    if template_type == "financial_statements":
+        mapped = structured_value_count > 0
+        reason = "declared_structured_fact_slots"
+    elif template_type == "notes":
+        mapped = structured_value_count > 0 and ai_value_count > 0
+        reason = "declared_note_facts_and_ai_slots"
+    else:
+        mapped = ai_value_count > 0
+        reason = "declared_ai_narrative_slots"
+    return {
+        "mapped": mapped,
+        "reason": reason if mapped else "declared_slots_only_metadata",
+        "structured_value_count": structured_value_count,
+        "ai_value_count": ai_value_count,
+        "slot_count": len(stats),
+    }
+
+
 def _apply_xlsx_field_schema(workbook: Any, context: dict[str, Any]) -> int:
     """Apply optional explicit cell mappings saved with a template version."""
 
@@ -4205,6 +5166,277 @@ def _apply_xlsx_field_schema(workbook: Any, context: dict[str, Any]) -> int:
     return changed
 
 
+def _apply_docx_field_schema(document: Any, context: dict[str, Any]) -> int:
+    """Fill approved DOCX paragraph/cell slots recorded with a template.
+
+    The schema is intentionally address-based and opt-in.  It gives template
+    administrators a deterministic path for dynamic prose without allowing a
+    model to invent, delete or reorder Word paragraphs.
+    """
+
+    schema = context.get("__field_schema__") or {}
+    declared_contract = context.get("__attachment_slot_contract__") or {}
+    if not isinstance(declared_contract, dict):
+        declared_contract = {}
+    if declared_contract.get("declared"):
+        expected_template_sha = str(declared_contract.get("template_sha256") or "")
+        actual_template_sha = str(context.get("__source_template_sha256__") or "")
+        if expected_template_sha and actual_template_sha and expected_template_sha != actual_template_sha:
+            raise ValueError("DOCX 槽位契约与当前模板 SHA-256 不一致")
+        slot_values = context.get("__attachment_slot_values__") or {}
+        if not isinstance(slot_values, dict):
+            raise ValueError("DOCX AI 槽位值必须是对象")
+        changed = 0
+        written_slot_ids: list[str] = []
+        materialized_docvariable_slot_ids: list[str] = []
+        slot_contract_stats: list[dict[str, Any]] = []
+        for raw_slot in declared_contract.get("slots") or []:
+            if not isinstance(raw_slot, dict):
+                raise ValueError("DOCX 槽位契约包含无效槽位")
+            slot_id = str(raw_slot.get("slot_id") or "").strip()
+            target = str(raw_slot.get("target") or "").strip()
+            mode = str(raw_slot.get("mode") or "replace").strip().lower()
+            if not slot_id or not target:
+                raise ValueError("DOCX 槽位契约缺少 slot_id 或 target")
+            paragraph_match = re.fullmatch(
+                r"paragraph:(?P<index>\d+)", target, re.IGNORECASE
+            )
+            paragraph: Any | None = None
+            cell: Any | None = None
+            current_text = ""
+            if paragraph_match:
+                index = int(paragraph_match.group("index"))
+                if not 0 <= index < len(document.paragraphs):
+                    raise ValueError(f"DOCX 槽位段落不存在：{slot_id}")
+                paragraph = document.paragraphs[index]
+                current_text = paragraph.text or ""
+            else:
+                frame_match = re.fullmatch(
+                    r"(?P<frame>header|footer):(?P<section>\d+),paragraph:(?P<paragraph>\d+)",
+                    target,
+                    re.IGNORECASE,
+                )
+                if frame_match:
+                    section_index = int(frame_match.group("section"))
+                    paragraph_index = int(frame_match.group("paragraph"))
+                    if not 0 <= section_index < len(document.sections):
+                        raise ValueError(f"DOCX 槽位页眉页脚分节不存在：{slot_id}")
+                    frame = getattr(
+                        document.sections[section_index],
+                        frame_match.group("frame").lower(),
+                    )
+                    if frame.is_linked_to_previous:
+                        raise ValueError(f"DOCX 槽位不能直接写入继承的页眉页脚：{slot_id}")
+                    if not 0 <= paragraph_index < len(frame.paragraphs):
+                        raise ValueError(f"DOCX 槽位页眉页脚段落不存在：{slot_id}")
+                    paragraph = frame.paragraphs[paragraph_index]
+                    current_text = paragraph.text or ""
+                else:
+                    cell_match = re.fullmatch(
+                        r"table:(?P<table>\d+),row:(?P<row>\d+),cell:(?P<cell>\d+)",
+                        target,
+                        re.IGNORECASE,
+                    )
+                    if not cell_match:
+                        raise ValueError(f"DOCX 槽位目标无效：{slot_id}")
+                    table_index = int(cell_match.group("table"))
+                    row_index = int(cell_match.group("row"))
+                    cell_index = int(cell_match.group("cell"))
+                    if not 0 <= table_index < len(document.tables):
+                        raise ValueError(f"DOCX 槽位表格不存在：{slot_id}")
+                    table = document.tables[table_index]
+                    if not 0 <= row_index < len(table.rows) or not 0 <= cell_index < len(table.rows[row_index].cells):
+                        raise ValueError(f"DOCX 槽位单元格不存在：{slot_id}")
+                    cell = table.rows[row_index].cells[cell_index]
+                    if len(cell.paragraphs) != 1:
+                        raise ValueError(f"DOCX 槽位单元格不是单段落字段：{slot_id}")
+                    current_text = cell.paragraphs[0].text or ""
+            expected_text_sha = str(raw_slot.get("source_text_sha256") or "")
+            actual_text_sha = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+            if expected_text_sha and expected_text_sha != actual_text_sha:
+                raise ValueError(f"DOCX 槽位原文已变化：{slot_id}")
+
+            target_paragraph = paragraph if paragraph is not None else cell.paragraphs[0]
+            field_materialized = (
+                _materialize_docx_docvariable_fields(target_paragraph)
+                if mode != "preserve"
+                else False
+            )
+            if field_materialized:
+                materialized_docvariable_slot_ids.append(slot_id)
+
+            stats = {
+                "slot_id": slot_id,
+                "target": target,
+                "mode": mode,
+                "changed": False,
+                "source_kinds": [],
+                "structured_value_count": 0,
+                "ai_value_count": 0,
+            }
+            if mode == "preserve":
+                slot_contract_stats.append(stats)
+                continue
+            if mode == "replace_inline":
+                replacements: list[tuple[str, str]] = []
+                for raw_replacement in raw_slot.get("replacements") or []:
+                    if not isinstance(raw_replacement, dict):
+                        raise ValueError(f"DOCX 行内槽位 replacement 无效：{slot_id}")
+                    expected_text = str(raw_replacement.get("expected_text") or "")
+                    source = raw_replacement.get("source")
+                    if not expected_text or not source:
+                        raise ValueError(f"DOCX 行内槽位 replacement 不完整：{slot_id}")
+                    occurrences = int(raw_replacement.get("occurrences") or 0)
+                    if occurrences <= 0 or current_text.count(expected_text) != occurrences:
+                        raise ValueError(f"DOCX 行内槽位原文已变化：{slot_id}")
+                    value = _docx_contract_source_value(source, context)
+                    if value in (None, "") and bool(raw_replacement.get("required", True)):
+                        raise ValueError(f"DOCX 行内槽位没有可写入值：{slot_id}")
+                    value_text = "" if value is None else str(value)
+                    if len(value_text) > int(raw_slot.get("max_chars") or 1200):
+                        raise ValueError(f"DOCX 行内槽位文本超过声明长度：{slot_id}")
+                    source_kind = _docx_contract_source_kind(source)
+                    stats["source_kinds"].append(source_kind)
+                    if source_kind in {"fact", "table_value"} and value_text:
+                        stats["structured_value_count"] += 1
+                    replacements.append((expected_text, value_text))
+                wrote_value = (
+                    _replace_docx_paragraph_exact_replacements(
+                        target_paragraph,
+                        replacements,
+                    )
+                    or field_materialized
+                )
+                if wrote_value:
+                    changed += 1
+                stats["changed"] = wrote_value
+                written_slot_ids.append(slot_id)
+                slot_contract_stats.append(stats)
+                continue
+
+            source_kinds: list[str] = []
+            if mode == "suppress_instruction":
+                value = ""
+            elif mode == "replace":
+                source = raw_slot.get("source")
+                has_source = bool(source) if not isinstance(source, str) else bool(source.strip())
+                if has_source:
+                    value = _docx_contract_source_value(source, context)
+                    source_kinds.append(_docx_contract_source_kind(source))
+                else:
+                    if slot_id not in slot_values:
+                        if bool(raw_slot.get("required", True)):
+                            raise ValueError(f"DOCX 必填 AI 槽位尚未编制：{slot_id}")
+                        slot_contract_stats.append(stats)
+                        continue
+                    value = slot_values[slot_id]
+                    stats["ai_value_count"] = 1
+                if value in (None, "") and bool(raw_slot.get("required", True)):
+                    raise ValueError(f"DOCX 必填槽位没有可写入值：{slot_id}")
+            else:
+                raise ValueError(f"DOCX 槽位 mode 无效：{slot_id}")
+            value_text = "" if value is None else str(value)
+            if bool(raw_slot.get("preserves_direct_layout_markers")) and any(
+                control in value_text for control in ("\t", "\r", "\n")
+            ):
+                raise ValueError(
+                    f"DOCX 带布局标记的 DOCVARIABLE 槽位不能写入制表符或换行：{slot_id}"
+                )
+            if len(value_text) > int(raw_slot.get("max_chars") or 1200):
+                raise ValueError(f"DOCX 槽位文本超过声明长度：{slot_id}")
+            text_changed = value_text != current_text
+            if text_changed:
+                if paragraph is not None:
+                    _set_docx_paragraph_text(paragraph, value_text)
+                elif cell is not None:
+                    _set_docx_cell_text(cell, value_text)
+            wrote_value = text_changed or field_materialized
+            if wrote_value:
+                changed += 1
+            stats["changed"] = wrote_value
+            stats["source_kinds"] = source_kinds
+            if any(kind in {"fact", "table_value"} for kind in source_kinds) and value_text:
+                stats["structured_value_count"] = 1
+            written_slot_ids.append(slot_id)
+            slot_contract_stats.append(stats)
+        context["__docx_field_schema_slot_count__"] = changed
+        context["__docx_written_slot_ids__"] = written_slot_ids
+        context["__docx_materialized_docvariable_slot_ids__"] = (
+            materialized_docvariable_slot_ids
+        )
+        context["__docx_slot_contract_stats__"] = slot_contract_stats
+        return changed
+    if context.get("__strict_client_delivery__"):
+        raise ValueError("DOCX 正式交付必须使用经确认的 slot_contract")
+    if not isinstance(schema, dict):
+        return 0
+    docx_schema = schema.get("docx") if isinstance(schema.get("docx"), dict) else schema
+    raw_mappings: dict[str, Any] = {}
+    for key in ("paragraphs", "field_to_paragraph", "cells", "field_to_cell", "slots"):
+        candidate = docx_schema.get(key)
+        if isinstance(candidate, dict):
+            raw_mappings.update(candidate)
+        elif isinstance(candidate, list):
+            for item in candidate:
+                if not isinstance(item, dict):
+                    continue
+                target = item.get("target") or item.get("slot") or item.get("address")
+                field = item.get("field") or item.get("key") or item.get("source")
+                if target and field:
+                    raw_mappings[str(target)] = field
+
+    def is_target(value: Any) -> bool:
+        return bool(
+            re.fullmatch(r"(?:paragraph|p)[:\[]\d+\]?", str(value or ""), re.IGNORECASE)
+            or re.fullmatch(
+                r"(?:table|tbl)[:\[]\d+\]?(?:[,./:]?(?:row|r)[:\[]\d+\]?)?(?:[,./:]?(?:cell|col|c)[:\[]\d+\]?)?",
+                str(value or ""),
+                re.IGNORECASE,
+            )
+        )
+
+    changed = 0
+    for raw_target, key_spec in raw_mappings.items():
+        target = str(raw_target)
+        field_spec = key_spec
+        if not is_target(target) and isinstance(key_spec, str) and is_target(key_spec):
+            target, field_spec = key_spec, raw_target
+        if not is_target(target):
+            continue
+        field = str(
+            field_spec.get("source") or field_spec.get("key")
+            if isinstance(field_spec, dict)
+            else field_spec
+        ).strip()
+        if not field:
+            continue
+        value = _field_schema_value(schema, context, field)
+        if value in (None, ""):
+            continue
+        paragraph_match = re.fullmatch(r"(?:paragraph|p)[:\[](?P<index>\d+)\]?", target, re.IGNORECASE)
+        if paragraph_match:
+            index = int(paragraph_match.group("index"))
+            if 0 <= index < len(document.paragraphs):
+                _set_docx_paragraph_text(document.paragraphs[index], str(value))
+                changed += 1
+            continue
+        numbers = [int(item) for item in re.findall(r"\d+", target)]
+        if len(numbers) != 3:
+            continue
+        table_index, row_index, column_index = numbers
+        if (
+            0 <= table_index < len(document.tables)
+            and 0 <= row_index < len(document.tables[table_index].rows)
+            and 0 <= column_index < len(document.tables[table_index].rows[row_index].cells)
+        ):
+            _set_docx_cell_text(
+                document.tables[table_index].rows[row_index].cells[column_index], value
+            )
+            changed += 1
+    context["__docx_field_schema_slot_count__"] = changed
+    return changed
+
+
 def render_template_file(data: bytes, file_name: str, context: dict[str, Any]) -> tuple[bytes, str]:
     """Render a template without changing its original file format."""
 
@@ -4223,6 +5455,10 @@ def render_template_file(data: bytes, file_name: str, context: dict[str, Any]) -
     if extension == ".xls":
         return _render_xls(data, context)
     if extension == ".doc":
+        if context.get("__strict_client_delivery__"):
+            raise ValueError(
+                "年度审计客户附件不支持旧版 .doc 模板，请使用经确认槽位契约的 DOCX 模板"
+            )
         return _render_doc(data, context)
     if extension in {".md", ".markdown", ".txt", ".csv"}:
         return _render_text_template(data, extension, context)
@@ -4233,7 +5469,7 @@ def render_template_file(data: bytes, file_name: str, context: dict[str, Any]) -
 
 
 def _money(value: Any) -> str:
-    """格式化金额为千分位两位小数，用于模板填充。"""
+    """将冻结事实金额格式化为财务附件展示值。"""
 
     from decimal import Decimal, InvalidOperation
 
@@ -4245,11 +5481,10 @@ def _money(value: Any) -> str:
 
 
 def _context(snapshot: dict[str, Any], report_text: str, package_version: int, template: dict[str, Any], workpaper: dict[str, Any] | None = None, *, template_type: str = "", engagement_id: int = 0, settings: Settings | None = None, material_index: dict[str, Any] | None = None, source_file_name: str = "") -> dict[str, Any]:
-    """构建模板填充上下文。
+    """构建冻结附件编制上下文。
 
-    根据 new_docs 中的审计报告模板要求，提取快照中所有可用的审计
-    数据字段，使年度审计报告、财务报表、附注和管理建议书都能从
-    同一确定性快照中获得填充值。
+    提取冻结审计快照中的可用事实，使报告、财务报表、附注和管理
+    建议书从同一确定性证据上下文中编制；模板只定义内容范围和设计原型。
     """
 
     engagement = snapshot.get("engagement") or {}
@@ -4267,6 +5502,20 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", period_start_display):
         period_start_display = f"{period_start_display[0:4]}年{int(period_start_display[5:7])}月{int(period_start_display[8:10])}日"
     issue_year = int(fiscal_year or 0) + 1 if str(fiscal_year).isdigit() else ""
+    issue_date = (
+        engagement.get("issue_date")
+        or engagement.get("report_date")
+        or snapshot.get("issue_date")
+        or snapshot.get("report_date")
+        or ""
+    )
+    issue_date_display = str(issue_date)
+    issue_date_match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", issue_date_display)
+    if issue_date_match:
+        issue_date_display = (
+            f"{issue_date_match.group(1)}年{int(issue_date_match.group(2))}月"
+            f"{int(issue_date_match.group(3))}日"
+        )
     engagement_name = str(
         engagement.get("name")
         or engagement.get("case_name")
@@ -4325,7 +5574,7 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
         snapshot,
     )
 
-    # 表格填充值：覆盖 new_docs 模板中常见的报表项目
+    # 结构化表格事实：覆盖模板设计中常见的报表项目。
     table_values = {
         "应收账款": receivables_balance,
         "营业收入": net_revenue,
@@ -4336,11 +5585,14 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
     }
 
     material_index = material_index or {}
+    statement_values = filter_unavailable_statement_sources(
+        material_index.get("statement_values") or {}
+    )
 
-    # 从数据库加载科目余额表，用实际科目余额填充财务报表表格
-    # 科目余额表是最权威的数据源，优先覆盖快照中的汇总值
-    trial_balance: dict[str, Any] = {"accounts": [], "by_name": {}}
-    if engagement_id and settings:
+    # 从数据库加载科目余额表，以实际科目余额重建财务报表业务值。
+    # 科目余额表是最权威的数据源，优先于快照中的汇总值。
+    trial_balance: dict[str, Any] = dict(material_index.get("trial_balance") or {})
+    if not trial_balance and engagement_id and settings:
         trial_balance = _load_trial_balance(engagement_id, settings)
     balance_by_name = trial_balance.get("by_name") or {}
 
@@ -4356,12 +5608,13 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
         # 跳过余额全为零的科目
         if closing_debit == 0 and closing_credit == 0 and opening_debit == 0 and opening_credit == 0:
             continue
-        # 优先使用期末借方余额，其次期末贷方余额
-        balance_value = closing_debit if closing_debit != 0 else closing_credit
+        # 同一科目可能同时存在借、贷余额列；以净额绝对值呈现，不能按“借方非零
+        # 就忽略贷方”的方式制造虚假余额。
+        balance_value = abs(closing_debit - closing_credit)
         # 科目余额表数据优先覆盖
         table_values[acct_name] = balance_value
         # 同时提供期初余额
-        opening_value = opening_debit if opening_debit != 0 else opening_credit
+        opening_value = abs(opening_debit - opening_credit)
         table_values[f"{acct_name}_期初"] = opening_value
 
     # Presentation aliases are standard accounting labels, not a per-template
@@ -4378,16 +5631,16 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
         source = balance_by_name[source_name]
         debit = source.get("closing_debit") or 0
         credit = source.get("closing_credit") or 0
-        table_values[alias] = debit if debit != 0 else credit
+        table_values[alias] = abs(debit - credit)
         opening_debit = source.get("opening_debit") or 0
         opening_credit = source.get("opening_credit") or 0
-        table_values[f"{alias}_期初"] = opening_debit if opening_debit != 0 else opening_credit
+        table_values[f"{alias}_期初"] = abs(opening_debit - opening_credit)
 
     # Profit/cash-flow/detail workpapers provide line-item values that are not
     # represented in the normalized balance table. They override broad
     # account-label matches (for example, investment income must not inherit
     # the trading-financial-asset balance).
-    for label, item in (material_index.get("statement_values") or {}).items():
+    for label, item in statement_values.items():
         if not isinstance(item, dict) or not any(
             isinstance(item.get(period), (int, float)) for period in ("current", "opening")
         ):
@@ -4408,7 +5661,7 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
     # Presentation labels in the generic note template differ from the
     # audited statement sheets.  These are deterministic aliases over the
     # same extracted facts, never newly inferred amounts.
-    statement_index = material_index.get("statement_values") or {}
+    statement_index = statement_values
     for alias, source_name in {
         "银行存款": "银行存款",
         "其他应收款项": "其他应收款",
@@ -4437,7 +5690,7 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
         or case_summary.get("is_complete_case")
     )
 
-    fact_statement_values = material_index.get("statement_values") or {}
+    fact_statement_values = statement_values
     if template_type == "notes":
         # A 0.00 carried by a generic/formula-broken statement cell is not a
         # basis for retaining an optional disclosure schedule.  Non-zero
@@ -4468,6 +5721,8 @@ def _context(snapshot: dict[str, Any], report_text: str, package_version: int, t
         "审计期间": f"{period_start_display} 至 {period_end_display}" if period_start_display and period_end_display else "",
         "资产负债日": period_end_display,
         "issue_year": issue_year,
+        "issue_date": issue_date_display,
+        "审计报告日期": issue_date_display,
         # 项目信息
         "engagement_code": engagement.get("engagement_code") or snapshot.get("engagement_code") or "",
         "项目编号": engagement.get("engagement_code") or snapshot.get("engagement_code") or "",
@@ -4578,11 +5833,277 @@ def _validate_rendered_file(data: bytes, file_name: str) -> dict[str, Any]:
     }
 
 
+def _materialized_docvariable_target_paths(
+    document: Any,
+    render_context: dict[str, Any] | None,
+    materialized_slot_ids: set[str],
+) -> dict[str, set[str]]:
+    """Locate only the source paragraphs whose DOCVARIABLEs were approved.
+
+    The fidelity comparison must not ignore every DOCVARIABLE in a document
+    merely because one header identity slot was materialised.  These paths are
+    computed from the frozen contract and exact source document; a resolution
+    failure stays visible as a failed format check.
+    """
+
+    if not materialized_slot_ids:
+        return {}
+    contract = (render_context or {}).get("__attachment_slot_contract__") or {}
+    if not isinstance(contract, dict):
+        return {}
+    result: dict[str, set[str]] = {}
+    for raw_slot in contract.get("slots") or []:
+        if not isinstance(raw_slot, dict):
+            continue
+        if str(raw_slot.get("slot_id") or "") not in materialized_slot_ids:
+            continue
+        if not bool(raw_slot.get("materializes_docvariable_fields")):
+            continue
+        target = str(raw_slot.get("target") or "")
+        paragraph: Any | None = None
+        part_name = "word/document.xml"
+        body_match = re.fullmatch(r"paragraph:(?P<index>\d+)", target)
+        frame_match = re.fullmatch(
+            r"(?P<frame>header|footer):(?P<section>\d+),paragraph:(?P<paragraph>\d+)",
+            target,
+            re.IGNORECASE,
+        )
+        table_match = re.fullmatch(
+            r"table:(?P<table>\d+),row:(?P<row>\d+),cell:(?P<cell>\d+)",
+            target,
+            re.IGNORECASE,
+        )
+        try:
+            if body_match:
+                paragraph = document.paragraphs[int(body_match.group("index"))]
+            elif frame_match:
+                section = document.sections[int(frame_match.group("section"))]
+                frame = getattr(section, frame_match.group("frame").lower())
+                paragraph = frame.paragraphs[int(frame_match.group("paragraph"))]
+                part_name = str(frame.part.partname).lstrip("/")
+            elif table_match:
+                table = document.tables[int(table_match.group("table"))]
+                cell = table.rows[int(table_match.group("row"))].cells[
+                    int(table_match.group("cell"))
+                ]
+                if len(cell.paragraphs) == 1:
+                    paragraph = cell.paragraphs[0]
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            paragraph = None
+        if paragraph is None:
+            continue
+        result.setdefault(part_name, set()).add(
+            paragraph._p.getroottree().getpath(paragraph._p)
+        )
+    return result
+
+
+def _strip_docx_docvariable_field_geometry(
+    root: Any,
+    *,
+    target_paragraph_paths: set[str],
+) -> None:
+    """Remove only DOCVARIABLE field mechanics from an in-memory XML tree.
+
+    A declared header slot may convert a DOCVARIABLE result into literal text
+    so that Word refreshes cannot restore a sample entity or period.  That
+    conversion is a content change, not a visual-layout change.  The caller
+    supplies only exact bound paragraph paths; PAGE, REF, every unbound
+    DOCVARIABLE and all other fields remain in the fingerprint.
+    """
+
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    field_tag = f"{{{namespace}}}fldChar"
+    instruction_tag = f"{{{namespace}}}instrText"
+    simple_field_tag = f"{{{namespace}}}fldSimple"
+    field_type_attr = f"{{{namespace}}}fldCharType"
+    simple_instruction_attr = f"{{{namespace}}}instr"
+    paragraph_tag = f"{{{namespace}}}p"
+    tree = root.getroottree()
+
+    def is_target_paragraph(node: Any) -> bool:
+        current = node
+        while current is not None and current.tag != paragraph_tag:
+            current = current.getparent()
+        return current is not None and tree.getpath(current) in target_paragraph_paths
+
+    # Normalize simple fields to their cached result runs before handling
+    # complex fields.  This mirrors the materialisation performed by the
+    # renderer without changing the source package itself.
+    for simple_field in list(root.iter(simple_field_tag)):
+        if not is_target_paragraph(simple_field):
+            continue
+        instruction = str(simple_field.get(simple_instruction_attr) or "")
+        if not re.match(r"^\s*DOCVARIABLE(?:\s|$)", instruction, re.IGNORECASE):
+            continue
+        parent = simple_field.getparent()
+        if parent is None:
+            continue
+        position = parent.index(simple_field)
+        for child in list(simple_field):
+            simple_field.remove(child)
+            parent.insert(position, child)
+            position += 1
+        parent.remove(simple_field)
+
+    removable: list[Any] = []
+    stack: list[dict[str, Any]] = []
+    for node in root.iter():
+        if node.tag == field_tag:
+            field_type = str(node.get(field_type_attr) or "").lower()
+            if field_type == "begin":
+                stack.append(
+                    {
+                        "nodes": [node],
+                        "instructions": [],
+                        "allowed": is_target_paragraph(node),
+                    }
+                )
+            elif stack:
+                stack[-1]["nodes"].append(node)
+                if field_type == "end":
+                    field = stack.pop()
+                    command = "".join(
+                        str(item.text or "") for item in field["instructions"]
+                    )
+                    if field["allowed"] and re.match(
+                        r"^\s*DOCVARIABLE(?:\s|$)", command, re.IGNORECASE
+                    ):
+                        removable.extend(field["nodes"])
+                        removable.extend(field["instructions"])
+        elif node.tag == instruction_tag and stack:
+            stack[-1]["instructions"].append(node)
+    for node in removable:
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+
+
+def _normalized_docx_layout_xml(
+    value: bytes,
+    *,
+    materialized_docvariable_target_paths: set[str] | None = None,
+) -> bytes:
+    """Return Word layout XML with text and authoring ink removed.
+
+    This is deliberately narrower than a file hash: client values may change,
+    but a template-fidelity render must leave body order, sections, table
+    geometry, paragraph properties, run properties, drawings and headers in
+    the same structural form.
+    """
+
+    from lxml import etree
+
+    word_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = etree.fromstring(value)
+    if materialized_docvariable_target_paths:
+        _strip_docx_docvariable_field_geometry(
+            root,
+            target_paragraph_paths=materialized_docvariable_target_paths,
+        )
+    for element in root.iter():
+        local_name = etree.QName(element).localname
+        # Field instructions are document behavior (PAGE, REF, formulas), not
+        # customer text.  Retain them in the layout fingerprint so an
+        # undeclared field cannot be changed or deleted behind a text-only
+        # fidelity comparison.  Approved DOCVARIABLE instructions are removed
+        # earlier and only at their exact bound paragraph paths.
+        if local_name in {"t", "delText"}:
+            element.text = ""
+            element.attrib.pop("{http://www.w3.org/XML/1998/namespace}space", None)
+        for attribute in list(element.attrib):
+            if etree.QName(attribute).localname.lower().startswith("rsid"):
+                del element.attrib[attribute]
+    namespaces = {"w": word_ns}
+    for run_properties in root.xpath(".//w:rPr", namespaces=namespaces):
+        for marker in run_properties.xpath("./w:highlight | ./w:shd", namespaces=namespaces):
+            run_properties.remove(marker)
+    for marker in root.xpath(
+        ".//w:commentRangeStart | .//w:commentRangeEnd | .//w:commentReference",
+        namespaces=namespaces,
+    ):
+        parent = marker.getparent()
+        if parent is not None:
+            parent.remove(marker)
+    # A value written into a previously empty table cell necessarily adds a
+    # text-only run.  It inherits the paragraph's template typography, so it
+    # is data rather than layout geometry.  Ignore such carriers while still
+    # retaining every run that has explicit formatting or field/drawing/tab
+    # structure of its own.
+    run_tag = f"{{{word_ns}}}r"
+    text_tag = f"{{{word_ns}}}t"
+    for run in list(root.iter(run_tag)):
+        if all(child.tag == text_tag for child in run):
+            parent = run.getparent()
+            if parent is not None:
+                parent.remove(run)
+    return etree.tostring(root, method="c14n")
+
+
+def _docx_layout_part_hashes(
+    data: bytes,
+    *,
+    materialized_docvariable_target_paths: dict[str, set[str]] | None = None,
+) -> dict[str, str]:
+    """Fingerprint all layout-bearing Word parts, ignoring visible text."""
+
+    with zipfile.ZipFile(BytesIO(data)) as archive:
+        parts = {
+            name: _normalized_docx_layout_xml(
+                archive.read(name),
+                materialized_docvariable_target_paths=(
+                    materialized_docvariable_target_paths or {}
+                ).get(name),
+            )
+            for name in archive.namelist()
+            if name == "word/document.xml"
+            or name.startswith("word/header") and name.endswith(".xml")
+            or name.startswith("word/footer") and name.endswith(".xml")
+        }
+    return {name: hashlib.sha256(value).hexdigest() for name, value in parts.items()}
+
+
+def _docx_preserve_only_part_hashes(data: bytes) -> dict[str, str]:
+    """Fingerprint design-system parts without serializer-only OOXML noise.
+
+    ``python-docx`` rewrites XML namespace/attribute order and relationship
+    serialisation even when a part's visible design is untouched.  XML parts
+    therefore use the same canonical form as the layout check; binary assets
+    retain an exact byte hash.
+    """
+
+    prefixes = ("word/media/", "word/theme/", "word/embeddings/", "customXml/")
+    exact = {
+        "word/styles.xml",
+        "word/numbering.xml",
+        "word/fontTable.xml",
+        "word/settings.xml",
+        "word/webSettings.xml",
+    }
+    with zipfile.ZipFile(BytesIO(data)) as archive:
+        fingerprints: dict[str, str] = {}
+        for name in archive.namelist():
+            if name not in exact and not name.startswith(prefixes):
+                continue
+            value = archive.read(name)
+            if name.endswith((".xml", ".rels")):
+                try:
+                    value = _normalized_docx_layout_xml(value)
+                except Exception:
+                    # An extension can be XML-like without containing a
+                    # parsable XML payload.  In that case, retain byte-level
+                    # protection rather than silently excluding it.
+                    pass
+            fingerprints[name] = hashlib.sha256(value).hexdigest()
+        return fingerprints
+
+
 def _validate_template_format_fidelity(
     source_data: bytes,
     rendered_data: bytes,
     *,
     source_file_name: str,
+    render_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify that a rendering retained the uploaded template's format frame.
 
@@ -4609,8 +6130,56 @@ def _validate_template_format_fidelity(
         }
         preserved_headers_footers = source_headers_footers <= rendered_parts
         style_coverage = source_style_names <= rendered_style_names
-        table_not_expanded = len(rendered.tables) <= len(source.tables)
-        passed = required_parts <= rendered_parts and style_coverage and preserved_headers_footers and table_not_expanded
+        materialized_docvariable_slot_ids = (
+            (render_context or {}).get("__docx_materialized_docvariable_slot_ids__")
+            or []
+        )
+        if isinstance(materialized_docvariable_slot_ids, (str, bytes, bytearray)):
+            materialized_docvariable_slot_ids = [materialized_docvariable_slot_ids]
+        materialized_docvariable_slot_ids = {
+            str(item)
+            for item in materialized_docvariable_slot_ids
+            if str(item).strip()
+        }
+        materialized_docvariable_paths = _materialized_docvariable_target_paths(
+            source,
+            render_context,
+            materialized_docvariable_slot_ids,
+        )
+        materialized_docvariable_target_count = sum(
+            len(paths) for paths in materialized_docvariable_paths.values()
+        )
+        materialized_docvariable_targets_resolved = (
+            materialized_docvariable_target_count == len(materialized_docvariable_slot_ids)
+        )
+        source_layout_hashes = _docx_layout_part_hashes(
+            source_data,
+            materialized_docvariable_target_paths=materialized_docvariable_paths,
+        )
+        rendered_layout_hashes = _docx_layout_part_hashes(
+            rendered_data,
+            materialized_docvariable_target_paths=materialized_docvariable_paths,
+        )
+        layout_parts_preserved = source_layout_hashes == rendered_layout_hashes
+        source_preserve_only_hashes = _docx_preserve_only_part_hashes(source_data)
+        rendered_preserve_only_hashes = _docx_preserve_only_part_hashes(rendered_data)
+        preserve_only_parts_unchanged = source_preserve_only_hashes == rendered_preserve_only_hashes
+        same_body_child_count = len(source._element.body) == len(rendered._element.body)
+        same_paragraph_count = len(source.paragraphs) == len(rendered.paragraphs)
+        same_table_count = len(source.tables) == len(rendered.tables)
+        same_section_count = len(source.sections) == len(rendered.sections)
+        passed = (
+            required_parts <= rendered_parts
+            and style_coverage
+            and preserved_headers_footers
+            and layout_parts_preserved
+            and materialized_docvariable_targets_resolved
+            and preserve_only_parts_unchanged
+            and same_body_child_count
+            and same_paragraph_count
+            and same_table_count
+            and same_section_count
+        )
         return {
             "format_contract_checked": True,
             "format_contract_passed": passed,
@@ -4623,7 +6192,23 @@ def _validate_template_format_fidelity(
             "output_style_count": len(rendered_style_names),
             "style_coverage": style_coverage,
             "header_footer_parts_preserved": preserved_headers_footers,
-            "no_new_template_tables": table_not_expanded,
+            "source_body_child_count": len(source._element.body),
+            "output_body_child_count": len(rendered._element.body),
+            "source_section_count": len(source.sections),
+            "output_section_count": len(rendered.sections),
+            "body_child_count_preserved": same_body_child_count,
+            "paragraph_count_preserved": same_paragraph_count,
+            "table_count_preserved": same_table_count,
+            "section_count_preserved": same_section_count,
+            "layout_parts_preserved": layout_parts_preserved,
+            "docvariable_materialization_slot_count": len(
+                materialized_docvariable_slot_ids
+            ),
+            "docvariable_materialization_target_count": materialized_docvariable_target_count,
+            "docvariable_materialization_targets_resolved": materialized_docvariable_targets_resolved,
+            "preserve_only_parts_unchanged": preserve_only_parts_unchanged,
+            "checked_layout_part_count": len(source_layout_hashes),
+            "checked_preserve_only_part_count": len(source_preserve_only_hashes),
         }
     if extension in {".xlsx", ".xlsm"}:
         from openpyxl import load_workbook
@@ -4674,22 +6259,25 @@ def _validate_rendered_template_content(
     from docx import Document
 
     document = Document(BytesIO(data))
-    text_parts = [paragraph.text or "" for paragraph in document.paragraphs]
-    text_parts.extend(
-        cell.text or ""
-        for table in document.tables
-        for row in table.rows
-        for cell in row.cells
+    story_parts = _docx_ooxml_text_parts(data)
+    body_content = _docx_document_text(document)
+    content = "\n".join(story_parts.values()) or body_content
+    strict_instruction_cleanliness = bool(
+        isinstance(render_context, dict)
+        and render_context.get("__strict_client_delivery__")
     )
-    content = "\n".join(text_parts)
+    marker_content = content if strict_instruction_cleanliness else body_content
     unresolved_markers = len(
         re.findall(
             r"X{2,}|x{2,}|20XX|一般企业模板|\{\{[^}]+\}\}|\[\[[^\]]+\]\]",
-            content,
+            marker_content,
         )
     )
-    instruction_markers = sum(content.count(marker) for marker in _GENERIC_NOTE_INSTRUCTION_MARKERS)
-    instruction_markers += content.count("[或适用]")
+    instruction_source = content if strict_instruction_cleanliness else body_content
+    instruction_markers = sum(
+        instruction_source.count(marker) for marker in _GENERIC_NOTE_INSTRUCTION_MARKERS
+    )
+    instruction_markers += instruction_source.count("[或适用]")
     missing_outer_border_tables = 0
     if template_type == "notes":
         missing_outer_border_tables = sum(
@@ -4698,21 +6286,53 @@ def _validate_rendered_template_content(
             if not all(_docx_table_has_outer_borders(table))
         )
     render_contract = (render_context or {}).get("__template_render_contract__") or {}
-    requires_annotation_cleanliness = (
+    requires_annotation_cleanliness = strict_instruction_cleanliness or (
         isinstance(render_contract, dict)
         and render_contract.get("authoring_annotation_policy") == "clear_template_authoring_marks"
     )
+    declared_slot_contract = (
+        (render_context or {}).get("__attachment_slot_contract__") or {}
+    )
+    if strict_instruction_cleanliness and not (
+        isinstance(declared_slot_contract, dict)
+        and declared_slot_contract.get("declared")
+        and declared_slot_contract.get("slots")
+    ):
+        raise ValueError("DOCX 正式交付缺少经确认的 slot_contract")
     authoring_annotation_count = _docx_authoring_annotation_count(document)
+    internal_trace_matches = sorted(
+        {
+            match.group(0)
+            for pattern in _CLIENT_DELIVERY_TRACE_PATTERNS
+            for match in pattern.finditer(content)
+        }
+    )
+    known_evidence_ids = (
+        (render_context or {}).get("__attachment_known_evidence_ids__") or set()
+    )
+    if isinstance(known_evidence_ids, (str, bytes, bytearray)):
+        known_evidence_ids = [known_evidence_ids]
+    if isinstance(known_evidence_ids, (list, tuple, set, frozenset)):
+        internal_trace_matches.extend(
+            f"known-evidence-id:{value}"
+            for value in known_evidence_ids
+            if len(str(value).strip()) >= 4 and str(value) in content
+        )
+    internal_trace_matches = sorted(set(internal_trace_matches))
     if (
         unresolved_markers
-        or (template_type == "notes" and instruction_markers)
-        or missing_outer_border_tables
+        or (
+            strict_instruction_cleanliness
+            and instruction_markers
+        )
         or (requires_annotation_cleanliness and authoring_annotation_count)
+        or internal_trace_matches
     ):
         raise ValueError(
-            f"{template_type} 渲染后仍含模板占位/说明文字或作者批注："
+            f"{template_type} 渲染后仍含模板占位、说明文字、内部追溯信息或作者批注："
             f"占位符 {unresolved_markers} 个，说明文字 {instruction_markers} 个，"
-            f"左右边框缺失表格 {missing_outer_border_tables} 个，作者批注 {authoring_annotation_count} 个"
+            f"左右边框缺失表格 {missing_outer_border_tables} 个，内部追溯标记 {len(internal_trace_matches)} 个，"
+            f"作者批注 {authoring_annotation_count} 个"
         )
     return {
         "content_checked": True,
@@ -4720,7 +6340,10 @@ def _validate_rendered_template_content(
         "table_count": len(document.tables),
         "unresolved_marker_count": unresolved_markers,
         "instruction_marker_count": instruction_markers,
+        "strict_instruction_cleanliness": strict_instruction_cleanliness,
+        "checked_story_part_count": len(story_parts),
         "missing_outer_border_table_count": missing_outer_border_tables,
+        "internal_trace_marker_count": len(internal_trace_matches),
         "authoring_annotation_count": authoring_annotation_count,
     }
 
@@ -4817,12 +6440,14 @@ def _result_placement_description(template_type: str, source_name: str) -> str:
     """Describe where structured audit values are allowed to land."""
 
     extension = Path(source_name).suffix.lower()
+    if extension == ".docx":
+        return "仅在经确认的段落、表格、DOCVARIABLE 或文本槽位原位填充；不重建正文、不新增段落或表格、不写入证据追溯信息"
     if template_type == "annual_report":
-        return "模板原有报告正文中的主体、年度、报告编号及审计意见草稿位置"
+        return "模板显式结果字段或字段映射；未定义承载位置时阻断交付"
     if template_type == "financial_statements":
-        return "模板原有报表科目行的期末/期初或本期/上期金额列；保留公式和原工作表"
+        return "按模板工作表、公式和已声明科目单元格填入冻结结构化事实"
     if template_type == "notes":
-        return "模板原有附注正文占位、报表项目表格及金额列"
+        return "模板显式结果字段或字段映射；未定义承载位置时阻断交付"
     if template_type == "management_letter":
         return "模板显式结果字段或字段映射；未定义承载位置时阻断交付"
     if extension in {".md", ".markdown", ".txt", ".csv"}:
@@ -4830,6 +6455,406 @@ def _result_placement_description(template_type: str, source_name: str) -> str:
     if extension == ".pdf":
         return "模板已有 AcroForm 字段；不追加新页面"
     return "模板显式字段或结构化表格位置"
+
+
+class AttachmentItemGenerationError(RuntimeError):
+    """Stage-aware error consumed by the durable attachment runner."""
+
+    def __init__(self, message: str, *, stage: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.retryable = retryable
+
+
+def _planned_generation_item(
+    preflight_plan: dict[str, Any],
+    generation_item: dict[str, Any],
+) -> dict[str, Any]:
+    template_type = str(generation_item.get("attachment_type") or generation_item.get("template_type") or "")
+    file_name = str(generation_item.get("source_file_name") or generation_item.get("file_name") or "")
+    file_id = int(generation_item.get("template_file_id") or 0)
+    source_sha256 = str(generation_item.get("source_sha256") or generation_item.get("source_template_sha256") or "")
+    matches = []
+    for raw in preflight_plan.get("templates") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("template_type") or "") != template_type:
+            continue
+        if file_id and int(raw.get("template_file_id") or 0) != file_id:
+            continue
+        if file_name and str(raw.get("file_name") or "") != file_name:
+            continue
+        if source_sha256 and str(raw.get("source_template_sha256") or "") != source_sha256:
+            continue
+        matches.append(raw)
+    if len(matches) != 1:
+        raise AttachmentItemGenerationError(
+            "冻结子任务无法唯一匹配模板文件身份",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+    return dict(matches[0])
+
+
+def generate_annual_attachment_item(
+    engagement_id: int,
+    *,
+    generation_item: dict[str, Any],
+    preflight_plan: dict[str, Any],
+    reserved_package_id: int | None = None,
+    reserved_package_version: int,
+    created_by: str = "ai_agent",
+    generation_run_id: str = "",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Generate exactly one frozen template file without replanning.
+
+    This is the only entry used by durable child workers.  It deliberately
+    never calls ``generate_annual_report_draft``, ``_load_latest_report`` or
+    ``get_active_template_catalog``.  Repeated attempts therefore consume the
+    same report, material evidence, template bytes identity and blueprint.
+    """
+
+    resolved = settings or get_settings()
+    if int(preflight_plan.get("engagement_id") or 0) != engagement_id:
+        raise AttachmentItemGenerationError(
+            "冻结计划与当前审计项目不一致",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+    frozen_report = preflight_plan.get("frozen_report") or {}
+    snapshot = dict(frozen_report.get("fact_snapshot") or {})
+    report_text = str(frozen_report.get("report_text") or "")
+    if not snapshot or not report_text:
+        raise AttachmentItemGenerationError(
+            "冻结审计报告输入不完整",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+    expected_snapshot_hash = str(frozen_report.get("snapshot_sha256") or "")
+    if expected_snapshot_hash and expected_snapshot_hash != _stable_snapshot_hash(snapshot):
+        raise AttachmentItemGenerationError(
+            "冻结审计事实快照哈希不一致",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+
+    planned = _planned_generation_item(preflight_plan, generation_item)
+    template_type = str(planned.get("template_type") or generation_item.get("attachment_type") or "")
+    source_name = str(planned.get("file_name") or generation_item.get("source_file_name") or "template")
+    source_storage_ref = str(
+        generation_item.get("source_storage_ref")
+        or planned.get("source_storage_ref")
+        or ""
+    )
+    source_sha256 = str(
+        generation_item.get("source_sha256")
+        or planned.get("source_template_sha256")
+        or ""
+    )
+    if not source_storage_ref or not source_sha256:
+        raise AttachmentItemGenerationError(
+            "冻结模板文件引用不完整",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+    try:
+        source_bytes = get_minio_service().get_object_bytes(source_storage_ref)
+    except Exception as exc:
+        raise AttachmentItemGenerationError(
+            f"读取冻结模板文件失败：{str(exc)[:300]}",
+            stage="template_read",
+            retryable=True,
+        ) from exc
+    if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
+        raise AttachmentItemGenerationError(
+            "模板对象内容与冻结 SHA-256 不一致",
+            stage="frozen_input_validation",
+            retryable=False,
+        )
+
+    template = dict(planned.get("template_snapshot") or {})
+    item_template = generation_item.get("template_snapshot") or {}
+    if isinstance(item_template, str):
+        try:
+            item_template = json.loads(item_template)
+        except json.JSONDecodeError:
+            item_template = {}
+    if isinstance(item_template, dict):
+        nested = item_template.get("template")
+        if isinstance(nested, dict):
+            template.update(nested)
+        else:
+            template.update(
+                {
+                    key: value
+                    for key, value in item_template.items()
+                    if key in {
+                        "template_code",
+                        "template_type",
+                        "version_no",
+                        "version_label",
+                        "content_hash",
+                        "content",
+                        "field_schema",
+                        "template_contract",
+                    }
+                }
+            )
+    template.setdefault("template_type", template_type)
+
+    ordinal = int(generation_item.get("ordinal_no") or 0)
+    code = _infer_workpaper_code(source_name) if template_type == "audit_workpaper" else ""
+    workpaper = {"code": code, "name": source_name} if code else None
+    render_context = _context(
+        snapshot,
+        report_text,
+        int(reserved_package_version),
+        template,
+        workpaper,
+        template_type=template_type,
+        engagement_id=engagement_id,
+        settings=resolved,
+        material_index=dict(preflight_plan.get("material_index") or {}),
+        source_file_name=source_name,
+    )
+    blueprint = planned.get("blueprint") or {}
+    extension = Path(source_name).suffix.lower()
+    authored: dict[str, Any] = {}
+    if extension in {".docx", ".md", ".markdown", ".txt"}:
+        frozen_authoring_context = planned.get("frozen_authoring_context") or {}
+        if not blueprint or not frozen_authoring_context:
+            raise AttachmentItemGenerationError(
+                "完整附件缺少冻结蓝图或章节证据",
+                stage="authoring_precondition",
+                retryable=False,
+            )
+        try:
+            from .attachment_document_author_service import (
+                AttachmentDocumentAuthoringUnavailable,
+                AttachmentDocumentValidationError,
+                attach_authored_document_to_context,
+                author_attachment_document,
+            )
+
+            authored = author_attachment_document(
+                blueprint=blueprint,
+                frozen_context=frozen_authoring_context,
+                settings=resolved,
+            )
+            render_context["__attachment_blueprint__"] = dict(blueprint)
+            blueprint_structure = blueprint.get("structure") or {}
+            if isinstance(blueprint_structure, dict) and isinstance(
+                blueprint_structure.get("slot_contract"), dict
+            ):
+                render_context["__attachment_slot_contract__"] = dict(
+                    blueprint_structure["slot_contract"]
+                )
+            attach_authored_document_to_context(render_context, authored)
+        except Exception as exc:
+            raise AttachmentItemGenerationError(
+                str(exc)[:1000],
+                stage="ai_complete_document_authoring",
+                retryable=not isinstance(
+                    exc,
+                    (
+                        AttachmentDocumentAuthoringUnavailable,
+                        AttachmentDocumentValidationError,
+                        ValueError,
+                    ),
+                ),
+            ) from exc
+    elif template_type == "financial_statements" and extension in {".xlsx", ".xlsm"}:
+        from .attachment_financial_author_service import (
+            FinancialAttachmentAuthoringUnavailable,
+            FinancialAttachmentValidationError,
+        )
+
+        try:
+            _prepare_financial_semantic_authoring(source_bytes, extension, render_context)
+        except Exception as exc:
+            raise AttachmentItemGenerationError(
+                str(exc)[:1000],
+                stage="ai_financial_semantic_planning",
+                retryable=not isinstance(
+                    exc,
+                    (
+                        FinancialAttachmentAuthoringUnavailable,
+                        FinancialAttachmentValidationError,
+                        ValueError,
+                    ),
+                ),
+            ) from exc
+
+    output_name = str(generation_item.get("output_file_name") or "") or _output_name(
+        template_type,
+        engagement_id,
+        int(reserved_package_version),
+        source_name,
+        code,
+        context=render_context,
+        duplicate_index=int(generation_item.get("duplicate_index") or 0),
+        duplicate_count=max(int(generation_item.get("duplicate_count") or 1), 1),
+    )
+    try:
+        render_context["__enforce_result_mapping__"] = True
+        render_context["__strict_client_delivery__"] = True
+        rendered_bytes, fill_status = render_template_file(source_bytes, source_name, render_context)
+        source_ext = Path(source_name).suffix.lower()
+        output_ext = Path(output_name).suffix.lower()
+        if not source_ext or source_ext != output_ext:
+            raise ValueError("模板格式与输出格式不一致")
+        if fill_status in _BLOCKED_RENDER_STATUSES:
+            raise ValueError(f"附件未完成可信编制：{fill_status}")
+        if rendered_bytes == source_bytes:
+            raise ValueError("生成结果与模板原文件完全相同")
+        render_contract = render_context.get("__template_render_contract__") or {}
+        if not bool(render_contract.get("audit_result_mapped")):
+            raise ValueError("附件没有承载完整 AI 文稿或结构化事实计划")
+        composition_manifest = render_context.get("__attachment_composition_manifest__") or {}
+        if authored and composition_manifest.get("source_business_body_reused") is not True:
+            raise ValueError("附件未证明已在原模板正文中原位填充")
+        if authored and composition_manifest.get("source_body_preserved") is not True:
+            raise ValueError("附件未证明保留了原模板正文结构")
+        if composition_manifest.get("unplaced_section_ids"):
+            sections = "、".join(
+                str(item) for item in composition_manifest.get("unplaced_section_ids")[:6]
+            )
+            raise ValueError(f"模板缺少允许写入的正文位，拒绝重建正文：{sections}")
+        validation = _validate_rendered_file(rendered_bytes, output_name)
+        validation.update(
+            _validate_rendered_template_content(
+                rendered_bytes,
+                template_type=template_type,
+                source_file_name=source_name,
+                render_context=render_context,
+            )
+        )
+        fidelity = _validate_template_format_fidelity(
+            source_bytes,
+            rendered_bytes,
+            source_file_name=source_name,
+            render_context=render_context,
+        )
+        validation["template_format_fidelity"] = fidelity
+        if fidelity.get("format_contract_checked") and not fidelity.get("format_contract_passed"):
+            raise ValueError("模板设计系统保真校验未通过")
+        quality_validation = evaluate_attachment_quality(
+            template_type=template_type,
+            rendered_bytes=rendered_bytes,
+            output_name=output_name,
+            snapshot=snapshot,
+            material_index=dict(preflight_plan.get("material_index") or {}),
+            render_context=render_context,
+            authored=authored,
+        )
+        if not bool(quality_validation.get("passed")):
+            blockers = "；".join(
+                str(item) for item in quality_validation.get("blockers") or []
+            )
+            raise ValueError(f"附件质量门禁未通过：{blockers or '未通过未分类检查'}")
+    except Exception as exc:
+        if isinstance(exc, AttachmentItemGenerationError):
+            raise
+        raise AttachmentItemGenerationError(
+            str(exc)[:1000],
+            stage="compose_and_validate",
+            retryable=False,
+        ) from exc
+
+    content_type = _content_type_for_file_name(
+        output_name,
+        str(generation_item.get("source_content_type") or planned.get("source_content_type") or ""),
+    )
+    run_key = _safe_filename_part(generation_run_id, "run")[:64]
+    try:
+        uploaded = get_minio_service().upload_artifact(
+            project_id=engagement_id,
+            file_name=output_name,
+            content_type=content_type,
+            file_bytes=rendered_bytes,
+            storage_file_name=(
+                f"package-v{reserved_package_version}-item-{ordinal}-{run_key}-{output_name}"
+            ),
+        )
+    except Exception as exc:
+        raise AttachmentItemGenerationError(
+            f"附件上传失败：{str(exc)[:300]}",
+            stage="artifact_upload",
+            retryable=True,
+        ) from exc
+
+    reference = ArtifactRef(
+        artifact_type=template_type if not code else f"{template_type}_{code}",
+        template_version=template_version_ref(template),
+        version=int(reserved_package_version),
+        storage_ref=uploaded.storage_ref,
+        content_type=content_type,
+        file_name=output_name,
+        status="draft",
+    ).to_dict()
+    from .attachment_document_author_service import public_authoring_manifest
+
+    declared_slot_contract = render_context.get("__attachment_slot_contract__") or {}
+    docx_slot_contract_verified = bool(
+        extension != ".docx"
+        or (
+            isinstance(declared_slot_contract, dict)
+            and declared_slot_contract.get("declared")
+            and declared_slot_contract.get("slots")
+        )
+    )
+    delivery_contract = {
+        "contract_version": "annual-attachment-delivery-contract-v1",
+        "frozen_plan_sha256": str(preflight_plan.get("frozen_input_sha256") or ""),
+        "template_file_id": planned.get("template_file_id"),
+        "source_template_sha256": source_sha256,
+        "output_sha256": validation["sha256"],
+        "docx_slot_contract_verified": docx_slot_contract_verified,
+        "template_fidelity_verified": bool(
+            not fidelity.get("format_contract_checked")
+            or fidelity.get("format_contract_passed")
+        ),
+    }
+    reference.update(
+        {
+            "template_file_id": planned.get("template_file_id"),
+            "source_template_file_name": source_name,
+            "source_template_file_ext": extension,
+            "output_file_ext": Path(output_name).suffix.lower(),
+            "template_fill_status": fill_status,
+            "rendered_from_template": True,
+            "template_used_as_design_blueprint": False,
+            "source_template_sha256": source_sha256,
+            "output_sha256": validation["sha256"],
+            "output_size": validation["size"],
+            "format_validation": validation,
+            "quality_validation": quality_validation,
+            "delivery_readiness": (
+                "ready" if quality_validation.get("passed") else "needs_review"
+            ),
+            "delivery_contract": delivery_contract,
+            "result_placement": _result_placement_description(template_type, source_name),
+            "audit_result_included": True,
+            "authoring": public_authoring_manifest(authored) if authored else {},
+            "composition": dict(render_context.get("__attachment_composition_manifest__") or {}),
+            "financial_semantic_plan": dict(render_context.get("__financial_semantic_manifest__") or {}),
+            "generation_ordinal": ordinal,
+            "package_version": int(reserved_package_version),
+            "template_mapping": {
+                "plan_version": preflight_plan.get("plan_version"),
+                "render_contract": _template_render_contract_evidence(render_context),
+                "material_catalog_sha256": (preflight_plan.get("material_catalog") or {}).get("catalog_sha256"),
+                "material_source_sha256": (preflight_plan.get("material_index") or {}).get("source_sha256"),
+                "frozen_report_id": frozen_report.get("report_id"),
+                "frozen_report_version": frozen_report.get("report_version"),
+                "frozen_report_snapshot_sha256": frozen_report.get("snapshot_sha256"),
+            },
+        }
+    )
+    if reserved_package_id:
+        reference["package_id"] = int(reserved_package_id)
+    return reference
 
 
 def generate_annual_attachment_package(
@@ -4840,11 +6865,11 @@ def generate_annual_attachment_package(
     settings: Settings | None = None,
     preflight_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Generate attachments from the exact files in active template versions.
+    """Compose a package from one frozen preflight and its template blueprints.
 
-    根据已激活的模板版本生成年度审计交付附件包。每个附件都从实际
-    上传的模板文件渲染而来，保留原文件格式（docx/xlsx/pdf/md 等），
-    并填充被审计单位、年度、审计结果等数据。
+    根据前置检查冻结的审计结果、项目证据、内容范围和版式原型编制年度
+    审计交付附件。叙事附件重新撰写完整正文；结构化附件从冻结事实重建
+    业务值。模板正文和示例金额只提供设计参考，不作为项目证据或交付正文。
 
     核心交付附件包括：年度审计报告、年度审计财务报表、财务报表附注。
     管理建议书是按模板单独生成的可选附件；审计工作底稿和函证属于
@@ -4852,21 +6877,37 @@ def generate_annual_attachment_package(
     """
 
     resolved = settings or get_settings()
-    selected_types = tuple(requested_types or DEFAULT_ATTACHMENT_TYPES)
-    catalog = get_active_template_catalog(settings=resolved)
-    known_attachment_types = set(DEFAULT_ATTACHMENT_TYPES) | set(OPTIONAL_ATTACHMENT_TYPES) | set(catalog)
-    unknown = [item for item in selected_types if item not in known_attachment_types]
-    if unknown:
-        raise ValueError(f"不支持的附件类型：{', '.join(unknown)}")
-
-    from .report_service import generate_annual_report_draft
-
+    selected_types = tuple(
+        requested_types
+        or list((preflight_plan or {}).get("requested_types") or [])
+        or DEFAULT_ATTACHMENT_TYPES
+    )
     if preflight_plan is None:
         preflight_plan = plan_annual_attachment_package(
             engagement_id,
             requested_types=list(selected_types),
             settings=resolved,
         )
+    if int(preflight_plan.get("engagement_id") or 0) != engagement_id:
+        raise ValueError("附件生成前置检查属于其他审计项目")
+    planned_types = tuple(
+        str(item) for item in preflight_plan.get("requested_types") or [] if str(item)
+    )
+    if planned_types and planned_types != selected_types:
+        raise ValueError("附件生成类型与冻结前置检查不一致，请重新执行前置检查")
+    planned_template_types = {
+        str(item.get("template_type") or "")
+        for item in preflight_plan.get("templates") or []
+        if isinstance(item, dict) and str(item.get("template_type") or "")
+    }
+    known_attachment_types = (
+        set(DEFAULT_ATTACHMENT_TYPES)
+        | set(OPTIONAL_ATTACHMENT_TYPES)
+        | planned_template_types
+    )
+    unknown = [item for item in selected_types if item not in known_attachment_types]
+    if unknown:
+        raise ValueError(f"不支持的附件类型：{', '.join(unknown)}")
     if str(preflight_plan.get("status") or "blocked") != "ready":
         blockers = list(preflight_plan.get("blockers") or [])
         detail = "；".join(str(item) for item in blockers[:8]) or "模板/资料映射未通过生成门禁"
@@ -4875,24 +6916,32 @@ def generate_annual_attachment_package(
             "系统没有生成或返回任何模板原文件，请先修正模板或补齐资料后重新执行。"
         )
 
-    generated = generate_annual_report_draft(
-        engagement_id,
-        recompute=False,
-        created_by=created_by or "ai_agent",
-        settings=resolved,
-    )
-    report_text = str(generated.get("report_text") or "")
-    latest_report = _load_latest_report(engagement_id, resolved)
-    snapshot = dict(latest_report.get("snapshot") or {})
-    material_index = dict(preflight_plan.get("material_index") or {})
-    # Re-read after the draft/preflight so a concurrently activated template
-    # version is reflected in the actual package, while the selected usage
-    # key remains format-neutral for future business lines.
-    catalog = get_active_template_catalog(settings=resolved)
-    # Workpapers and confirmations are process materials, not standard
-    # annual-audit delivery attachments.  They remain selectable through an
-    # explicit future request, but are never appended implicitly.
-    missing = [item for item in selected_types if item not in catalog or not catalog[item].get("files")]
+    frozen_report = preflight_plan.get("frozen_report") or {}
+    frozen_snapshot = frozen_report.get("fact_snapshot") or {}
+    frozen_report_text = str(frozen_report.get("report_text") or "")
+    if not isinstance(frozen_snapshot, dict) or not frozen_snapshot or not frozen_report_text:
+        raise ValueError("附件生成前置检查缺少冻结审计报告输入")
+    expected_snapshot_hash = str(frozen_report.get("snapshot_sha256") or "")
+    if expected_snapshot_hash and expected_snapshot_hash != _stable_snapshot_hash(
+        dict(frozen_snapshot)
+    ):
+        raise ValueError("附件生成前置检查的冻结审计快照哈希不一致")
+
+    planned_templates = [
+        dict(item)
+        for item in preflight_plan.get("templates") or []
+        if isinstance(item, dict)
+        and str(item.get("template_type") or "") in selected_types
+    ]
+    templates_by_type = {
+        attachment_type: [
+            item
+            for item in planned_templates
+            if str(item.get("template_type") or "") == attachment_type
+        ]
+        for attachment_type in selected_types
+    }
+    missing = [item for item in selected_types if not templates_by_type[item]]
     if missing:
         usage_labels = {
             "annual_report": "年度审计报告",
@@ -4905,189 +6954,156 @@ def generate_annual_attachment_package(
         labels = "、".join(usage_labels.get(item, item) for item in missing)
         raise ValueError(
             f"以下附件类型没有已激活且包含实际文件的模板版本：{labels}。"
-            "请在「管理 → 模板管理」中创建模板版本，上传对应的模板文件"
-            "（如审计报告正文.docx、一般企业报表.xlsx 等），并激活该版本后重试。"
+            "请重新执行附件生成前置检查，并确认所选模板文件仍处于冻结计划中。"
         )
 
     package_version = _next_package_version(engagement_id, resolved)
-    template_snapshot = {"fill_plan": preflight_plan}
-    template_snapshot.update({
-        template_type: {
-            "template_code": template.get("template_code"),
-            "template_type": template_type,
-            "version_no": int(template.get("version_no") or 0),
-            "version_label": template_version_ref(template),
-            "content_hash": template.get("content_hash") or "",
-            "content": template.get("content") or {},
-            "field_schema": template.get("field_schema") or {},
-            "template_contract": template.get("template_contract") or {},
+    template_snapshot: dict[str, Any] = {"fill_plan": preflight_plan}
+    for attachment_type in selected_types:
+        planned_group = templates_by_type[attachment_type]
+        frozen_template = dict(planned_group[0].get("template_snapshot") or {})
+        template_snapshot[attachment_type] = {
+            "template_code": frozen_template.get("template_code"),
+            "template_type": attachment_type,
+            "version_no": int(frozen_template.get("version_no") or 0),
+            "version_label": str(
+                frozen_template.get("version_label")
+                or planned_group[0].get("template_version")
+                or ""
+            ),
+            "content_hash": str(frozen_template.get("content_hash") or ""),
+            "content": frozen_template.get("content") or {},
+            "field_schema": frozen_template.get("field_schema") or {},
+            "template_contract": frozen_template.get("template_contract") or {},
             "files": [
                 {
-                    "id": item.get("id"),
+                    "id": item.get("template_file_id"),
                     "file_name": item.get("file_name"),
-                    "file_ext": item.get("file_ext"),
-                    "content_type": item.get("content_type"),
-                    "storage_ref": item.get("storage_ref"),
-                    "storage_sha256": item.get("storage_sha256"),
-                    "file_size": item.get("file_size"),
-                    "template_usage": item.get("template_usage"),
-                    "remark": item.get("remark"),
+                    "file_ext": (
+                        item.get("source_file_ext")
+                        or Path(str(item.get("file_name") or "")).suffix.lower()
+                    ),
+                    "content_type": item.get("source_content_type"),
+                    "storage_ref": item.get("source_storage_ref"),
+                    "storage_sha256": item.get("source_template_sha256"),
+                    "file_size": item.get("source_template_size"),
                 }
-                for item in template.get("files", [])
+                for item in planned_group
             ],
         }
-        for template_type, template in catalog.items()
-        if template_type in selected_types
-    })
 
-    service = get_minio_service()
-    published: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for template_type in selected_types:
-        template = catalog[template_type]
-        source_files = list(template.get("files", []))
-        for source_index, source_file in enumerate(source_files):
-            source_name = str(source_file.get("file_name") or "template")
-            code = _infer_workpaper_code(source_name) if template_type == "audit_workpaper" else ""
-            workpaper = {"code": code, "name": source_name} if code else None
-            render_context = _context(
-                snapshot,
-                report_text,
-                package_version,
-                template,
-                workpaper,
-                template_type=template_type,
-                engagement_id=engagement_id,
-                settings=resolved,
-                material_index=material_index,
-                source_file_name=source_name,
+    work_items: list[dict[str, Any]] = []
+    ordinal = 0
+    for attachment_type in selected_types:
+        planned_group = templates_by_type[attachment_type]
+        for duplicate_index, planned in enumerate(planned_group):
+            work_items.append(
+                {
+                    "ordinal_no": ordinal,
+                    "attachment_type": attachment_type,
+                    "template_file_id": planned.get("template_file_id"),
+                    "template_snapshot": dict(
+                        planned.get("template_snapshot") or {}
+                    ),
+                    "source_file_name": str(planned.get("file_name") or ""),
+                    "source_content_type": str(
+                        planned.get("source_content_type")
+                        or "application/octet-stream"
+                    ),
+                    "source_storage_ref": str(
+                        planned.get("source_storage_ref") or ""
+                    ),
+                    "source_sha256": str(
+                        planned.get("source_template_sha256") or ""
+                    ),
+                    "duplicate_index": duplicate_index,
+                    "duplicate_count": len(planned_group),
+                }
             )
-            output_name = _output_name(
-                template_type,
+            ordinal += 1
+
+    def generate_one(item: dict[str, Any]) -> dict[str, Any]:
+        item_ordinal = int(item["ordinal_no"])
+        try:
+            artifact = generate_annual_attachment_item(
                 engagement_id,
-                package_version,
-                source_name,
-                code,
-                context=render_context,
-                duplicate_index=source_index,
-                duplicate_count=len(source_files),
+                generation_item=item,
+                preflight_plan=preflight_plan,
+                reserved_package_id=None,
+                reserved_package_version=package_version,
+                created_by=created_by or "ai_agent",
+                generation_run_id=f"direct-package-v{package_version}",
+                settings=resolved,
             )
-            try:
-                source_bytes = service.get_object_bytes(str(source_file.get("storage_ref") or ""))
-                # Package publication is stricter than the direct renderer:
-                # every deliverable must carry a real result/data mapping.
-                render_context["__enforce_result_mapping__"] = True
-                rendered_bytes, fill_status = render_template_file(
-                    source_bytes,
-                    source_name,
-                    render_context,
+            if not isinstance(artifact, dict) or not artifact:
+                raise AttachmentItemGenerationError(
+                    "单附件生成入口没有返回有效产物",
+                    stage="artifact_result_validation",
+                    retryable=False,
                 )
-                source_ext = Path(source_name).suffix.lower()
-                output_ext = Path(output_name).suffix.lower()
-                if not source_ext or source_ext != output_ext:
-                    raise ValueError(
-                        f"模板格式与输出格式不一致：源文件 {source_ext or '无扩展名'}，输出 {output_ext or '无扩展名'}"
-                    )
-                if fill_status in _BLOCKED_RENDER_STATUSES:
-                    raise ValueError(
-                        f"模板为 {source_ext}，当前部署环境无法安全回写该格式；"
-                        "已阻止交付原模板，请在 Windows 部署机启用对应 Office 自动化后重试"
-                    )
-                if rendered_bytes == source_bytes:
-                    raise ValueError("渲染结果与模板原文件完全相同，已阻止将模板原文件作为附件交付")
-                render_contract = render_context.get("__template_render_contract__") or {}
-                if not bool(render_contract.get("audit_result_mapped")):
-                    raise ValueError("模板未承载审计结果或结构化数据映射，已阻止交付仅改名的模板文件")
-                validation = _validate_rendered_file(rendered_bytes, output_name)
-                validation.update(
-                    _validate_rendered_template_content(
-                        rendered_bytes,
-                        template_type=template_type,
-                        source_file_name=source_name,
-                        render_context=render_context,
-                    )
-                )
-                format_fidelity = _validate_template_format_fidelity(
-                    source_bytes,
-                    rendered_bytes,
-                    source_file_name=source_name,
-                )
-                validation["template_format_fidelity"] = format_fidelity
-                if format_fidelity.get("format_contract_checked") and not format_fidelity.get("format_contract_passed"):
-                    raise ValueError("模板版式结构校验未通过，已阻止交付格式可能失真的附件")
-                content_type = _content_type_for_file_name(
-                    output_name,
-                    str(source_file.get("content_type") or ""),
-                )
-                uploaded = service.upload_artifact(
-                    project_id=engagement_id,
-                    file_name=output_name,
-                    content_type=content_type,
-                    file_bytes=rendered_bytes,
-                    # The visible name is intentionally stable and readable;
-                    # the package version belongs in the storage key so a
-                    # later package does not overwrite an earlier one.
-                    storage_file_name=f"package-v{package_version}-{output_name}",
-                )
-                reference = ArtifactRef(
-                    artifact_type=template_type if not code else f"{template_type}_{code}",
-                    template_version=template_version_ref(template),
-                    version=package_version,
-                    storage_ref=uploaded.storage_ref,
-                    content_type=content_type,
-                    file_name=output_name,
-                    status="draft",
-                ).to_dict()
-                reference.update(
-                    {
-                        "template_file_id": source_file.get("id"),
-                        "source_template_file_name": source_name,
-                        "source_template_file_ext": Path(source_name).suffix.lower(),
-                        "output_file_ext": Path(output_name).suffix.lower(),
-                        "template_fill_status": fill_status,
-                        "rendered_from_template": True,
-                        "source_template_sha256": hashlib.sha256(source_bytes).hexdigest(),
-                        "output_sha256": validation["sha256"],
-                        "output_size": validation["size"],
-                        "format_validation": validation,
-                        "result_placement": _result_placement_description(template_type, source_name),
-                        "audit_result_included": bool(render_contract.get("audit_result_mapped")),
-                        "template_mapping": {
-                            "plan_version": preflight_plan.get("plan_version"),
-                            "render_contract": _template_render_contract_evidence(render_context),
-                            "audit_result_mapped": bool(render_contract.get("audit_result_mapped")),
-                            "material_source_file": material_index.get("file_name"),
-                            "material_source_sha256": material_index.get("source_sha256"),
-                            "main_workpaper_sheet_count": material_index.get("sheet_count", 0),
-                            "main_workpaper_read_all_sheets": bool(material_index.get("read_all_sheets")),
-                            "pruned_notes_sections": list(render_context.get("__notes_pruned_sections__") or []),
-                            "supported_notes_sections": list(render_context.get("__notes_supported_sections__") or []),
-                            "removed_unmapped_note_tables": int(render_context.get("__notes_removed_unmapped_table_count__") or 0),
-                            "removed_placeholder_note_components": int(render_context.get("__notes_removed_placeholder_component_count__") or 0),
-                            "removed_note_authoring_choice_components": int(render_context.get("__notes_removed_authoring_annotation_count__") or 0),
-                            "cleared_note_authoring_annotations": int(render_context.get("__notes_cleared_authoring_annotation_count__") or 0),
-                            "cleared_template_authoring_annotations": int(render_context.get("__cleared_template_authoring_annotation_count__") or 0),
-                            "rendered_table_count": len(render_context.get("__docx_table_render_stats__") or []),
-                            "rendered_table_value_cells": sum(
-                                int(item.get("filled_cells") or 0)
-                                for item in (render_context.get("__docx_table_render_stats__") or [])
-                                if isinstance(item, dict)
-                            ),
-                            "mapped_label_count": next(
-                                (
-                                    int(item.get("matched_material_label_count") or 0)
-                                    for item in preflight_plan.get("templates") or []
-                                    if item.get("template_type") == template_type and item.get("file_name") == source_name
-                                ),
-                                0,
-                            ),
-                        },
-                    }
-                )
-                published.append(reference)
-            except Exception as exc:
-                errors.append(f"{output_name}: {str(exc)[:240]}")
+            normalized_artifact = dict(artifact)
+            normalized_artifact["generation_ordinal"] = item_ordinal
+            normalized_artifact.setdefault("package_version", package_version)
+            return {
+                "ordinal_no": item_ordinal,
+                "artifact": normalized_artifact,
+            }
+        except Exception as exc:
+            stage = str(
+                getattr(exc, "stage", "") or "attachment_item_generation"
+            )
+            message = str(exc).strip()[:1000] or "附件生成失败"
+            return {
+                "ordinal_no": item_ordinal,
+                "error": {
+                    "ordinal_no": item_ordinal,
+                    "attachment_type": str(item.get("attachment_type") or ""),
+                    "source_file_name": str(item.get("source_file_name") or ""),
+                    "output_file_name": str(item.get("output_file_name") or ""),
+                    "stage": stage,
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                    "message": message,
+                },
+            }
 
+    max_workers = max(
+        1,
+        min(
+            int(getattr(resolved, "attachment_generation_concurrency", 1) or 1),
+            len(work_items),
+        ),
+    )
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="annual-attachment",
+    ) as executor:
+        futures = [executor.submit(generate_one, item) for item in work_items]
+        for future in as_completed(futures):
+            results.append(future.result())
+    results.sort(key=lambda item: int(item.get("ordinal_no") or 0))
+
+    published = [
+        dict(item["artifact"]) for item in results if item.get("artifact")
+    ]
+    error_details = [
+        dict(item["error"]) for item in results if item.get("error")
+    ]
+    errors = [
+        (
+            f"{item.get('source_file_name') or item.get('attachment_type')}: "
+            f"{item.get('message')}"
+        )
+        for item in error_details
+    ]
+    template_snapshot["generation"] = {
+        "mode": "frozen_single_item_concurrent_composition",
+        "item_count": len(work_items),
+        "max_workers": max_workers,
+        "success_count": len(published),
+        "error_count": len(error_details),
+        "errors": error_details,
+    }
     status = "draft_saved" if not errors else ("partial" if published else "failed")
     package_id = _persist_package(
         engagement_id=engagement_id,
@@ -5114,6 +7130,7 @@ def generate_annual_attachment_package(
         "template_snapshot": template_snapshot,
         "artifacts": published,
         "errors": errors,
+        "error_details": error_details,
         "preflight_plan": preflight_plan,
     }
 
@@ -5121,6 +7138,8 @@ def generate_annual_attachment_package(
 __all__ = [
     "DEFAULT_ATTACHMENT_TYPES",
     "OPTIONAL_ATTACHMENT_TYPES",
+    "AttachmentItemGenerationError",
+    "generate_annual_attachment_item",
     "generate_annual_attachment_package",
     "plan_annual_attachment_package",
     "render_template_file",

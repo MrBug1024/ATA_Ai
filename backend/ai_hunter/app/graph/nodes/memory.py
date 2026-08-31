@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, trim_messages
 from langchain_core.messages.tool import ToolMessage
@@ -59,25 +60,36 @@ def hydrate_memory_context(state: AuditGraphState) -> AuditGraphState:
     settings = get_settings()
     messages = state.get("messages") or []
     memory_summary = (state.get("memory_summary") or "").strip()
-    if not messages:
-        return {"memory_context": memory_summary}
+    focus = dict(state.get("conversation_focus") or {})
 
-    recent_messages = trim_messages(
-        messages,
-        max_tokens=settings.langgraph_memory_max_tokens,
-        token_counter="approximate",
-        strategy="last",
-        start_on="human",
-        end_on=("human", "ai", "tool"),
-        allow_partial=False,
+    recent_messages = (
+        trim_messages(
+            messages,
+            max_tokens=settings.langgraph_memory_max_tokens,
+            token_counter="approximate",
+            strategy="last",
+            start_on="human",
+            end_on=("human", "ai", "tool"),
+            allow_partial=False,
+        )
+        if messages
+        else []
     )
     recent_text = _render_recent_messages(recent_messages)
     parts = []
     if memory_summary:
         parts.append(f"[历史摘要]\n{memory_summary}")
+    if focus:
+        parts.append(
+            "[当前会话焦点]\n"
+            + json.dumps(focus, ensure_ascii=False, default=str)[:6000]
+        )
     if recent_text:
         parts.append(f"[最近对话]\n{recent_text}")
-    return {"memory_context": "\n\n".join(parts)}
+    return {
+        "memory_context": "\n\n".join(parts),
+        "conversation_focus": focus,
+    }
 
 
 def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
@@ -90,27 +102,19 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     existing_messages = list(state.get("messages") or [])
     existing_summary = (state.get("memory_summary") or "").strip()
     current_case_id = state.get("current_case_id", 0)
-    parse_summary = (state.get("parse_summary") or "").strip()
     final_report = resolve_final_report(state).strip()
     agent_output = (state.get("agent_output") or "").strip()
     intent = state.get("intent", "drilldown")
 
-    if final_report:
-        summary_line = "已生成本轮审计结果。"
-    elif agent_output:
-        summary_line = "已完成本轮分析并返回结果。"
-    elif parse_summary:
-        summary_line = "已完成本轮资料处理。"
-    else:
-        summary_line = "本轮未形成可展示的结果。"
-
-    # ``summary_line`` is only the compact LLM-memory message.  It must never
-    # be used as the display/history answer: doing so previously leaked values
-    # such as ``intent=... | case_id=... | report_generated chars=...``.
     full_answer = sanitize_user_response(
         final_report or agent_output or state.get("final_report_summary", ""),
         fallback=friendly_no_result_response(state),
     )
+    # Keep the actual answer in model memory. A generic "analysis completed"
+    # line destroys the object that a follow-up such as "这些结果" refers to.
+    memory_answer = full_answer
+    if len(memory_answer) > 2400:
+        memory_answer = f"{memory_answer[:2400]}...(truncated)"
 
     # 本轮图谱关联快照：随 assistant 消息一起落库，使刷新历史会话时
     # 角标证据预览 / 覆盖率警告条 / 待补件 badge 不丢失（issue #8）。
@@ -126,37 +130,6 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         "response_analysis_runs": list(state.get("response_analysis_runs") or []),
         "unresolved_relations": unresolved_graph_items.get("unresolved_relations", []),
         "unresolved_claims": unresolved_graph_items.get("unresolved_claims", []),
-        "audit_review_stage": str(state.get("audit_review_stage") or ""),
-        "active_template_versions": dict(state.get("active_template_versions") or {}),
-        # Persist only the user-facing attachment projection.  Storage refs
-        # and template snapshots are server-side details; the chat history
-        # needs the same preview/download actions after a page reload.
-        "attachment_package": {
-            "package_id": (state.get("attachment_package") or {}).get("package_id"),
-            "package_version": (state.get("attachment_package") or {}).get("package_version"),
-            "status": (state.get("attachment_package") or {}).get("status") or "",
-            "errors": list((state.get("attachment_package") or {}).get("errors") or []),
-            "artifacts": [
-                {
-                    key: item.get(key)
-                    for key in (
-                        "artifact_type",
-                        "file_name",
-                        "template_version",
-                        "template_fill_status",
-                        "output_file_ext",
-                        "result_placement",
-                        "format_validation",
-                        "audit_result_included",
-                        "download_url",
-                        "preview_url",
-                    )
-                    if item.get(key) is not None
-                }
-                for item in ((state.get("attachment_package") or {}).get("artifacts") or [])
-                if isinstance(item, dict)
-            ],
-        },
     }
 
     # Deterministic turn id.
@@ -180,7 +153,7 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         filtered_messages = list(existing_messages)
         if filtered_messages and isinstance(filtered_messages[-1], AIMessage):
             filtered_messages = filtered_messages[:-1]
-        new_messages = [AIMessage(content=summary_line)]
+        new_messages = [AIMessage(content=memory_answer)]
         complete_messages = filtered_messages + new_messages
 
         # Query current max version for this turn's assistant records
@@ -202,7 +175,7 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     else:
         new_messages = [
             HumanMessage(content=query),
-            AIMessage(content=summary_line),
+            AIMessage(content=memory_answer),
         ]
         complete_messages = existing_messages + new_messages
         conversation_log_entries = [
@@ -236,6 +209,31 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     dropped_count = max(0, len(complete_messages) - len(trimmed_messages))
     dropped_messages = complete_messages[:dropped_count]
     memory_summary = _merge_memory_summary(existing_summary, dropped_messages)
+    route_decision = state.get("route_decision") or {}
+    if hasattr(route_decision, "model_dump"):
+        route_decision = route_decision.model_dump()
+    conversation_focus = {
+        "case_id": current_case_id,
+        "last_user_query": query[:1200],
+        "last_assistant_answer": full_answer[:2400],
+        "last_route_decision": route_decision if isinstance(route_decision, dict) else {},
+        "last_capability": (
+            str(route_decision.get("capability") or "")
+            if isinstance(route_decision, dict)
+            else ""
+        ),
+        "report_exists": bool(
+            final_report
+            or state.get("final_report_ref")
+            or state.get("final_report_summary")
+        ),
+        "final_report_ref": str(state.get("final_report_ref") or ""),
+        "citation_coverage": resolve_citation_coverage(state),
+        "unresolved_item_count": (
+            len(unresolved_graph_items.get("unresolved_relations", []))
+            + len(unresolved_graph_items.get("unresolved_claims", []))
+        ),
+    }
 
     # Append to existing conversation_log instead of overwriting
     existing_conv_log = list(state.get("conversation_log") or [])
@@ -257,6 +255,7 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
     return {
         "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *trimmed_messages],
         "memory_summary": memory_summary,
+        "conversation_focus": conversation_focus,
         "conversation_log": existing_conv_log + conversation_log_entries,
         # The browser receives this exact persisted id in the SSE final event,
         # so it can attach the response-specific report reference to the

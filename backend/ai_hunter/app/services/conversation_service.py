@@ -31,9 +31,6 @@ def _flatten_graph_context(graph_context: Any) -> dict[str, Any]:
         "route_decision": route_decision if isinstance(route_decision, dict) and route_decision.get("capability") else None,
         "trace_items": gc.get("trace_items") or [],
         "citation_coverage": coverage if isinstance(coverage, dict) else {},
-        "audit_review_stage": str(gc.get("audit_review_stage") or ""),
-        "active_template_versions": gc.get("active_template_versions") if isinstance(gc.get("active_template_versions"), dict) else {},
-        "attachment_package": gc.get("attachment_package") if isinstance(gc.get("attachment_package"), dict) else {},
         "unresolved_relations": gc.get("unresolved_relations") or [],
         "unresolved_claims": gc.get("unresolved_claims") or [],
     }

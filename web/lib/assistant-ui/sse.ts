@@ -49,9 +49,6 @@ export interface FinalResponseMetadata {
   responseAnalysisRuns?: Record<string, unknown>[];
   unresolvedRelations?: Record<string, unknown>[];
   unresolvedClaims?: Record<string, unknown>[];
-  auditReviewStage?: string;
-  activeTemplateVersions?: Record<string, unknown>;
-  attachmentPackage?: Record<string, unknown>;
 }
 
 type StreamContentPart = DbMessageContentParts[number];
@@ -286,9 +283,6 @@ export function toLangGraphEvent(
         const responseAnalysisRuns = recordArrayField(data, "response_analysis_runs");
         const unresolvedRelations = recordArrayField(data, "unresolved_relations");
         const unresolvedClaims = recordArrayField(data, "unresolved_claims");
-        const auditReviewStage = stringField(data, "audit_review_stage");
-        const activeTemplateVersions = recordField(data, "active_template_versions");
-        const attachmentPackage = recordField(data, "attachment_package");
         if (assistantMessageId) metadata.assistantMessageId = assistantMessageId;
         if (routeDecision) metadata.routeDecision = routeDecision;
         if (traceItems !== undefined) metadata.traceItems = traceItems;
@@ -296,9 +290,6 @@ export function toLangGraphEvent(
         if (responseAnalysisRuns !== undefined) metadata.responseAnalysisRuns = responseAnalysisRuns;
         if (unresolvedRelations !== undefined) metadata.unresolvedRelations = unresolvedRelations;
         if (unresolvedClaims !== undefined) metadata.unresolvedClaims = unresolvedClaims;
-        if (auditReviewStage) metadata.auditReviewStage = auditReviewStage;
-        if (activeTemplateVersions) metadata.activeTemplateVersions = activeTemplateVersions;
-        if (attachmentPackage) metadata.attachmentPackage = attachmentPackage;
         if (Object.keys(metadata).length > 0) final.metadata = metadata;
         return final;
       }

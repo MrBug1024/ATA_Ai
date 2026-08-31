@@ -60,8 +60,6 @@ def build_workpaper_xlsx(
     name: str,
     facts: dict[str, Any],
     version: int,
-    title: str = "审计工作底稿",
-    sheet_name: str = "底稿",
 ) -> bytes:
     """Build a portable workbook with facts, conclusion and source locators."""
 
@@ -70,19 +68,18 @@ def build_workpaper_xlsx(
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = (sheet_name or "底稿")[:31]
+    sheet.title = "底稿"
     sheet.append(["工作底稿编号", code])
     sheet.append(["工作底稿名称", name])
-    sheet.append(["模板标题", title or "审计工作底稿"])
     sheet.append(["工作底稿版本", version])
     sheet.append([])
     sheet.append(["字段", "值"])
-    for cell in sheet[6]:
+    for cell in sheet[5]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F4E78")
     for key, value in _flatten(facts):
         sheet.append([key, value])
-    sheet.freeze_panes = "A7"
+    sheet.freeze_panes = "A6"
     sheet.column_dimensions["A"].width = 38
     sheet.column_dimensions["B"].width = 120
     output = io.BytesIO()
@@ -189,17 +186,6 @@ def publish_annual_artifacts(
 
     service = get_minio_service()
     report_name = f"annual-audit-draft-{engagement_id}-v{report_version}"
-    template_versions = snapshot.get("template_versions") or {}
-    report_template_version = str(
-        template_versions.get("annual_report")
-        or snapshot.get("report_template_version")
-        or ""
-    )
-    workpaper_template_version = str(
-        template_versions.get("audit_workpaper")
-        or snapshot.get("workpaper_template_version")
-        or report_template_version
-    )
     artifact_report_text = _artifact_display_text(report_text)
     payloads: list[tuple[str, str, bytes, str, int]] = [
         (
@@ -263,11 +249,7 @@ def publish_annual_artifacts(
             published.append(
                 ArtifactRef(
                     artifact_type=artifact_type,
-                    template_version=(
-                        workpaper_template_version
-                        if artifact_type.startswith("workpaper_")
-                        else report_template_version
-                    ),
+                    template_version=str(snapshot.get("report_template_version") or ""),
                     version=version,
                     storage_ref=uploaded.storage_ref,
                     content_type=content_type,
