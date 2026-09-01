@@ -9,6 +9,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .logging_utils import build_request_logger, make_request_id
 
 
+def access_log_path(path: str) -> str:
+    """Remove bearer-like path parameters before they reach access logs."""
+
+    if str(path or "").startswith("/api/artifact-access/"):
+        return "/api/artifact-access/{token}"
+    return str(path or "")
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Attach a request ID and emit one access log line per HTTP request."""
 
@@ -16,6 +24,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("x-request-id") or make_request_id()
         request.state.request_id = request_id
         started_at = time.perf_counter()
+        logged_path = access_log_path(request.url.path)
 
         # Extract thread_id from paths like /chat/threads/{id}/messages
         thread_id = "-"
@@ -32,7 +41,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             request_id=request_id,
             thread_id=thread_id,
         )
-        logger.info("request_started method=%s path=%s", request.method, request.url.path)
+        logger.info("request_started method=%s path=%s", request.method, logged_path)
 
         try:
             response = await call_next(request)
@@ -41,7 +50,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             logger.exception(
                 "request_failed method=%s path=%s duration_ms=%s",
                 request.method,
-                request.url.path,
+                logged_path,
                 duration_ms,
             )
             raise
@@ -51,7 +60,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         logger.info(
             "request_completed method=%s path=%s status_code=%s duration_ms=%s",
             request.method,
-            request.url.path,
+            logged_path,
             response.status_code,
             duration_ms,
         )

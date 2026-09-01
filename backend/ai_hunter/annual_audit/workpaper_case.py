@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from ai_hunter.app.settings import Settings, get_settings
 
-from .storage import mysql_connection, postgres_connection
+from .storage import postgres_connection
 
 
 CASE_WORKPAPER_SOURCE_TYPE = "audit_workpaper_pack"
@@ -217,7 +217,7 @@ def get_case_workpaper_summary(
     settings: Settings | None = None,
 ) -> dict[str, Any] | None:
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -257,14 +257,16 @@ def persist_case_workpaper_summary(
 ) -> dict[str, Any]:
     """Persist a replay index without projecting the workbook into raw facts."""
 
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT id, row_count, metadata_json
                 FROM annual_import_batch
                 WHERE engagement_id = %s AND source_type = %s
-                  AND source_sha256 = %s AND source_ref = %s AND status = 'completed'
+                  AND source_sha256 = %s
+                  AND split_part(source_ref, '#', 2) = split_part(%s, '#', 2)
+                  AND status = 'completed'
                 ORDER BY id DESC LIMIT 1
                 """,
                 (engagement_id, CASE_WORKPAPER_SOURCE_TYPE, source_sha256, source_ref),
@@ -277,7 +279,8 @@ def persist_case_workpaper_summary(
                 INSERT INTO annual_import_batch (
                   engagement_id, source_ref, source_type, source_sha256,
                   status, row_count, metadata_json, created_by, completed_at
-                ) VALUES (%s, %s, %s, %s, 'completed', %s, %s, %s, NOW(6))
+                ) VALUES (%s, %s, %s, %s, 'completed', %s, %s, %s, CURRENT_TIMESTAMP(6))
+                RETURNING id
                 """,
                 (
                     engagement_id,
@@ -289,7 +292,7 @@ def persist_case_workpaper_summary(
                     created_by or "ai_agent",
                 ),
             )
-            batch_id = int(cursor.lastrowid)
+            batch_id = int(cursor.fetchone()["id"])
         connection.commit()
     return {"import_batch_id": batch_id, "deduplicated": False, **summary}
 
@@ -362,7 +365,7 @@ def sync_case_workpaper_programs(
         return summary
     page_refs = _page_refs_for_workbook(engagement_id, summary=summary, settings=resolved)
     changed = 0
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT id FROM annual_engagement_policy_binding WHERE engagement_id = %s AND binding_status = 'frozen' ORDER BY id DESC LIMIT 1",
@@ -400,7 +403,7 @@ def sync_case_workpaper_programs(
                     UPDATE annual_audit_program_item
                     SET status = 'completed', evidence_refs_json = %s,
                         conclusion_text = %s, prepared_by = %s,
-                        prepared_at = COALESCE(prepared_at, UTC_TIMESTAMP(6)),
+                        prepared_at = COALESCE(prepared_at, CURRENT_TIMESTAMP(6)),
                         policy_binding_id = COALESCE(%s, policy_binding_id),
                         revision = revision + CASE WHEN status <> 'completed' THEN 1 ELSE 0 END
                     WHERE engagement_id = %s AND procedure_code = %s

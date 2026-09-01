@@ -1,161 +1,153 @@
-name: ata-annual-audit-local
+name: ata-annual-audit-runtime
+
+x-runtime-env: &runtime_env
+  env_file:
+    - ../../backend/.env
+
+x-runtime-build: &runtime_build
+  context: ../../backend
 
 services:
-  postgres:
-    image: pgvector/pgvector:pg17
-    container_name: ata-annual-postgres
+  gotenberg:
+    image: gotenberg/gotenberg:8.30.0@sha256:d3c9e0ed2450c9a4631de6d14b51c75fd6051512c33aa8a6df622f085592c48b
+    container_name: ata-annual-gotenberg
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${ANNUAL_POSTGRES_DATABASE:-ata_agent_platform}
-      POSTGRES_USER: ${ANNUAL_POSTGRES_USER:-ata_annual_app}
-      POSTGRES_PASSWORD: ${ANNUAL_POSTGRES_PASSWORD:?ANNUAL_POSTGRES_PASSWORD is required}
-      TZ: Asia/Shanghai
-      PGTZ: Asia/Shanghai
-    ports:
-      - "${ANNUAL_POSTGRES_PORT:-55432}:5432"
-    volumes:
-      - annual_postgres_data:/var/lib/postgresql/data
-      - ../../backend/sql/langgraph_checkpointer.sql:/docker-entrypoint-initdb.d/010_langgraph_checkpointer.sql:ro
-      - ../../backend/sql/add_soft_delete_to_checkpoints.sql:/docker-entrypoint-initdb.d/011_checkpoint_soft_delete.sql:ro
-      - ../../backend/sql/conversation_messages.sql:/docker-entrypoint-initdb.d/020_conversation_messages.sql:ro
-      - ../../backend/sql/heavy_payload_store.sql:/docker-entrypoint-initdb.d/030_heavy_payload_store.sql:ro
-      - ../../backend/sql/auth_tables.sql:/docker-entrypoint-initdb.d/040_auth_tables.sql:ro
-      - ../../backend/sql/auth_v2_private_tables.sql:/docker-entrypoint-initdb.d/041_auth_private_tables.sql:ro
-      - ../../backend/sql/auth_report_section_permissions.sql:/docker-entrypoint-initdb.d/042_auth_report_sections.sql:ro
-      - ../../backend/sql/knowledge_graph_v1.sql:/docker-entrypoint-initdb.d/050_knowledge_graph.sql:ro
-      - ../../backend/sql/source_file_minio_fields.sql:/docker-entrypoint-initdb.d/051_source_file_storage.sql:ro
-      - ./postgres-init/060_annual_platform_contract.sql:/docker-entrypoint-initdb.d/060_annual_platform_contract.sql:ro
-      - ../../backend/sql/annual_audit_postgres_v1.sql:/docker-entrypoint-initdb.d/061_annual_platform_migration.sql:ro
-      - ../../backend/sql/annual_audit_postgres_v2.sql:/docker-entrypoint-initdb.d/062_annual_material_catalog.sql:ro
-      - ../../backend/sql/case_corrections.sql:/docker-entrypoint-initdb.d/070_case_corrections.sql:ro
+    profiles: [runtime]
+    command: [gotenberg, --api-timeout=120s, --chromium-deny-list=.*, --libreoffice-restart-after=10]
+    ports: ["${ATTACHMENT_GOTENBERG_PORT:-63000}:3000"]
+    tmpfs: [/tmp:size=512m,mode=1770]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
-      test:
-        - CMD-SHELL
-        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
-      interval: 5s
+      test: [CMD, curl, -fsS, http://127.0.0.1:3000/health]
+      interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 10s
+    networks: [annual_runtime]
 
-  mysql:
-    image: mysql:8.4
-    container_name: ata-annual-mysql
+  clamav:
+    image: clamav/clamav:stable@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+    container_name: ata-annual-clamav
     restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${ANNUAL_MYSQL_DATABASE:-ata_ai}
-      MYSQL_USER: ${ANNUAL_MYSQL_USER:-ata_ai_app}
-      MYSQL_PASSWORD: ${ANNUAL_MYSQL_PASSWORD:?ANNUAL_MYSQL_PASSWORD is required}
-      MYSQL_ROOT_PASSWORD: ${ANNUAL_MYSQL_ROOT_PASSWORD:?ANNUAL_MYSQL_ROOT_PASSWORD is required}
-      TZ: Asia/Shanghai
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_0900_ai_ci
-    ports:
-      - "${ANNUAL_MYSQL_PORT:-53306}:3306"
-    volumes:
-      - annual_mysql_data:/var/lib/mysql
-      - ../../backend/sql/annual_audit_mysql_v1.sql:/docker-entrypoint-initdb.d/001_annual_audit.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v2.sql:/docker-entrypoint-initdb.d/002_engagement_contract.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v3.sql:/docker-entrypoint-initdb.d/003_remove_mysql_platform_tables.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v4.sql:/docker-entrypoint-initdb.d/004_remove_mysql_source_graph_tables.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v5.sql:/docker-entrypoint-initdb.d/005_structured_annual_data.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v6.sql:/docker-entrypoint-initdb.d/006_annual_tasks.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v7.sql:/docker-entrypoint-initdb.d/007_evidence_bindings.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v8.sql:/docker-entrypoint-initdb.d/008_artifact_refs.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v9.sql:/docker-entrypoint-initdb.d/009_execution_and_knowledge_governance.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v10.sql:/docker-entrypoint-initdb.d/010_report_citation_manifest.sql:ro
-      - ../../backend/sql/annual_audit_mysql_v11.sql:/docker-entrypoint-initdb.d/011_report_citation_delivery_refs.sql:ro
-      - ./mysql-init/009_record_migrations.sql:/docker-entrypoint-initdb.d/099_record_migrations.sql:ro
+    profiles: [runtime]
+    ports: ["${ATTACHMENT_CLAMAV_PORT:-63310}:3310"]
+    volumes: [annual_clamav_data:/var/lib/clamav]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
       test:
         - CMD-SHELL
-        - mysqladmin ping -h 127.0.0.1 -u root -p"$${MYSQL_ROOT_PASSWORD}" --silent
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-
-  redis:
-    image: redis:7.4-alpine
-    container_name: ata-annual-redis
-    restart: unless-stopped
-    environment:
-      REDIS_PASSWORD: ${ANNUAL_REDIS_PASSWORD:?ANNUAL_REDIS_PASSWORD is required}
-      TZ: Asia/Shanghai
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --requirepass
-      - ${ANNUAL_REDIS_PASSWORD}
-    ports:
-      - "${ANNUAL_REDIS_PORT:-56379}:6379"
-    volumes:
-      - annual_redis_data:/data
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - redis-cli -a "$${REDIS_PASSWORD}" ping | grep PONG
-      interval: 5s
-      timeout: 5s
+        - >-
+          printf 'PING\n' | nc 127.0.0.1 3310 | grep -q PONG &&
+          find /var/lib/clamav -type f \( -name '*.cvd' -o -name '*.cld' \)
+          -mtime -3 -print -quit | grep -q .
+      interval: 30s
+      timeout: 10s
       retries: 20
-      start_period: 5s
+      start_period: 60s
+    networks: [annual_runtime]
 
-  minio:
-    image: quay.io/minio/minio:latest
-    container_name: ata-annual-minio
+  attachment-worker:
+    build: *runtime_build
+    image: ata-annual-attachment-runtime:${ATTACHMENT_RUNTIME_IMAGE_TAG:-local}
+    container_name: ata-annual-attachment-worker
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: ${ANNUAL_MINIO_ACCESS_KEY:?ANNUAL_MINIO_ACCESS_KEY is required}
-      MINIO_ROOT_PASSWORD: ${ANNUAL_MINIO_SECRET_KEY:?ANNUAL_MINIO_SECRET_KEY is required}
-      TZ: Asia/Shanghai
+    profiles: [runtime]
     command:
-      - server
-      - /data
-      - --console-address
-      - :9001
-    ports:
-      - "${ANNUAL_MINIO_API_PORT:-61000}:9000"
-      - "${ANNUAL_MINIO_CONSOLE_PORT:-61001}:9001"
-    volumes:
-      - annual_minio_data:/data
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - curl -fsS http://127.0.0.1:9000/minio/health/live
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
-
-  minio-init:
-    image: quay.io/minio/mc:latest
-    container_name: ata-annual-minio-init
-    restart: "no"
+      - celery
+      - -A
+      - ai_hunter.app.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=annual-attachments
+      - "--concurrency=${ATTACHMENT_WORKER_CONCURRENCY:-2}"
+      - --hostname=attachment-worker@%h
     depends_on:
-      minio:
-        condition: service_healthy
-    environment:
-      MINIO_ROOT_USER: ${ANNUAL_MINIO_ACCESS_KEY:?ANNUAL_MINIO_ACCESS_KEY is required}
-      MINIO_ROOT_PASSWORD: ${ANNUAL_MINIO_SECRET_KEY:?ANNUAL_MINIO_SECRET_KEY is required}
-      MINIO_BUCKET_RAW: ${ANNUAL_MINIO_BUCKET_RAW:-ata-annual-raw}
-      MINIO_BUCKET_DERIVED: ${ANNUAL_MINIO_BUCKET_DERIVED:-ata-annual-derived}
-      MINIO_BUCKET_ARTIFACTS: ${ANNUAL_MINIO_BUCKET_ARTIFACTS:-ata-annual-artifacts}
-    entrypoint: /bin/sh
+      gotenberg: {condition: service_healthy}
+      clamav: {condition: service_healthy}
+    <<: *runtime_env
+    environment: &attachment_runtime_environment
+      ATTACHMENT_CLAMAV_HOST: clamav
+      ATTACHMENT_CLAMAV_PORT: 3310
+      ATTACHMENT_CLAMAV_REQUIRED: "true"
+      ATTACHMENT_GOTENBERG_URL: http://gotenberg:3000
+      ATTACHMENT_PREVIEW_REQUIRED: "true"
+      ATTACHMENT_PREVIEW_MAX_MB: ${ATTACHMENT_PREVIEW_MAX_MB:-200}
+      ATTACHMENT_JOB_STALE_SECONDS: ${ATTACHMENT_JOB_STALE_SECONDS:-900}
+      ATTACHMENT_PDF_FONT_ROOT: /usr/share/fonts
+    read_only: true
+    tmpfs: [/tmp:size=1g,mode=1770]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -m ai_hunter.annual_audit.scripts.verify_attachment_runtime &&
+          python -m ai_hunter.app.scripts.check_storage_readiness &&
+          celery -A ai_hunter.app.workers.celery_app:celery_app inspect ping
+          --destination "attachment-worker@$${HOSTNAME}" --timeout=5 | grep -q pong
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    networks: [annual_runtime]
+
+  attachment-beat:
+    build: *runtime_build
+    image: ata-annual-attachment-runtime:${ATTACHMENT_RUNTIME_IMAGE_TAG:-local}
+    container_name: ata-annual-attachment-beat
+    restart: unless-stopped
+    profiles: [runtime]
     command:
-      - -c
-      - >-
-        mc alias set annual http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
-        mc mb --ignore-existing "annual/$${MINIO_BUCKET_RAW}" &&
-        mc mb --ignore-existing "annual/$${MINIO_BUCKET_DERIVED}" &&
-        mc mb --ignore-existing "annual/$${MINIO_BUCKET_ARTIFACTS}"
+      - celery
+      - -A
+      - ai_hunter.app.workers.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
+    <<: *runtime_env
+    environment: *attachment_runtime_environment
+    read_only: true
+    tmpfs: [/tmp:size=64m,mode=1770]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [annual_runtime]
+
+  annual-api:
+    build: *runtime_build
+    image: ata-annual-attachment-runtime:${ATTACHMENT_RUNTIME_IMAGE_TAG:-local}
+    container_name: ata-annual-api
+    restart: unless-stopped
+    profiles: [runtime]
+    command: [python, -m, ai_hunter]
+    depends_on:
+      gotenberg: {condition: service_healthy}
+      clamav: {condition: service_healthy}
+      attachment-worker: {condition: service_healthy}
+    <<: *runtime_env
+    environment:
+      <<: *attachment_runtime_environment
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      LOG_DIR: /app/logs
+    ports: ["${ANNUAL_BACKEND_PORT:-8080}:8080"]
+    read_only: true
+    tmpfs: [/tmp:size=512m,mode=1770, /app/logs:size=128m,mode=1770]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [annual_runtime]
 
 volumes:
-  annual_postgres_data:
-    name: ata-annual-postgres-data
-  annual_mysql_data:
-    name: ata-annual-mysql-data
-  annual_redis_data:
-    name: ata-annual-redis-data
-  annual_minio_data:
-    name: ata-annual-minio-data
+  annual_clamav_data:
+    name: ata-annual-clamav-data
+
+networks:
+  annual_runtime:
+    name: ata-annual-runtime

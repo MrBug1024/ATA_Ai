@@ -5,7 +5,7 @@ This service is the durable audit record for a generated annual report
 version: it freezes the finding, rule context and source anchors behind each
 citation. It deliberately does not reuse PostgreSQL report_citation_map:
 that table has a foreign key to kg_claim, while deterministic annual findings
-belong to the isolated MySQL annual domain.
+belong to the isolated PostgreSQL annual domain.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 
 from ai_hunter.app.settings import Settings, get_settings
 
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 DEFAULT_REPORT_TYPE = "annual_audit_draft"
@@ -114,7 +114,7 @@ def _canonical_json(value: Any) -> str:
 
 
 def _final_report_ref_hash(value: str) -> str:
-    """Index opaque delivery refs without imposing a short MySQL prefix."""
+    """Index opaque delivery refs without imposing a short PostgreSQL prefix."""
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -695,7 +695,7 @@ def persist_report_citation_manifest(
         raise CitationManifestError("同一报告版本内 citation_id 必须唯一")
 
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             _lock_report_version(
                 cursor,
@@ -851,7 +851,7 @@ def fetch_report_citation_manifest(
         max_length=1024,
     )
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             return _select_entries(
                 cursor,
@@ -904,7 +904,7 @@ def resolve_final_report_ref_citation_manifest(
         conditions.append("m.citation_id = %s")
         params.append(normalized_citation)
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
@@ -958,7 +958,7 @@ def bind_final_report_ref(
         required=True,
     )
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             _lock_report_version(
                 cursor,

@@ -1,6 +1,7 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import { stripThink } from "@/lib/utils/think";
 import type { DbMessage } from "./types";
+import { isAttachmentJobRef } from "@/lib/backend/generated-artifacts";
 
 export function convertDbMessage(msg: DbMessage): ThreadMessageLike {
   const localCustom =
@@ -18,6 +19,15 @@ export function convertDbMessage(msg: DbMessage): ThreadMessageLike {
     reportRefCandidate.trim().length > 0
       ? reportRefCandidate
       : null;
+  const hasPersistedAttachmentJob = Boolean(
+    msg.metadata && Object.prototype.hasOwnProperty.call(msg.metadata, "attachment_job")
+  );
+  const attachmentJobCandidate = hasPersistedAttachmentJob
+    ? msg.metadata?.attachment_job
+    : localCustom.attachmentJob;
+  const attachmentJob = msg.role === "assistant" && isAttachmentJobRef(attachmentJobCandidate)
+    ? attachmentJobCandidate
+    : null;
 
   return {
     role: msg.role,
@@ -36,6 +46,7 @@ export function convertDbMessage(msg: DbMessage): ThreadMessageLike {
         ...localCustom,
         canReload: msg._canReload === true,
         finalReportRef,
+        attachmentJob,
       },
     },
   };

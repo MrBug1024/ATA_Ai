@@ -1,6 +1,10 @@
 import type { ThinkingUpdate } from "./thinking-context";
 import type { DbMessageContentParts } from "./types";
 import { chatInvoke, type ChatInvokeRequest } from "@/lib/backend/langgraph";
+import {
+  isAttachmentJobRef,
+  type AttachmentJobRef,
+} from "@/lib/backend/generated-artifacts";
 
 /**
  * LangGraph SSE 事件契约(discriminated union)。
@@ -49,6 +53,7 @@ export interface FinalResponseMetadata {
   responseAnalysisRuns?: Record<string, unknown>[];
   unresolvedRelations?: Record<string, unknown>[];
   unresolvedClaims?: Record<string, unknown>[];
+  attachmentJob?: AttachmentJobRef | null;
 }
 
 type StreamContentPart = DbMessageContentParts[number];
@@ -283,6 +288,15 @@ export function toLangGraphEvent(
         const responseAnalysisRuns = recordArrayField(data, "response_analysis_runs");
         const unresolvedRelations = recordArrayField(data, "unresolved_relations");
         const unresolvedClaims = recordArrayField(data, "unresolved_claims");
+        const attachmentJobCandidate = data.attachment_job;
+        const attachmentJob = isAttachmentJobRef(attachmentJobCandidate) &&
+          (!assistantMessageId ||
+            !attachmentJobCandidate.assistant_turn_id ||
+            attachmentJobCandidate.assistant_turn_id === assistantMessageId)
+          ? attachmentJobCandidate
+          : attachmentJobCandidate === null
+            ? null
+            : undefined;
         if (assistantMessageId) metadata.assistantMessageId = assistantMessageId;
         if (routeDecision) metadata.routeDecision = routeDecision;
         if (traceItems !== undefined) metadata.traceItems = traceItems;
@@ -290,6 +304,7 @@ export function toLangGraphEvent(
         if (responseAnalysisRuns !== undefined) metadata.responseAnalysisRuns = responseAnalysisRuns;
         if (unresolvedRelations !== undefined) metadata.unresolvedRelations = unresolvedRelations;
         if (unresolvedClaims !== undefined) metadata.unresolvedClaims = unresolvedClaims;
+        if (attachmentJob !== undefined) metadata.attachmentJob = attachmentJob;
         if (Object.keys(metadata).length > 0) final.metadata = metadata;
         return final;
       }
@@ -461,7 +476,7 @@ export async function runStream(
           // The final payload is the persisted, authoritative reply. It can
           // include citations that are not present in token chunks, so forward
           // it even if a report reference is absent.
-          if (ev.finalReportRef || ev.finalReport) {
+          if (ev.finalReportRef || ev.finalReport || ev.metadata) {
             callbacks.onFinal?.(ev.finalReportRef ?? "", ev.finalReport, ev.metadata);
           }
           break;

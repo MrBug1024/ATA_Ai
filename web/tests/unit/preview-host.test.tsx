@@ -7,11 +7,12 @@ import { usePreview, type PreviewableFile } from "@/lib/assistant-ui/preview-con
 import { useEvidenceDrawerStore } from "@/lib/stores/evidence-drawer";
 
 vi.mock("@/components/shared/pdf-page-view", () => ({
-  PdfPageView: (props: { width?: number; height?: number }) => (
+  PdfPageView: (props: { width?: number; height?: number; httpHeaders?: Record<string, string> }) => (
     <div
       data-testid="pdf-page-view"
       data-width={props.width ?? ""}
       data-height={props.height ?? ""}
+      data-authorization={props.httpHeaders?.Authorization ?? ""}
     />
   ),
 }));
@@ -66,9 +67,32 @@ describe("PreviewProvider + PreviewSidePanel", () => {
   });
 
   it("PDF 文件走 PdfPageView 渲染", () => {
-    setup({ name: "报告.pdf", contentType: "application/pdf", previewUrl: "http://x/r.pdf" });
+    setup({
+      name: "报告.pdf",
+      contentType: "application/pdf",
+      previewUrl: "http://x/r.pdf",
+      requestHeaders: { Authorization: "Bearer access-1" },
+    });
     fireEvent.click(screen.getByText("open"));
-    expect(screen.getByTestId("pdf-page-view")).toBeTruthy();
+    expect(screen.getByTestId("pdf-page-view").getAttribute("data-authorization")).toBe(
+      "Bearer access-1"
+    );
+  });
+
+  it("文本预览请求会透传认证头", async () => {
+    mockFetch.mockResolvedValue({ text: async () => "protected text" });
+    setup({
+      name: "notes.txt",
+      contentType: "text/plain",
+      previewUrl: "http://x/notes.txt",
+      requestHeaders: { Authorization: "Bearer access-1" },
+    });
+    fireEvent.click(screen.getByText("open"));
+    await waitFor(() => expect(screen.getByText("protected text")).toBeTruthy());
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://x/notes.txt",
+      expect.objectContaining({ headers: { Authorization: "Bearer access-1" } })
+    );
   });
 
   it("图片文件渲染 <img>", () => {

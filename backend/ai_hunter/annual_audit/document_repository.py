@@ -8,7 +8,7 @@ from typing import Any
 from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
-from .storage import mysql_connection, postgres_connection
+from .storage import postgres_connection
 from .workpaper_case import case_workpaper_category_codes, get_case_workpaper_summary
 
 
@@ -48,7 +48,7 @@ def list_doc_categories(*, settings: Settings | None = None) -> dict[str, Any]:
 
 
 def _structured_record_counts(engagement_id: int, settings: Settings) -> dict[str, int]:
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """

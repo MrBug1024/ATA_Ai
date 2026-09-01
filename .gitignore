@@ -53,3 +53,7 @@ public/pdf.worker.min.mjs
 
 new_docs/
 .runtime/
+
+.tmp_pycache
+.pytest-migration-tmp-final
+.pytest-migration-tmp

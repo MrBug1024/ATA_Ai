@@ -8,6 +8,7 @@ import itertools
 import logging
 import asyncio
 import re
+from threading import Lock
 from typing import Any, AsyncIterator
 
 import anyio
@@ -165,11 +166,13 @@ from ._upload_helpers import (
     resolve_engagement_entity,
     resolve_upload_batch_id,
     to_file_item,
+    validate_chat_uploaded_file_items,
 )
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-graph = build_audit_orchestrator_graph()
+graph = None
+_graph_lock = Lock()
 LOGGER = logging.getLogger(__name__)
 
 CHAT_INVOKE_MODULES = ("report", "drilldown", "materials", "tasks", "corrections", "graph")
@@ -186,6 +189,19 @@ CAPABILITY_MODULES = capability_permission_modules()
 # compiled graph for streaming paths.
 _async_graph = None
 _async_graph_lock = asyncio.Lock()
+
+
+def _get_sync_graph():
+    """Build the PostgreSQL-backed graph only when a request needs it."""
+
+    global graph
+    if graph is not None:
+        return graph
+    with _graph_lock:
+        if graph is None:
+            graph = build_audit_orchestrator_graph()
+            LOGGER.info("sync_graph_initialized")
+    return graph
 
 
 async def _ensure_async_graph():
@@ -283,8 +299,8 @@ class ChatRequest(BaseModel):
     uploaded_files: list[FileItem] = Field(
         default_factory=list,
         description=(
-            "已归一化的文件列表。适合前端已经拿到文件 URL、文本内容或 base64 内容时直接挂到聊天请求里。"
-            " 若前端要上传原始二进制文件，请改走 /files/upload-and-ingest。"
+            "仅接受 /chat/upload-files 返回的 MinIO FileItem 列表。"
+            " 不接受 URL、文本或 Base64 内联文件。"
         ),
     )
     stream: bool = Field(
@@ -333,6 +349,17 @@ class ChatRequest(BaseModel):
         return normalized
 
 
+class AttachmentJobRefModel(BaseModel):
+    job_id: str
+    case_id: int = 0
+    assistant_turn_id: str = ""
+    report_id: int = 0
+    report_version: int = 0
+    template_version_id: str = ""
+    template_version_label: str = ""
+    delivery_level: str = "review_draft"
+
+
 class ChatInvokeResponse(BaseModel):
     thread_id: str = Field(description="会话线程 ID。")
     current_case_id: int = Field(default=0, description="当前年审项目 ID。")
@@ -343,6 +370,10 @@ class ChatInvokeResponse(BaseModel):
     assistant_message_id: str = Field(
         default="",
         description="本轮持久化 assistant 消息 ID；SSE 客户端应将 final_report_ref 绑定到此消息。",
+    )
+    attachment_job: AttachmentJobRefModel | None = Field(
+        default=None,
+        description="与本条 assistant 消息绑定的附件生成任务摘要。",
     )
     trace_items: list[TraceItemModel] = Field(default_factory=list, description="报告断言对应的证据链。")
     reconciliation_items: list[ReconciliationLedgerItemModel] = Field(
@@ -440,6 +471,20 @@ async def invoke_chat(payload: ChatRequest, request: Request,
     await anyio.to_thread.run_sync(
         lambda: _require_existing_annual_engagement(requested_case_id, allow_unbound=allow_unbound)
     )
+    if payload.uploaded_files:
+        if payload.current_case_id <= 0 or requested_case_id != payload.current_case_id:
+            raise HTTPException(
+                status_code=400,
+                detail="对话文件必须与 current_case_id 指向同一有效年审项目",
+            )
+        require_case_access(payload.current_case_id, identity)
+        payload.uploaded_files = await anyio.to_thread.run_sync(
+            lambda: validate_chat_uploaded_file_items(
+                payload.uploaded_files,
+                case_id=payload.current_case_id,
+                settings=settings,
+            )
+        )
     if settings.auth_enabled:
         await anyio.to_thread.run_sync(
             lambda: _ensure_chat_thread(identity, payload.thread_id, requested_case_id, allow_unbound)
@@ -645,6 +690,7 @@ _RESPONSE_FINAL_STATE_FIELDS = (
     "final_report_summary",
     "final_report",
     "assistant_message_id",
+    "attachment_job",
     "response_evidence_index",
     "response_analysis_runs",
     "trace_items",
@@ -884,11 +930,12 @@ def _run_graph_with_logging(
     identity: Identity,
 ) -> dict[str, Any]:
     """Execute the graph while logging node-level progress for non-stream requests."""
+    sync_graph = _get_sync_graph()
     latest_state: dict[str, Any] = payload
-    if not hasattr(graph, "stream"):
-        return graph.invoke(payload, config={"configurable": {"thread_id": thread_id}})
+    if not hasattr(sync_graph, "stream"):
+        return sync_graph.invoke(payload, config={"configurable": {"thread_id": thread_id}})
 
-    for mode, chunk in graph.stream(
+    for mode, chunk in sync_graph.stream(
         payload,
         config={"configurable": {"thread_id": thread_id}},
         stream_mode=["updates", "values"],
@@ -969,6 +1016,12 @@ def _build_final_response(payload: ChatRequest, result: dict[str, Any],
         final_report_ref=result.get("final_report_ref", ""),
         final_report=final_report,
         assistant_message_id=result.get("assistant_message_id", ""),
+        attachment_job=(
+            AttachmentJobRefModel.model_validate(result.get("attachment_job"))
+            if isinstance(result.get("attachment_job"), dict)
+            and result.get("attachment_job", {}).get("job_id")
+            else None
+        ),
         trace_items=[TraceItemModel.model_validate(item) for item in resolve_trace_items(result)],
         reconciliation_items=[
             ReconciliationLedgerItemModel.model_validate(item) for item in resolve_reconciliation_items(result)
@@ -1528,6 +1581,10 @@ class AssistantTurnItem(BaseModel):
     final_report_ref: str = Field(default="", description="最终报告引用")
     intent: str = Field(default="", description="本轮意图")
     case_id: int = Field(default=0, description="关联案件 ID")
+    attachment_job: AttachmentJobRefModel | None = Field(
+        default=None,
+        description="该 assistant 版本绑定的附件生成任务。",
+    )
     route_decision: RouteDecisionModel | None = Field(
         default=None,
         description="该 assistant 版本自己的路由快照；不会回退为线程最新路由。",
@@ -1621,6 +1678,14 @@ def _turn_graph_context(raw_context: Any) -> dict[str, Any]:
     except ValueError:
         citation_coverage = CitationCoverageModel()
 
+    attachment_job: AttachmentJobRefModel | None = None
+    raw_attachment_job = context.get("attachment_job")
+    if isinstance(raw_attachment_job, dict) and raw_attachment_job.get("job_id"):
+        try:
+            attachment_job = AttachmentJobRefModel.model_validate(raw_attachment_job)
+        except ValueError:
+            attachment_job = None
+
     return {
         "route_decision": route_decision,
         "trace_items": _models(context.get("trace_items"), TraceItemModel),
@@ -1639,6 +1704,7 @@ def _turn_graph_context(raw_context: Any) -> dict[str, Any]:
         "unresolved_claims": _models(
             context.get("unresolved_claims"), UnresolvedClaimItemModel
         ),
+        "attachment_job": attachment_job,
     }
 
 
@@ -1719,6 +1785,7 @@ async def get_thread_turns(thread_id: str, identity: Identity = Depends(require_
                         final_report_ref=a.get("final_report_ref") or "",
                         intent=a.get("intent") or "",
                         case_id=a.get("case_id") or 0,
+                        attachment_job=graph_context["attachment_job"],
                         route_decision=graph_context["route_decision"],
                         trace_items=graph_context["trace_items"],
                         citation_coverage=graph_context["citation_coverage"],

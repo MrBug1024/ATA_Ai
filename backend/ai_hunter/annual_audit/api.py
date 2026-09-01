@@ -10,12 +10,21 @@ from pydantic import BaseModel, Field
 from ai_hunter.app.auth.identity import Identity
 from ai_hunter.app.auth.permissions import require_module
 from ai_hunter.app.auth.tenancy import require_case_access
+from ai_hunter.app.services.storage_readiness import (
+    StorageReadinessError,
+    check_storage_readiness,
+)
 from ai_hunter.app.settings import get_settings
 
 from . import document_repository as documents
 from . import engagement_repository as engagements
 from . import task_repository as tasks
 from .analysis_service import data_readiness, run_cash_and_bank, run_sales_receivables
+from .attachments.financial_statements import (
+    FinancialStatementApprovalError,
+    FinancialStatementEvidenceOwnershipError,
+    FinancialStatementPackage,
+)
 from .execution_service import (
     WorkflowBlockedError,
     archive_audit_engagement,
@@ -44,7 +53,7 @@ from .knowledge_service import (
     upsert_rule,
 )
 from .report_service import generate_annual_report_draft
-from .storage import AnnualAuditStorageError, mysql_connection
+from .storage import AnnualAuditStorageError, postgres_connection
 
 
 router = APIRouter()
@@ -99,6 +108,7 @@ class CashAnalysisRequest(AnnualAnalysisRequest):
 
 class AnnualReportRequest(AnnualAnalysisRequest):
     corrections: list[str] = Field(default_factory=list)
+    financial_statements: FinancialStatementPackage | None = None
 
 
 class ValidateDocCategoryRequest(BaseModel):
@@ -321,16 +331,15 @@ def _creation_payload(request: CreateEngagementRequest, identity: Identity) -> d
 @router.get("/health", tags=["年审基础设施"], summary="年审独立存储健康检查")
 def health() -> dict[str, str]:
     try:
-        with mysql_connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1 AS ok")
-                cursor.fetchone()
-    except AnnualAuditStorageError as exc:
+        readiness = check_storage_readiness()
+    except (AnnualAuditStorageError, StorageReadinessError, RuntimeError) as exc:
         raise _storage_http_error(exc) from exc
     settings = get_settings()
     return {
         "status": "ok",
-        "db": "connected",
+        "db": str(readiness["postgres"]),
+        "redis": str(readiness["redis"]),
+        "minio": str(readiness["minio"]),
         "domain": "annual_audit",
         "llm_provider": settings.resolve_provider("agent"),
     }
@@ -554,15 +563,31 @@ def generate_report(
     """Run all deterministic annual cycles and publish versioned artifacts."""
 
     require_case_access(request.case_id, identity)
+    if request.financial_statements is not None:
+        _require_project_control(identity)
     try:
         return generate_annual_report_draft(
             request.case_id,
             recompute=request.recompute,
             corrections=request.corrections,
+            financial_statements=request.financial_statements,
             created_by=identity.user_id,
         )
     except engagements.EngagementNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FinancialStatementEvidenceOwnershipError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FINANCIAL_STATEMENT_EVIDENCE_INVALID",
+                "message": str(exc),
+            },
+        ) from exc
+    except FinancialStatementApprovalError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except AnnualAuditStorageError as exc:
         raise _storage_http_error(exc) from exc
 
@@ -963,7 +988,7 @@ def list_report_artifacts(
     require_case_access(case_id, identity)
     try:
         engagements.get_engagement(case_id)
-        with mysql_connection() as connection:
+        with postgres_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """

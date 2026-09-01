@@ -1,8 +1,11 @@
-FROM node:22-alpine AS base
+ARG NODE_BASE_IMAGE=node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+FROM ${NODE_BASE_IMAGE} AS base
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # ── Dependencies ────────────────────────────────────────────────
 FROM base AS deps
-RUN apk add --no-cache libc6-compat
+# node:22-alpine is pinned to Alpine 3.24; gcompat provides libc6-compat there.
+RUN apk add --no-cache gcompat=1.1.0-r4
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./

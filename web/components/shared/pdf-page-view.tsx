@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -13,6 +13,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
 interface PdfPageViewProps {
   url: string;
+  httpHeaders?: Record<string, string>;
   pageNumber: number;
   /** 二选一:按宽度渲染(分栏)或按高度渲染(全屏整页适配);同时传时宽度优先。 */
   width?: number;
@@ -35,6 +36,7 @@ interface PdfPageViewProps {
  */
 export function PdfPageView({
   url,
+  httpHeaders,
   pageNumber,
   width,
   height,
@@ -46,6 +48,10 @@ export function PdfPageView({
 }: PdfPageViewProps) {
   const [renderedSize, setRenderedSize] = useState<{ w: number; h: number } | null>(null);
   const [error, setError] = useState(false);
+  const documentOptions = useMemo(
+    () => httpHeaders ? { httpHeaders } : undefined,
+    [httpHeaders]
+  );
 
   useEffect(() => {
     setRenderedSize(null);
@@ -65,6 +71,7 @@ export function PdfPageView({
   return (
     <Document
       file={url}
+      options={documentOptions}
       onLoadSuccess={({ numPages }) => onLoadSuccess?.(numPages)}
       onLoadError={() => setError(true)}
       loading={

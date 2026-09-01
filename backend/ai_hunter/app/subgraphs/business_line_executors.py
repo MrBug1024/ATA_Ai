@@ -15,6 +15,7 @@ from ...annual_audit.report_graph import build_annual_report_graph
 SPECIALIZED_EXECUTOR_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "full_audit_graph": (),
     "reaudit_graph": (),
+    "attachment_delivery_graph": (),
     "annual_audit_drilldown_agent": (
         "get_annual_engagement",
         "get_annual_audit_context",
@@ -47,9 +48,16 @@ def build_reaudit_graph():
     return graph.compile()
 
 
+def build_attachment_delivery_graph():
+    from ...annual_audit.attachments.delivery_graph import build_attachment_delivery_graph as build
+
+    return build()
+
+
 SPECIALIZED_EXECUTOR_FACTORIES: dict[str, Callable[[], object]] = {
     "full_audit_graph": build_domain_full_audit_graph,
     "reaudit_graph": build_reaudit_graph,
+    "attachment_delivery_graph": build_attachment_delivery_graph,
     "annual_audit_drilldown_agent": lambda: build_capability_agent_node("audit.drilldown"),
     "graph_query_agent": lambda: build_capability_agent_node("graph.query"),
 }

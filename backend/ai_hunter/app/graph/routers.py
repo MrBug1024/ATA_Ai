@@ -54,6 +54,7 @@ FULL_AUDIT_KEYWORDS = (
     "生成底稿",
 )
 REAUDIT_KEYWORDS = ("重新执行年审", "重新生成报告", "重跑年审", "更正后重跑", "重新审计")
+DELIVERY_KEYWORDS = ("生成附件", "重新生成附件", "附件生成", "生成交付附件", "编制附件")
 MATERIAL_UPLOAD_KEYWORDS = ("上传审计资料", "上传财务资料", "补充审计资料", "补资料")
 MATERIAL_STATUS_KEYWORDS = ("资料状态", "上传进度", "解析进度", "资料处理进度")
 MATERIAL_VALIDATE_KEYWORDS = ("资料完整性", "还缺什么资料", "缺少什么资料", "资料清单")
@@ -318,6 +319,8 @@ def _rule_route(state: AuditGraphState) -> RouteDecisionModel | None:
         return _decision("audit_analysis", "audit.reaudit", confidence=0.99, source="rule", case_id=case_id, action="reaudit")
     if any(keyword in query for keyword in WORKFLOW_KEYWORDS) or _is_audit_workflow_request(query):
         return _decision("audit_analysis", "audit.workflow", confidence=0.99, source="rule", case_id=case_id, action="guide")
+    if any(keyword in query for keyword in DELIVERY_KEYWORDS):
+        return _decision("audit_analysis", "delivery.generate", confidence=0.99, source="rule", case_id=case_id, action="generate")
     if any(keyword in query for keyword in FULL_AUDIT_KEYWORDS) or _is_explicit_audit_execution_request(query):
         return _decision("audit_analysis", "audit.full", confidence=0.99, source="rule", case_id=case_id, action="generate")
     if state.get("uploaded_files"):

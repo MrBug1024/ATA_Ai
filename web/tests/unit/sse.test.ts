@@ -191,6 +191,37 @@ describe("runStream", () => {
     ]);
   });
 
+  it("forwards attachment metadata even when the final event has no report payload", async () => {
+    const attachmentJob = {
+      job_id: "job-1",
+      case_id: 42,
+      assistant_turn_id: "turn-1-assistant",
+      report_id: 88,
+      report_version: 3,
+      template_version_id: "template-v1",
+      template_version_label: "v1",
+      delivery_level: "review_draft",
+    };
+    fetchMock.mockResolvedValue(
+      sseResponseFrom([
+        `event: final\ndata: ${JSON.stringify({ attachment_job: attachmentJob })}\n\n`,
+      ])
+    );
+
+    const { cb, finals } = makeCallbacks();
+    await runStream(
+      { threadId: "t1", query: "q" },
+      cb,
+      () => {},
+      () => {},
+      () => {}
+    );
+
+    expect(finals).toEqual([
+      { ref: "", report: undefined, metadata: { attachmentJob } },
+    ]);
+  });
+
   it("分段事件交错到达时按 section_id 重组成快照", async () => {
     fetchMock.mockResolvedValue(
       sseResponseFrom([
@@ -371,6 +402,39 @@ describe("toLangGraphEvent", () => {
         unresolvedRelations: [{ relation_key: "r-2" }],
         unresolvedClaims: [{ claim_text: "needs evidence" }],
       },
+    });
+  });
+
+  it("keeps a validated attachment job on the exact final event", () => {
+    const attachmentJob = {
+      job_id: "job-1",
+      case_id: 42,
+      assistant_turn_id: "turn-1-assistant",
+      report_id: 88,
+      report_version: 3,
+      template_version_id: "template-v1",
+      template_version_label: "v1",
+      delivery_level: "review_draft",
+    };
+    expect(toLangGraphEvent("final", { attachment_job: attachmentJob })).toEqual({
+      type: "final",
+      finalReportRef: undefined,
+      finalReport: undefined,
+      metadata: { attachmentJob },
+    });
+    expect(toLangGraphEvent("final", { attachment_job: { job_id: "incomplete" } })).toEqual({
+      type: "final",
+      finalReportRef: undefined,
+      finalReport: undefined,
+    });
+    expect(toLangGraphEvent("final", {
+      assistant_message_id: "different-assistant",
+      attachment_job: attachmentJob,
+    })).toEqual({
+      type: "final",
+      finalReportRef: undefined,
+      finalReport: undefined,
+      metadata: { assistantMessageId: "different-assistant" },
     });
   });
 

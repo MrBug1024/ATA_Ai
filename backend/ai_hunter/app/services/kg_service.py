@@ -710,6 +710,9 @@ class KnowledgeGraphService:
             span_end = EXCLUDED.span_end,
             token_count = EXCLUDED.token_count,
             metadata = EXCLUDED.metadata
+        WHERE source_chunk.case_id = EXCLUDED.case_id
+          AND source_chunk.file_id = EXCLUDED.file_id
+          AND source_chunk.page_id = EXCLUDED.page_id
         RETURNING id, chunk_id, case_id, file_id, page_id, page_no
         """
         with self.connect() as conn, conn.cursor() as cur:
@@ -720,7 +723,12 @@ class KnowledgeGraphService:
                 payload["bbox_list"] = Json(make_json_safe(payload.get("bbox_list", [])))
                 payload["metadata"] = Json(make_json_safe(payload.get("metadata", {})))
                 cur.execute(query, payload)
-                returned.append(dict(cur.fetchone()))
+                persisted = cur.fetchone()
+                if persisted is None:
+                    raise ValueError(
+                        "source chunk id conflicts with another case/file/page scope"
+                    )
+                returned.append(dict(persisted))
             conn.commit()
             return returned
 

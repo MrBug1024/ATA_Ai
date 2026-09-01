@@ -1,0 +1,10 @@
+{
+  "case": {
+    "case_name": "北京有限公司 2023 年度历史案例迁移",
+    "entity_name": "北京有限公司",
+    "company_id": "co_annual_local",
+    "fiscal_year": 2023,
+    "owner_id": "historical-migration",
+    "created_by": "historical-migration"
+  }
+}

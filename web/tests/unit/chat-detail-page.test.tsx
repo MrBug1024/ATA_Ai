@@ -3,6 +3,8 @@ import { Suspense } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BackendError } from "@/lib/backend/http";
+import { convertDbMessage } from "@/lib/assistant-ui/convert-message";
+import type { DbMessage } from "@/lib/assistant-ui/types";
 
 async function renderPage() {
   const { default: ChatDetailPage } = await import("@/app/(main)/chat/[id]/page");
@@ -215,6 +217,16 @@ describe("ChatDetailPage", () => {
               response_analysis_runs: [],
               unresolved_relations: [],
               unresolved_claims: [],
+              attachment_job: {
+                job_id: "job-second",
+                case_id: 116,
+                assistant_turn_id: "turn-1",
+                report_id: 88,
+                report_version: 2,
+                template_version_id: "template-v2",
+                template_version_label: "v2",
+                delivery_level: "review_draft",
+              },
             },
           ],
         },
@@ -235,6 +247,11 @@ describe("ChatDetailPage", () => {
       final_report_ref: "report:second",
       trace_items: [],
       response_analysis_runs: [],
+      attachment_job: {
+        job_id: "job-second",
+        report_version: 2,
+        template_version_id: "template-v2",
+      },
       custom: {
         finalReportRef: "report:second",
         traceItems: [],
@@ -242,7 +259,113 @@ describe("ChatDetailPage", () => {
         responseAnalysisRuns: [],
         unresolvedRelations: [],
         unresolvedClaims: [],
+        attachmentJob: {
+          job_id: "job-second",
+          report_version: 2,
+          template_version_id: "template-v2",
+        },
       },
     });
+  });
+
+  it("keeps each displayed historical turn bound to its own persisted attachment job", async () => {
+    const job = (jobId: string, turnId: string, reportVersion: number) => ({
+      job_id: jobId,
+      case_id: 116,
+      assistant_turn_id: turnId,
+      report_id: 88,
+      report_version: reportVersion,
+      template_version_id: `template-v${reportVersion}`,
+      template_version_label: `v${reportVersion}`,
+      delivery_level: "review_draft",
+    });
+    const assistant = (
+      turnId: string,
+      content: string,
+      version: number,
+      attachmentJob: ReturnType<typeof job> | null
+    ) => ({
+      turn_id: turnId,
+      content,
+      created_at: `2026-08-14T10:0${version}:00+08:00`,
+      final_report_ref: `report:${turnId}:v${version}`,
+      intent: "full_audit",
+      case_id: 116,
+      version,
+      route_decision: null,
+      trace_items: [],
+      citation_coverage: {},
+      response_analysis_runs: [],
+      unresolved_relations: [],
+      unresolved_claims: [],
+      attachment_job: attachmentJob,
+    });
+
+    mockGetThreadTurns.mockResolvedValue({
+      turns: [
+        {
+          turn_id: "turn-1",
+          user: {
+            content: "first request",
+            created_at: "2026-08-14T10:00:00+08:00",
+            uploaded_files: [],
+          },
+          assistants: [
+            assistant("turn-1", "superseded reply", 1, job("job-superseded", "turn-1", 1)),
+            assistant("turn-1", "displayed first reply", 2, job("job-turn-1", "turn-1", 2)),
+          ],
+        },
+        {
+          turn_id: "turn-2",
+          user: {
+            content: "second request",
+            created_at: "2026-08-14T11:00:00+08:00",
+            uploaded_files: [],
+          },
+          assistants: [
+            assistant("turn-2", "displayed second reply", 1, job("job-turn-2", "turn-2", 3)),
+          ],
+        },
+        {
+          turn_id: "turn-3",
+          user: {
+            content: "explain only",
+            created_at: "2026-08-14T12:00:00+08:00",
+            uploaded_files: [],
+          },
+          assistants: [assistant("turn-3", "reply without artifacts", 1, null)],
+        },
+      ],
+    });
+
+    await renderPage();
+    await screen.findByTestId("assistant-chat");
+
+    const props = pageMocks.assistantChatProps.mock.calls.at(-1)?.[0] as {
+      initialMessages: DbMessage[];
+    };
+    const assistants = props.initialMessages.filter((message) => message.role === "assistant");
+
+    expect(assistants.map((message) => message.content)).toEqual([
+      "displayed first reply",
+      "displayed second reply",
+      "reply without artifacts",
+    ]);
+    expect(assistants.map((message) => message.metadata?.attachment_job)).toEqual([
+      expect.objectContaining({ job_id: "job-turn-1", report_version: 2 }),
+      expect.objectContaining({ job_id: "job-turn-2", report_version: 3 }),
+      null,
+    ]);
+    expect(JSON.stringify(props.initialMessages)).not.toContain("job-superseded");
+
+    expect(
+      assistants.map(
+        (message) => convertDbMessage(message).metadata?.custom?.attachmentJob ?? null
+      )
+    ).toEqual([
+      expect.objectContaining({ job_id: "job-turn-1", report_version: 2 }),
+      expect.objectContaining({ job_id: "job-turn-2", report_version: 3 }),
+      null,
+    ]);
   });
 });

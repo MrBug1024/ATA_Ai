@@ -161,6 +161,7 @@ export default function ChatDetailPage({ params }: ChatDetailPageProps) {
               response_analysis_runs: assistant.response_analysis_runs,
               unresolved_relations: assistant.unresolved_relations ?? [],
               unresolved_claims: assistant.unresolved_claims ?? [],
+              attachment_job: assistant.attachment_job ?? null,
               custom: {
                 finalReportRef: assistant.final_report_ref || null,
                 routeDecision: assistant.route_decision ?? null,
@@ -169,6 +170,7 @@ export default function ChatDetailPage({ params }: ChatDetailPageProps) {
                 responseAnalysisRuns: assistant.response_analysis_runs,
                 unresolvedRelations: assistant.unresolved_relations ?? [],
                 unresolvedClaims: assistant.unresolved_claims ?? [],
+                attachmentJob: assistant.attachment_job ?? null,
               },
             },
             createdAt: assistant.created_at || now,

@@ -7,7 +7,7 @@ from typing import Any
 from ai_hunter.app.auth.identity import Identity
 from ai_hunter.app.settings import Settings, get_settings
 
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 def get_engagement_access_record(
@@ -19,7 +19,7 @@ def get_engagement_access_record(
     if int(engagement_id or 0) <= 0:
         return None
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -64,7 +64,7 @@ def list_accessible_engagement_ids(
                 """
             )
             params.extend([identity.user_id, identity.user_id])
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 f"SELECT e.id FROM audit_engagement e WHERE {' AND '.join(where)}",

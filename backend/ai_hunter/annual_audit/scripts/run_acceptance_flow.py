@@ -17,7 +17,7 @@ import time
 from openpyxl import Workbook
 
 from ai_hunter.annual_audit.engagement_repository import create_engagement
-from ai_hunter.annual_audit.storage import mysql_connection
+from ai_hunter.annual_audit.storage import postgres_connection
 from ai_hunter.app.graph.main import build_audit_orchestrator_graph
 from ai_hunter.app.services.minio_service import get_minio_service
 
@@ -105,22 +105,26 @@ def main() -> None:
         config={"configurable": {"thread_id": thread_id}},
     )
 
-    with mysql_connection() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT COUNT(*) AS total_rows,
-                   SUM(source_file_id IS NOT NULL) AS bound_files,
-                   SUM(source_chunk_id IS NOT NULL AND source_chunk_id <> '') AS bound_chunks
-            FROM (
-              SELECT source_file_id, source_chunk_id FROM annual_account_balance WHERE engagement_id = %s
-              UNION ALL SELECT source_file_id, source_chunk_id FROM annual_journal_entry_line WHERE engagement_id = %s
-              UNION ALL SELECT source_file_id, source_chunk_id FROM annual_receivable_item WHERE engagement_id = %s
-              UNION ALL SELECT source_file_id, source_chunk_id FROM annual_bank_transaction WHERE engagement_id = %s
-            ) source_rows
-            """,
-            (case_id, case_id, case_id, case_id),
+    with postgres_connection() as connection:
+        binding = dict(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS total_rows,
+                       COUNT(*) FILTER (WHERE source_file_id IS NOT NULL) AS bound_files,
+                       COUNT(*) FILTER (
+                           WHERE source_chunk_id IS NOT NULL AND source_chunk_id <> ''
+                       ) AS bound_chunks
+                FROM (
+                  SELECT source_file_id, source_chunk_id FROM annual_account_balance WHERE engagement_id = %s
+                  UNION ALL SELECT source_file_id, source_chunk_id FROM annual_journal_entry_line WHERE engagement_id = %s
+                  UNION ALL SELECT source_file_id, source_chunk_id FROM annual_receivable_item WHERE engagement_id = %s
+                  UNION ALL SELECT source_file_id, source_chunk_id FROM annual_bank_transaction WHERE engagement_id = %s
+                ) source_rows
+                """,
+                (case_id, case_id, case_id, case_id),
+            ).fetchone()
+            or {}
         )
-        binding = dict(cursor.fetchone() or {})
 
     artifacts = result.get("artifacts") or {}
     trace_items = result.get("trace_items") or []

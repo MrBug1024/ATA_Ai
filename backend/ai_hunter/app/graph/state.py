@@ -238,6 +238,7 @@ class AuditGraphState(TypedDict, total=False):
     source_chunks: list[dict[str, Any] | SourceChunkModel]
     task_create_result: dict[str, Any]
     artifacts: dict[str, Any]
+    attachment_job: dict[str, Any]
     agent_output: str
 
     errors: list[str]

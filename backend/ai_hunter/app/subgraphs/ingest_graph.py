@@ -105,16 +105,15 @@ def filter_files(state: AuditGraphState) -> AuditGraphState:
 
     for index, file_item in enumerate(files):
         extension = (file_item.get("extension") or "").lower()
-        content = file_item.get("content", "")
         file_type = (file_item.get("type") or "").lower()
         content_type = (file_item.get("content_type") or "").lower()
 
         if extension in TEXT_EXTENSIONS:
-            txt_contents.append(content)
+            txt_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
         elif extension in CSV_EXTENSIONS:
-            csv_contents.append(content)
+            csv_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
         elif extension in MARKDOWN_EXTENSIONS:
-            md_contents.append(content)
+            md_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
         else:
             target = _classify_ocr_target(file_type, extension, content_type)
             ocr_candidates.append((index, target, file_item))
@@ -204,11 +203,8 @@ def _run_ocr_batch(ocr_candidates: list[tuple[int, str, dict]]) -> list[tuple[in
 def _run_one_ocr(index: int, target: str, file_item: dict) -> tuple[int, str, str, str, dict]:
     """Run OCR for one file and return text plus reusable layout payload.
 
-    Resolution priority for the file payload:
-    1. ``storage_ref`` (minio://bucket/key) → fetch bytes via MinIO client,
-       base64-encode, and pass as ``file_content``.
-    2. ``url`` (http(s)://) → pass as ``file_url`` for OCR backend to fetch.
-    3. ``content`` (legacy base64 or text) → pass as ``file_content``.
+    Chat and async upload flows both resolve immutable raw bytes from the
+    validated MinIO reference, then pass those bytes to the OCR service.
     """
     if target == "spreadsheet":
         result = _extract_spreadsheet_with_layout(file_item)
@@ -222,14 +218,10 @@ def _run_one_ocr(index: int, target: str, file_item: dict) -> tuple[int, str, st
 
     service = get_ocr_service()
     raw_bytes = _resolve_file_bytes(file_item)
-    content = file_item.get("content", "")
-    file_url = file_item.get("url", "")
-    if raw_bytes is not None:
-        content = base64.b64encode(raw_bytes).decode("ascii")
-        file_url = ""
+    content = base64.b64encode(raw_bytes).decode("ascii")
 
     common_kwargs = {
-        "file_url": file_url,
+        "file_url": "",
         "file_name": file_item.get("name", ""),
         "file_content": content,
         "content_type": file_item.get("content_type", ""),
@@ -248,34 +240,32 @@ def _run_one_ocr(index: int, target: str, file_item: dict) -> tuple[int, str, st
 
 def _build_file_cache_key(file_item: dict) -> str:
     """Build one stable cache key for reusing OCR layout across graph stages."""
-    raw_content = str(file_item.get("content", "") or "")
-    if raw_content.strip():
-        return hashlib.sha256(_decode_file_bytes(file_item)).hexdigest()
     file_hash = str(file_item.get("file_hash", "") or "").strip()
     if file_hash:
         return file_hash
-    url = str(file_item.get("url", "") or "").strip()
-    if url:
-        return f"url:{url}"
+    storage_ref = str(file_item.get("storage_ref", "") or "").strip()
+    if storage_ref:
+        return f"minio:{hashlib.sha256(storage_ref.encode('utf-8')).hexdigest()}"
     return f"name:{str(file_item.get('name', '') or '').strip()}"
 
 
-def _resolve_file_bytes(file_item: dict) -> bytes | None:
-    """Resolve uploaded bytes locally when MinIO or inline content is available."""
+def _resolve_file_bytes(file_item: dict) -> bytes:
+    """Read uploaded bytes exclusively from the validated MinIO reference."""
     from ..services.minio_service import get_minio_service
 
     storage_ref = str(file_item.get("storage_ref", "") or "").strip()
-    if storage_ref.startswith("minio://"):
-        try:
-            return get_minio_service().get_object_bytes(storage_ref)
-        except Exception as exc:
-            raise RuntimeError(
-                f"MinIO 拉取失败 {file_item.get('name', 'unknown-file')}: {exc}"
-            ) from exc
-    content = str(file_item.get("content", "") or "").strip()
-    if content:
-        return _decode_file_bytes(file_item)
-    return None
+    if not storage_ref.startswith("minio://"):
+        raise ValueError("上传文件必须提供 MinIO storage_ref")
+    try:
+        file_bytes = get_minio_service().get_object_bytes(storage_ref)
+    except Exception as exc:
+        raise RuntimeError(
+            f"MinIO 拉取失败 {file_item.get('name', 'unknown-file')}: {exc}"
+        ) from exc
+    expected_hash = str(file_item.get("file_hash", "") or "").strip().lower()
+    if expected_hash and hashlib.sha256(file_bytes).hexdigest() != expected_hash:
+        raise RuntimeError(f"MinIO 内容校验失败 {file_item.get('name', 'unknown-file')}")
+    return file_bytes
 
 
 def _spreadsheet_cell_text(value: Any) -> str:
@@ -379,18 +369,6 @@ def _extract_spreadsheet_with_layout(file_item: dict) -> dict[str, Any]:
             "block_count": len(blocks),
         },
     }
-
-
-def _decode_file_bytes(file_item: dict) -> bytes:
-    """Decode inline file content used by upload flows into raw bytes."""
-    extension = (str(file_item.get("extension", "") or "")).lower()
-    content = str(file_item.get("content", "") or "")
-    if extension in TEXT_EXTENSIONS or extension in MARKDOWN_EXTENSIONS or extension in CSV_EXTENSIONS:
-        return content.encode("utf-8")
-    normalized = content.strip()
-    if normalized.startswith("data:") and ";base64," in normalized:
-        normalized = normalized.split(",", 1)[1]
-    return base64.b64decode(normalized)
 
 
 def _build_ocr_error_text(file_item: dict, message: str) -> str:

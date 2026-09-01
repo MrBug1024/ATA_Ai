@@ -8,7 +8,7 @@
       "company_name": "本地年审演示机构",
       "company_type": "owner",
       "status": "active",
-      "notes": "年审项目本地 Docker 开发环境默认机构。"
+      "notes": "年审项目开发环境默认机构。"
     }
   ],
   "report_sections": [

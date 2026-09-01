@@ -8,29 +8,25 @@
 backend/   FastAPI + LangGraph 年度审计后端
 web/       Next.js 对话式年度审计前端
 new_docs/  客户原始资料与年度审计逻辑资料
-deploy/    本地独立 PostgreSQL、MySQL、Redis、MinIO
-scripts/   本地环境管理脚本
+deploy/    部署参考配置
+scripts/   运维辅助脚本
 ```
 
-## 本地数据隔离
+## 存储配置
 
-年度审计使用独立的本地存储：
+年度审计运行时配置只读取 `backend/.env`，字段示例见 `backend/.env.example`。所有开发与生产环境均使用外置服务：
 
-- PostgreSQL：`127.0.0.1:55432/ata_agent_platform`
-- MySQL：`127.0.0.1:53306/ata_ai`
-- Redis：`127.0.0.1:56379`
-- MinIO API：`127.0.0.1:61000`
+- PostgreSQL：承载全部关系型业务与平台数据，统一使用 `POSTGRESQL_DATABASE=ata_ai`。
+- Redis：缓存和 Celery broker，使用 `REDIS_HOST`、`REDIS_PORT`、`REDIS_PASSWORD`、`REDIS_NAMESPACE`。
+- MinIO：线上对象存储，保存原始资料、派生预览、模板和交付成果。
 
-这些存储由 `deploy/annual-audit` 管理，不连接历史项目数据库。
+不要为历史项目数据库、缓存或对象桶配置回退连接。
+
+PostgreSQL 服务器必须预先创建 `ata_ai` 数据库，并提供 `pgcrypto` 和 `vector`（pgvector）扩展包；执行迁移的账号需要能够在该数据库创建扩展。首次部署先运行 `python -m ai_hunter.annual_audit.storage.migrate`，成功后再启动服务。
 
 ## 启动
 
 ```powershell
-.\scripts\annual-audit-local.ps1 up
-
-# 仅初始化本地登录、角色、报告段落与权限；不会创建演示项目或客户数据
-.\scripts\annual-audit-local.ps1 auth-seed
-
 cd backend
 python -m ai_hunter
 
@@ -50,4 +46,4 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
 - 前端：<http://localhost:3000>
 - 后端文档：<http://localhost:8080/docs>
 
-本地最高权限账号由年度审计权限种子初始化：`superadmin`。真实项目环境请使用 `auth-seed`，不要执行会创建空演示项目的 `seed`。
+开发环境最高权限账号由年度审计权限种子初始化：`superadmin`。不要执行会创建空演示项目或客户数据的种子操作。

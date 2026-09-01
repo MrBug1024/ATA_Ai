@@ -300,7 +300,7 @@ def _raise_tenancy_unavailable(exc: Exception) -> None:
     raise HTTPException(
         status_code=503,
         detail=(
-            "年度审计租户数据表尚不可用，请初始化 deploy/annual-audit 本地存储。"
+            "年度审计租户数据表尚不可用，请检查外置 PostgreSQL 并运行年度审计迁移。"
         ),
     ) from exc
 

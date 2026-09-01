@@ -1,4 +1,3 @@
-import hashlib
 import json
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, trim_messages
@@ -14,6 +13,7 @@ from ..context_loader import (
     resolve_unresolved_graph_items,
 )
 from ..state import AuditGraphState
+from ..turn_identity import derive_turn_id
 from ...repositories import get_conversation_message_repo
 
 
@@ -130,19 +130,20 @@ def persist_conversation_memory(state: AuditGraphState) -> AuditGraphState:
         "response_analysis_runs": list(state.get("response_analysis_runs") or []),
         "unresolved_relations": unresolved_graph_items.get("unresolved_relations", []),
         "unresolved_claims": unresolved_graph_items.get("unresolved_claims", []),
+        "attachment_job": dict(state.get("attachment_job") or {}),
     }
 
     # Deterministic turn id.
     thread_id = state.get("thread_id", "")
     client_turn_id = (state.get("client_turn_id") or "").strip()
-    if client_turn_id:
-        turn_id = hashlib.sha256(
-            f"{thread_id}:{client_turn_id}".encode()
-        ).hexdigest()[:16]
-    else:
-        turn_id = hashlib.sha256(
-            f"{query}:{current_case_id}:{intent}:{len(existing_messages)}".encode()
-        ).hexdigest()[:16]
+    turn_id = derive_turn_id(
+        thread_id=thread_id,
+        client_turn_id=client_turn_id,
+        query=query,
+        case_id=int(current_case_id or 0),
+        intent=str(intent or ""),
+        message_count=len(existing_messages),
+    )
 
     regenerate = state.get("regenerate", False)
     repo = get_conversation_message_repo()

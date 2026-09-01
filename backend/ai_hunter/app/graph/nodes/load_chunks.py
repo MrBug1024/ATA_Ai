@@ -9,6 +9,7 @@ from typing import Any
 
 from ...services.chunking import build_chunks_from_pages, build_page_records_from_layout
 from ...services.kg_service import get_kg_service
+from ...services.minio_service import get_minio_service
 from ...services.ocr_service import get_ocr_service
 from ..context_loader import resolve_ingest_payload
 from ..heavy_state import get_heavy_payload, put_heavy_payload
@@ -37,7 +38,7 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
     for file_item in uploaded_files:
         file_name = file_item.get("name", "") or "uploaded-file"
         extension = (file_item.get("extension") or Path(file_name).suffix.lower()).lower()
-        file_bytes = _decode_file_bytes(file_item.get("content", ""), extension)
+        file_bytes = _resolve_file_bytes(file_item)
         file_sha256 = str(file_item.get("file_hash", "") or "").strip()
         if not file_sha256:
             file_sha256 = hashlib.sha256(file_bytes).hexdigest()
@@ -53,7 +54,7 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
                 "content_type": file_item.get("content_type", ""),
                 "file_sha256": file_sha256,
                 "file_size_bytes": file_size_bytes,
-                "storage_ref": file_item.get("storage_ref", "") or file_item.get("url", ""),
+                "storage_ref": file_item.get("storage_ref", ""),
                 "storage_provider": file_item.get("storage_provider", ""),
                 "storage_bucket": file_item.get("storage_bucket", ""),
                 "storage_key": file_item.get("storage_key", ""),
@@ -71,13 +72,13 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
             layout_result = layout_cache.get(cache_key) or _load_layout_result(ocr_service, file_item, extension)
         else:
             layout_result = {
-                "text": file_item.get("content", ""),
+                "text": file_bytes.decode("utf-8", errors="replace"),
                 "message": "text-direct-read",
                 "pages": [{"width": 0, "height": 0}],
                 "blocks": [
                     {
                         "type": "text",
-                        "text": file_item.get("content", ""),
+                        "text": file_bytes.decode("utf-8", errors="replace"),
                         "text_level": 1,
                         "bbox": [],
                         "page_idx": 0,
@@ -329,29 +330,32 @@ def _merge_batch_summary(summary: dict[str, Any] | object, persisted: dict[str, 
     return merged
 
 
-def _decode_file_bytes(content: str, extension: str) -> bytes:
-    """Decode uploaded file content back into raw bytes for hashing and OCR transport."""
-    if not (content or "").strip():
-        return b""
-    if extension in TEXT_EXTENSIONS:
-        return (content or "").encode("utf-8")
-    raw_content = (content or "").strip()
-    if raw_content.startswith("data:") and ";base64," in raw_content:
-        raw_content = raw_content.split(",", 1)[1]
-    return base64.b64decode(raw_content)
+def _resolve_file_bytes(file_item: dict[str, Any]) -> bytes:
+    """Read persisted upload bytes from MinIO; no inline fallback is allowed."""
+
+    storage_ref = str(file_item.get("storage_ref", "") or "").strip()
+    if not storage_ref.startswith("minio://"):
+        raise ValueError("上传文件必须提供 MinIO storage_ref")
+    try:
+        file_bytes = get_minio_service().get_object_bytes(storage_ref)
+    except Exception as exc:
+        raise RuntimeError(
+            f"MinIO 拉取失败 {file_item.get('name', 'unknown-file')}: {exc}"
+        ) from exc
+    expected_hash = str(file_item.get("file_hash", "") or "").strip().lower()
+    if expected_hash and hashlib.sha256(file_bytes).hexdigest() != expected_hash:
+        raise RuntimeError(f"MinIO 内容校验失败 {file_item.get('name', 'unknown-file')}")
+    return file_bytes
 
 
 def _build_file_cache_key(file_item: dict[str, Any], extension: str) -> str:
     """Build one stable key for ingest OCR layout reuse."""
-    raw_content = (file_item.get("content", "") or "").strip()
-    if raw_content:
-        return hashlib.sha256(_decode_file_bytes(raw_content, extension)).hexdigest()
     file_hash = str(file_item.get("file_hash", "") or "").strip()
     if file_hash:
         return file_hash
-    file_url = str(file_item.get("url", "") or "").strip()
-    if file_url:
-        return f"url:{file_url}"
+    storage_ref = str(file_item.get("storage_ref", "") or "").strip()
+    if storage_ref:
+        return f"minio:{hashlib.sha256(storage_ref.encode('utf-8')).hexdigest()}"
     return f"name:{str(file_item.get('name', '') or '').strip()}"
 
 
@@ -393,10 +397,11 @@ def _resolve_persisted_ingest_payload(state: AuditGraphState) -> dict[str, Any]:
 
 def _load_layout_result(ocr_service, file_item: dict[str, Any], extension: str) -> dict[str, Any]:
     """Route one uploaded file through the layout-preserving OCR call."""
+    raw_bytes = _resolve_file_bytes(file_item)
     common_kwargs = {
-        "file_url": file_item.get("url", ""),
+        "file_url": "",
         "file_name": file_item.get("name", ""),
-        "file_content": file_item.get("content", ""),
+        "file_content": base64.b64encode(raw_bytes).decode("ascii"),
         "content_type": file_item.get("content_type", ""),
     }
     if extension in IMAGE_EXTENSIONS or (file_item.get("type") or "").lower() == "image":

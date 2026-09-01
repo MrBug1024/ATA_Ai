@@ -2,7 +2,7 @@
 
 from langchain_openai import ChatOpenAI
 
-from ..settings import get_settings
+from ..settings import Settings, get_settings
 
 
 def _normalize_temperature(provider: str, base_url: str | None, temperature: float) -> float:
@@ -83,3 +83,33 @@ def build_agent_llm() -> ChatOpenAI:
     """Build the model used by the drilldown tool-calling agent."""
     settings = get_settings()
     return _build_chat_model("agent", settings.openai_temperature_agent)
+
+
+def build_frozen_attachment_llm(
+    *,
+    provider: str,
+    model: str,
+    settings: Settings | None = None,
+) -> ChatOpenAI:
+    """Build the attachment model using frozen identity and current credentials."""
+
+    resolved = settings or get_settings()
+    config = resolved.get_llm_config("agent", provider_override=provider)
+    kwargs = {}
+    if (
+        config["provider"] == "minimax"
+        and config["base_url"]
+        and "minimaxi.com" in config["base_url"]
+    ):
+        kwargs["extra_body"] = {"reasoning_split": True}
+    return ChatOpenAI(
+        api_key=config["api_key"],
+        base_url=config["base_url"],
+        model=model,
+        temperature=_normalize_temperature(
+            config["provider"],
+            config["base_url"],
+            0,
+        ),
+        **kwargs,
+    )

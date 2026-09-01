@@ -1,4 +1,4 @@
-"""MySQL-backed deterministic annual-audit analysis orchestration."""
+"""PostgreSQL-backed deterministic annual-audit analysis orchestration."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .deterministic_analysis import (
     analyze_revenue_journal,
 )
 from .engagement_repository import EngagementNotFoundError, get_engagement
-from .storage import mysql_connection
+from .storage import postgres_connection
 from .workpaper_case import get_case_workpaper_summary
 
 
@@ -66,7 +66,7 @@ def _source_quality(file_names: list[str]) -> str:
 def _source_file_names(cursor, *, case_id: int, table_name: str) -> list[str]:
     cursor.execute(
         f"""
-        SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(source_locator_json, '$.file_name')) AS file_name
+        SELECT DISTINCT source_locator_json ->> 'file_name' AS file_name
         FROM {table_name}
         WHERE engagement_id = %s
         ORDER BY file_name
@@ -98,7 +98,7 @@ def _loads_json(value: Any) -> Any:
 def data_readiness(case_id: int, *, settings: Settings | None = None) -> dict[str, Any]:
     resolved = settings or get_settings()
     engagement = get_engagement(case_id, settings=resolved)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -291,7 +291,7 @@ def _finding_identity(finding: dict[str, Any]) -> tuple[str, str, str, str]:
 
 
 def _attach_finding_identifiers(cursor, *, result: dict[str, Any], analysis_run_id: int) -> None:
-    """Attach MySQL annual_finding IDs to fresh and cached analysis results."""
+    """Attach PostgreSQL annual_finding IDs to fresh and cached analysis results."""
 
     cursor.execute(
         """
@@ -330,7 +330,8 @@ def _persist_result(
         INSERT INTO annual_analysis_run (
           engagement_id, analysis_type, input_version, status,
           parameters_json, result_json, created_by, completed_at
-        ) VALUES (%s, %s, %s, 'completed', %s, %s, 'ai_agent', NOW(6))
+        ) VALUES (%s, %s, %s, 'completed', %s, %s, 'ai_agent', CURRENT_TIMESTAMP(6))
+        RETURNING id
         """,
         (
             case_id,
@@ -340,7 +341,7 @@ def _persist_result(
             json.dumps(result, ensure_ascii=False, default=_json_default),
         ),
     )
-    run_id = int(cursor.lastrowid)
+    run_id = int(cursor.fetchone()["id"])
     for finding in result.get("findings", []):
         cursor.execute(
             """
@@ -348,6 +349,7 @@ def _persist_result(
               engagement_id, analysis_run_id, finding_type, risk_level,
               title, description, amount, evidence_refs_json
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 case_id,
@@ -360,7 +362,7 @@ def _persist_result(
                 json.dumps(finding.get("evidence_refs", []), ensure_ascii=False, default=_json_default),
             ),
         )
-        finding["finding_id"] = int(cursor.lastrowid)
+        finding["finding_id"] = int(cursor.fetchone()["id"])
         finding["analysis_run_id"] = run_id
     # Persist the durable annual_finding IDs together with the analysis result
     # so a cached run keeps the same report-manifest identity.
@@ -392,7 +394,7 @@ def run_sales_receivables(
 ) -> dict[str, Any]:
     resolved = settings or get_settings()
     engagement = get_engagement(case_id, settings=resolved)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             input_version = _input_version(cursor, case_id, "sales_receivables")
             if not recompute and (cached := _cached_result(cursor, case_id, "sales_receivables", input_version)):
@@ -494,7 +496,7 @@ def run_cash_and_bank(
 ) -> dict[str, Any]:
     resolved = settings or get_settings()
     engagement = get_engagement(case_id, settings=resolved)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             input_version = _input_version(cursor, case_id, "cash_and_bank")
             if not recompute and (cached := _cached_result(cursor, case_id, "cash_and_bank", input_version)):

@@ -20,6 +20,16 @@ describe("extractErrorMessage", () => {
     expect(extractErrorMessage({ detail: "案件不存在" }, "fallback")).toBe("案件不存在");
   });
 
+  it("returns the message from a structured FastAPI domain error", async () => {
+    const { extractErrorMessage } = await import("@/lib/backend/http");
+    expect(
+      extractErrorMessage(
+        { detail: { code: "JOB_NOT_RETRYABLE", message: "当前任务没有可重试的失败项" } },
+        "fallback"
+      )
+    ).toBe("当前任务没有可重试的失败项");
+  });
+
   it("returns error field when present", async () => {
     const { extractErrorMessage } = await import("@/lib/backend/http");
     expect(extractErrorMessage({ error: "boom" }, "fallback")).toBe("boom");
@@ -130,6 +140,22 @@ describe("putJson", () => {
     const err = await putJson("http://test/p", {}, "更新失败").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BackendError);
     expect((err as Error).message).toBe("参数错误");
+  });
+});
+
+describe("patchJson", () => {
+  it("sends JSON body with PATCH method", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ revision: 2 }) });
+    const { patchJson } = await import("@/lib/backend/http");
+    await patchJson("http://test/version", { revision: 1, name: "新名称" });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://test/version",
+      expect.objectContaining({
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revision: 1, name: "新名称" }),
+      })
+    );
   });
 });
 

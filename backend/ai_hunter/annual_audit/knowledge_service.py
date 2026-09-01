@@ -15,7 +15,7 @@ from typing import Any
 
 from ai_hunter.app.settings import Settings, get_settings
 
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 AUTHORITY_TYPES = {
@@ -196,7 +196,7 @@ def create_knowledge_version(
                 "metadata": chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {},
             }
         )
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_knowledge_document WHERE document_code = %s FOR UPDATE",
@@ -210,6 +210,7 @@ def create_knowledge_version(
                       document_code, title, authority_type, source_issuer, source_url,
                       source_hash, scope_json, status, created_by
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'draft', %s)
+                    RETURNING id
                     """,
                     (
                         document_code,
@@ -222,7 +223,7 @@ def create_knowledge_version(
                         _text(actor_user_id) or "system",
                     ),
                 )
-                document_id = _integer(cursor.lastrowid)
+                document_id = _integer((cursor.fetchone() or {}).get("id"))
             else:
                 document_id = _integer(document.get("id"))
                 if str(document.get("authority_type") or "") != authority_type:
@@ -261,6 +262,7 @@ def create_knowledge_version(
                   ) AS previous_version),
                   %s, %s, 'draft', %s, %s
                 )
+                RETURNING id
                 """,
                 (
                     document_id,
@@ -277,7 +279,7 @@ def create_knowledge_version(
                     _text(actor_user_id) or "system",
                 ),
             )
-            knowledge_version_id = _integer(cursor.lastrowid)
+            knowledge_version_id = _integer((cursor.fetchone() or {}).get("id"))
             for index, chunk in enumerate(normalized_chunks, start=1):
                 cursor.execute(
                     """
@@ -338,7 +340,7 @@ def review_knowledge_version(
     action = _text(payload.get("action"))
     if action not in {"review", "approve", "reject"}:
         raise ValueError("action 必须为 review、approve 或 reject")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_knowledge_version WHERE id = %s FOR UPDATE",
@@ -354,7 +356,7 @@ def review_knowledge_version(
                 cursor.execute(
                     """
                     UPDATE annual_knowledge_version
-                    SET review_status = 'reviewed', reviewed_by = %s, reviewed_at = UTC_TIMESTAMP(6)
+                    SET review_status = 'reviewed', reviewed_by = %s, reviewed_at = CURRENT_TIMESTAMP(6)
                     WHERE id = %s
                     """,
                     (_text(actor_user_id) or "system", knowledge_version_id),
@@ -366,7 +368,7 @@ def review_knowledge_version(
                 cursor.execute(
                     """
                     UPDATE annual_knowledge_version
-                    SET review_status = 'approved', approved_by = %s, approved_at = UTC_TIMESTAMP(6)
+                    SET review_status = 'approved', approved_by = %s, approved_at = CURRENT_TIMESTAMP(6)
                     WHERE id = %s
                     """,
                     (_text(actor_user_id) or "system", knowledge_version_id),
@@ -400,7 +402,7 @@ def create_knowledge_release(
     version_ids = sorted({_integer(item) for item in payload.get("knowledge_version_ids") or [] if _integer(item)})
     if not release_code or not release_version or not version_ids:
         raise ValueError("release_code、release_version 和 knowledge_version_ids 不能为空")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             placeholders = ", ".join(["%s"] * len(version_ids))
             cursor.execute(
@@ -424,6 +426,7 @@ def create_knowledge_release(
                   release_code, release_version, status, effective_from, effective_to,
                   approval_note, created_by
                 ) VALUES (%s, %s, 'draft', %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     release_code,
@@ -434,7 +437,7 @@ def create_knowledge_release(
                     _text(actor_user_id) or "system",
                 ),
             )
-            release_id = _integer(cursor.lastrowid)
+            release_id = _integer((cursor.fetchone() or {}).get("id"))
             for version_id in version_ids:
                 cursor.execute(
                     """
@@ -464,7 +467,7 @@ def publish_knowledge_release(
 
     resolved = settings or get_settings()
     at_date = _date(payload.get("effective_from")) or date.today()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_knowledge_release WHERE id = %s FOR UPDATE",
@@ -499,7 +502,7 @@ def publish_knowledge_release(
                 """
                 UPDATE annual_knowledge_release
                 SET status = 'published', effective_from = %s, effective_to = %s,
-                    approval_note = %s, approved_by = %s, approved_at = UTC_TIMESTAMP(6)
+                    approval_note = %s, approved_by = %s, approved_at = CURRENT_TIMESTAMP(6)
                 WHERE id = %s
                 """,
                 (
@@ -531,7 +534,7 @@ def create_ruleset(
         raise ValueError("ruleset_code、version 和 name 不能为空")
     if not isinstance(scope, (dict, list)):
         raise ValueError("scope 必须为对象或数组")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -539,6 +542,7 @@ def create_ruleset(
                   ruleset_code, version, name, scope_json, status,
                   effective_from, effective_to, created_by
                 ) VALUES (%s, %s, %s, %s, 'draft', %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     ruleset_code,
@@ -550,7 +554,7 @@ def create_ruleset(
                     _text(actor_user_id) or "system",
                 ),
             )
-            ruleset_id = _integer(cursor.lastrowid)
+            ruleset_id = _integer((cursor.fetchone() or {}).get("id"))
         connection.commit()
     return {
         "ruleset_id": ruleset_id,
@@ -588,7 +592,7 @@ def upsert_rule(
     }
     if any(not isinstance(value, (dict, list)) for value in json_fields.values()):
         raise ValueError("规则配置字段必须为对象或数组")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT status FROM annual_audit_ruleset WHERE id = %s FOR UPDATE",
@@ -614,16 +618,17 @@ def upsert_rule(
                   knowledge_version_id, applicability_json, preconditions_json,
                   evidence_requirements_json, logic_json, exception_handling_json, status
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft')
-                ON DUPLICATE KEY UPDATE
-                  rule_type = VALUES(rule_type), name = VALUES(name),
-                  authority_locator = VALUES(authority_locator),
-                  knowledge_version_id = VALUES(knowledge_version_id),
-                  applicability_json = VALUES(applicability_json),
-                  preconditions_json = VALUES(preconditions_json),
-                  evidence_requirements_json = VALUES(evidence_requirements_json),
-                  logic_json = VALUES(logic_json),
-                  exception_handling_json = VALUES(exception_handling_json),
+                ON CONFLICT (ruleset_id, rule_code) DO UPDATE SET
+                  rule_type = EXCLUDED.rule_type, name = EXCLUDED.name,
+                  authority_locator = EXCLUDED.authority_locator,
+                  knowledge_version_id = EXCLUDED.knowledge_version_id,
+                  applicability_json = EXCLUDED.applicability_json,
+                  preconditions_json = EXCLUDED.preconditions_json,
+                  evidence_requirements_json = EXCLUDED.evidence_requirements_json,
+                  logic_json = EXCLUDED.logic_json,
+                  exception_handling_json = EXCLUDED.exception_handling_json,
                   status = 'draft'
+                RETURNING id
                 """,
                 (
                     ruleset_id,
@@ -639,11 +644,7 @@ def upsert_rule(
                     _dump(json_fields["exception_handling"]),
                 ),
             )
-            cursor.execute(
-                "SELECT id FROM annual_audit_rule WHERE ruleset_id = %s AND rule_code = %s",
-                (ruleset_id, rule_code),
-            )
-            rule_id = _integer(cursor.fetchone().get("id"))
+            rule_id = _integer((cursor.fetchone() or {}).get("id"))
         connection.commit()
     return {"ruleset_id": ruleset_id, "rule_id": rule_id, "rule_code": rule_code, "status": "draft"}
 
@@ -661,7 +662,7 @@ def review_rule(
     action = _text(payload.get("action"))
     if action not in {"approve", "reject"}:
         raise ValueError("action 必须为 approve 或 reject")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT * FROM annual_audit_rule WHERE id = %s FOR UPDATE", (rule_id,))
             rule = dict(cursor.fetchone() or {})
@@ -694,7 +695,7 @@ def publish_ruleset(
 
     resolved = settings or get_settings()
     effective_from = _date(payload.get("effective_from")) or date.today()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_audit_ruleset WHERE id = %s FOR UPDATE",
@@ -725,7 +726,7 @@ def publish_ruleset(
                 """
                 UPDATE annual_audit_ruleset
                 SET status = 'published', effective_from = %s, effective_to = %s,
-                    approved_by = %s, approved_at = UTC_TIMESTAMP(6)
+                    approved_by = %s, approved_at = CURRENT_TIMESTAMP(6)
                 WHERE id = %s
                 """,
                 (
@@ -774,7 +775,7 @@ def search_published_knowledge(
         placeholders = ", ".join(["%s"] * len(valid_types))
         where.append(f"d.authority_type IN ({placeholders})")
         params.extend(valid_types)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
@@ -790,9 +791,16 @@ def search_published_knowledge(
                 JOIN annual_knowledge_document d ON d.id = v.document_id
                 JOIN annual_knowledge_chunk c ON c.knowledge_version_id = v.id
                 WHERE {' AND '.join(where)}
-                ORDER BY FIELD(d.authority_type, 'law', 'accounting_standard',
-                  'auditing_standard', 'regulatory_guidance', 'firm_methodology',
-                  'industry_guidance', 'case_reference'),
+                ORDER BY CASE d.authority_type
+                  WHEN 'law' THEN 1
+                  WHEN 'accounting_standard' THEN 2
+                  WHEN 'auditing_standard' THEN 3
+                  WHEN 'regulatory_guidance' THEN 4
+                  WHEN 'firm_methodology' THEN 5
+                  WHEN 'industry_guidance' THEN 6
+                  WHEN 'case_reference' THEN 7
+                  ELSE 8
+                END,
                   v.effective_from DESC, c.id
                 LIMIT %s
                 """,
@@ -836,7 +844,7 @@ def list_policy_catalog(
     """List approved releases and rule-sets that may be frozen to a project."""
 
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """

@@ -13,7 +13,8 @@ export class BackendError extends Error {
 
 /**
  * 从后端错误体提取人类可读信息,统一三种历史格式:
- * FastAPI 校验错误 `{ detail: [{ msg }] }`、`{ detail: string }`、`{ error | message: string }`。
+ * FastAPI 校验错误 `{ detail: [{ msg }] }`、领域错误 `{ detail: { code, message } }`
+ * 以及历史格式 `{ detail: string }`、`{ error | message: string }`。
  */
 export function extractErrorMessage(body: unknown, fallback: string): string {
   if (typeof body !== "object" || body === null) return fallback;
@@ -23,6 +24,11 @@ export function extractErrorMessage(body: unknown, fallback: string): string {
       .map((d) => (typeof d === "object" && d !== null ? (d as { msg?: string }).msg : undefined))
       .filter((m): m is string => typeof m === "string" && m.length > 0);
     if (msgs.length > 0) return msgs.join("; ");
+  }
+  if (typeof b.detail === "object" && b.detail !== null) {
+    const detail = b.detail as Record<string, unknown>;
+    if (typeof detail.message === "string" && detail.message) return detail.message;
+    if (typeof detail.code === "string" && detail.code) return detail.code;
   }
   if (typeof b.detail === "string" && b.detail) return b.detail;
   if (typeof b.error === "string" && b.error) return b.error;
@@ -87,6 +93,22 @@ export async function putJson<T>(
     url,
     {
       method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    fallback
+  );
+}
+
+export async function patchJson<T>(
+  url: string,
+  body: unknown,
+  fallback = "请求失败"
+): Promise<T> {
+  return requestJson<T>(
+    url,
+    {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     },

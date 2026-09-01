@@ -121,6 +121,39 @@ class ConversationMessageRepository:
                     c.commit()
                 return cur.rowcount
 
+    def merge_assistant_graph_context(
+        self,
+        thread_id: str,
+        assistant_turn_id: str,
+        patch: dict[str, Any],
+        *,
+        conn: psycopg.Connection | None = None,
+    ) -> bool:
+        """Merge response-scoped metadata into one exact assistant message."""
+
+        if not thread_id or not assistant_turn_id or not patch:
+            return False
+        with self._connect(conn) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE conversation_messages
+                    SET graph_context = COALESCE(graph_context, '{}'::jsonb) || %(patch)s::jsonb
+                    WHERE thread_id = %(thread_id)s
+                      AND turn_id = %(turn_id)s
+                      AND role = 'assistant'
+                      AND deleted_at IS NULL
+                    """,
+                    {
+                        "thread_id": thread_id,
+                        "turn_id": assistant_turn_id,
+                        "patch": json.dumps(patch, ensure_ascii=False),
+                    },
+                )
+                if conn is None:
+                    c.commit()
+                return cur.rowcount == 1
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

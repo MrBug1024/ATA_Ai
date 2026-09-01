@@ -11,9 +11,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, UploadFile
 
@@ -22,9 +24,11 @@ from ..graph.state import FileItem
 from ..services.minio_service import get_minio_service, resolve_minio_reference_url
 from ..settings import Settings
 from ...annual_audit.engagement_repository import get_engagement_profile
+from ...platform_core import scoped_object_key
 
 
 _PLAIN_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv"}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -111,13 +115,13 @@ async def to_file_item(
 ) -> FileItem:
     """Convert one FastAPI UploadFile into the graph's normalized FileItem shape.
 
-    When ``ai_hunter_minio_enabled`` is true, the bytes are uploaded to MinIO
-    and the storage_* fields are filled.
+    File bytes are always written to the configured online MinIO service and
+    the storage_* fields are filled.
 
     ``populate_content`` controls the inline ``content`` field:
     - True: fill ``content`` with the inlined base64 / text payload (matches
-      the pre-refactor behavior used by the 202 async path so the OCR
-      pipeline keeps working when MinIO is disabled).
+      the payload used by the 202 async path while durable storage remains
+      MinIO-backed).
     - False (default): leave ``content`` empty so downstream graph nodes
       re-fetch via ``storage_ref`` (used by the chat path to keep
       LangGraph state lean).
@@ -141,31 +145,27 @@ async def to_file_item(
             detail=f"图片文件 {file_name} 超过 {settings.max_image_file_mb}MB 限制。",
         )
 
-    storage_payload = {
-        "storage_ref": "",
-        "storage_provider": "",
-        "storage_bucket": "",
-        "storage_key": "",
-        "storage_etag": "",
-        "storage_version": "",
-    }
-    if settings.ai_hunter_minio_enabled:
-        uploaded = get_minio_service().upload_raw_file(
-            case_id=current_case_id,
-            entity_id=current_entity_id,
-            file_name=file_name,
-            content_type=content_type,
-            file_bytes=file_bytes,
-            entity_name=entity_name,
+    if not settings.annual_minio_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="线上 MinIO 未启用，已拒绝写入非标准文件存储",
         )
-        storage_payload = {
-            "storage_ref": uploaded.storage_ref,
-            "storage_provider": uploaded.storage_provider,
-            "storage_bucket": uploaded.storage_bucket,
-            "storage_key": uploaded.storage_key,
-            "storage_etag": uploaded.storage_etag,
-            "storage_version": uploaded.storage_version,
-        }
+    uploaded = get_minio_service().upload_raw_file(
+        case_id=current_case_id,
+        entity_id=current_entity_id,
+        file_name=file_name,
+        content_type=content_type,
+        file_bytes=file_bytes,
+        entity_name=entity_name,
+    )
+    storage_payload = {
+        "storage_ref": uploaded.storage_ref,
+        "storage_provider": uploaded.storage_provider,
+        "storage_bucket": uploaded.storage_bucket,
+        "storage_key": uploaded.storage_key,
+        "storage_etag": uploaded.storage_etag,
+        "storage_version": uploaded.storage_version,
+    }
 
     if populate_content:
         if extension in _PLAIN_TEXT_EXTENSIONS:
@@ -213,3 +213,96 @@ def resolve_upload_batch_id(upload_batch_id: str) -> str:
     if normalized:
         return normalized
     return f"local-{uuid.uuid4().hex[:12]}"
+
+
+def validate_chat_uploaded_file_items(
+    uploaded_files: list[FileItem],
+    *,
+    case_id: int,
+    settings: Settings,
+) -> list[FileItem]:
+    """Validate client-returned chat file descriptors against the raw MinIO scope.
+
+    ``/chat/upload-files`` does not persist a source-file row yet, so its
+    durable authorization boundary is the configured raw bucket and the
+    annual-project path. The returned descriptor must be replayed unchanged;
+    arbitrary object buckets, other projects, URL references and inline bytes
+    are not valid chat inputs.
+    """
+
+    if int(case_id or 0) <= 0:
+        raise HTTPException(status_code=400, detail="上传资料必须绑定有效年审项目")
+
+    expected_bucket = settings.annual_minio_bucket_raw.strip()
+    expected_prefix = (
+        scoped_object_key(settings, project_id=int(case_id), category="raw").rstrip("/")
+        + "/"
+    )
+    minio = get_minio_service()
+    normalized_files: list[FileItem] = []
+
+    for raw_item in uploaded_files:
+        item = dict(raw_item)
+        storage_ref = str(item.get("storage_ref") or "").strip()
+        content_ref = str(item.get("content_ref") or "").strip()
+        if not storage_ref or content_ref != storage_ref:
+            raise HTTPException(status_code=422, detail="对话文件必须使用服务端返回的 MinIO storage_ref")
+        if str(item.get("storage_provider") or "").strip().lower() != "minio":
+            raise HTTPException(status_code=422, detail="对话文件仅支持 MinIO 对象存储")
+        if str(item.get("content") or "").strip():
+            raise HTTPException(status_code=422, detail="对话文件不接受内联文本或 Base64 内容")
+
+        parsed = urlsplit(storage_ref)
+        bucket = parsed.netloc.strip("/")
+        key = parsed.path.lstrip("/")
+        if (
+            parsed.scheme != "minio"
+            or parsed.query
+            or parsed.fragment
+            or not bucket
+            or not key
+            or storage_ref != f"minio://{bucket}/{key}"
+        ):
+            raise HTTPException(status_code=422, detail="对话文件 storage_ref 格式无效")
+        if bucket != expected_bucket or str(item.get("storage_bucket") or "").strip() != bucket:
+            raise HTTPException(status_code=422, detail="对话文件不属于配置的原始资料桶")
+        if str(item.get("storage_key") or "").strip() != key:
+            raise HTTPException(status_code=422, detail="对话文件 MinIO 元数据不一致")
+        if not key.startswith(expected_prefix):
+            raise HTTPException(status_code=403, detail="对话文件不属于当前年审项目")
+
+        file_name = str(item.get("name") or "").strip()
+        file_hash = str(item.get("file_hash") or "").strip().lower()
+        if not _SHA256_RE.fullmatch(file_hash):
+            raise HTTPException(status_code=422, detail="对话文件缺少有效 SHA-256")
+        if not file_name or key.rsplit("/", 1)[-1] != file_hash:
+            raise HTTPException(status_code=422, detail="对话文件 SHA-256 与 MinIO 对象不一致")
+
+        try:
+            object_stat = minio.stat_object(storage_ref)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="对话文件的 MinIO 对象不存在或不可读取") from exc
+        actual_size = int(getattr(object_stat, "size", -1))
+        reported_size = item.get("file_size")
+        try:
+            normalized_size = int(reported_size)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="对话文件大小无效") from None
+        if actual_size < 0 or normalized_size != actual_size:
+            raise HTTPException(status_code=422, detail="对话文件大小与 MinIO 对象不一致")
+
+        normalized_files.append(
+            {
+                **item,
+                "content": "",
+                "content_ref": storage_ref,
+                "storage_ref": storage_ref,
+                "storage_provider": "minio",
+                "storage_bucket": bucket,
+                "storage_key": key,
+                "url": resolve_minio_reference_url(storage_ref),
+                "file_hash": file_hash,
+                "file_size": actual_size,
+            }
+        )
+    return normalized_files

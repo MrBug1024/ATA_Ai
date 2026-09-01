@@ -211,6 +211,7 @@ export function useLanggraphRuntime(
                   const unresolvedClaims = responseMetadata?.unresolvedClaims ?? [];
                   const routeDecision = responseMetadata?.routeDecision ?? null;
                   const assistantMessageId = responseMetadata?.assistantMessageId ?? "";
+                  const attachmentJob = responseMetadata?.attachmentJob ?? null;
                   messages[messageIndex] = {
                     ...current,
                     // The final response is what the backend persists and what
@@ -234,6 +235,7 @@ export function useLanggraphRuntime(
                       response_analysis_runs: responseAnalysisRuns,
                       unresolved_relations: unresolvedRelations,
                       unresolved_claims: unresolvedClaims,
+                      attachment_job: attachmentJob,
                       custom: {
                         ...existingCustom,
                         finalReportRef: ref || null,
@@ -244,6 +246,7 @@ export function useLanggraphRuntime(
                         responseAnalysisRuns,
                         unresolvedRelations,
                         unresolvedClaims,
+                        attachmentJob,
                       },
                     },
                   };

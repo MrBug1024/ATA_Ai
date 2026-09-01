@@ -1,6 +1,6 @@
 """Project deterministic annual-audit findings into the platform graph.
 
-The annual-audit MySQL records remain the authoritative audit facts.  This
+The annual-audit PostgreSQL records remain the authoritative audit facts.  This
 module creates a traceable graph projection only for findings that already
 have a canonical platform evidence anchor.  It deliberately does not infer
 entities, relationships, or citations from similar-looking text.
@@ -31,7 +31,7 @@ MAX_PROJECTED_FINDINGS = 20
 def annual_finding_key(finding: dict[str, Any]) -> str:
     """Return a stable identity for one deterministic rule result.
 
-    The key intentionally excludes the MySQL row ID and analysis-run ID.  A
+    The key intentionally excludes the PostgreSQL row ID and analysis-run ID.  A
     recomputation with the exact same rule result reuses the graph claim,
     while changed evidence, amount, conclusion, or risk level becomes a new
     projection.

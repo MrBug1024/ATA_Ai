@@ -12,12 +12,13 @@ import { PdfPageView } from "./pdf-page-view";
 
 interface PdfViewerProps {
   url: string;
+  requestHeaders?: Record<string, string>;
   onPageClick?: () => void;
   /** width:分栏内按宽度铺满(默认);page:全屏弹层内整页适配高度。 */
   fit?: "width" | "page";
 }
 
-function PdfViewer({ url, onPageClick, fit = "width" }: PdfViewerProps) {
+export function PdfViewer({ url, requestHeaders, onPageClick, fit = "width" }: PdfViewerProps) {
   const [numPages, setNumPages] = useState<number>(0);
   const [page, setPage] = useState(1);
   const [containerRef, { width, height }] = useElementSize<HTMLDivElement>();
@@ -31,6 +32,7 @@ function PdfViewer({ url, onPageClick, fit = "width" }: PdfViewerProps) {
   const pageView = (
     <PdfPageView
       url={url}
+      httpHeaders={requestHeaders}
       pageNumber={page}
       {...sizeProps}
       renderTextLayer
@@ -40,14 +42,16 @@ function PdfViewer({ url, onPageClick, fit = "width" }: PdfViewerProps) {
         <div className="flex flex-col items-center justify-center gap-3 p-8 text-center">
           <FileText className="size-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground/60">PDF 加载失败</p>
-          <a
-            href={url}
-            download
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-          >
-            <Download className="size-3" /> 下载文件
-          </a>
+          {!requestHeaders && (
+            <a
+              href={url}
+              download
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            >
+              <Download className="size-3" /> 下载文件
+            </a>
+          )}
         </div>
       }
     />
@@ -110,6 +114,8 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   const [textContent, setTextContent] = useState<string | null>(null);
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [zoomOpen, setZoomOpen] = useState(false);
+  const downloadUrl = file.downloadUrl ??
+    (file.previewUrlIsDownload === false ? undefined : file.previewUrl);
 
   useEffect(() => {
     setZoomOpen(false);
@@ -128,7 +134,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
     setTextContent(null);
     if (type === "text" && file.previewUrl) {
       const controller = new AbortController();
-      fetch(file.previewUrl, { signal: controller.signal })
+      fetch(file.previewUrl, { headers: file.requestHeaders, signal: controller.signal })
         .then((r) => r.text())
         .then(setTextContent)
         .catch((err: unknown) => {
@@ -138,7 +144,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
         });
       return () => controller.abort();
     }
-  }, [file.previewUrl, type]);
+  }, [file.previewUrl, file.requestHeaders, type]);
 
   return (
     <div className="flex h-full flex-col border-l border-border/50 bg-background">
@@ -148,9 +154,9 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           <p className="text-[10px] uppercase text-muted-foreground/50">{file.contentType ?? "未知格式"}</p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {file.previewUrl && (
+          {downloadUrl && (
             <a
-              href={file.previewUrl}
+              href={downloadUrl}
               download={file.name}
               className="flex size-7 items-center justify-center rounded-md text-muted-foreground/50 hover:bg-accent hover:text-foreground transition-colors"
               title="下载"
@@ -189,7 +195,11 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           </div>
         )}
         {type === "pdf" && file.previewUrl && (
-          <PdfViewer url={file.previewUrl} onPageClick={() => setZoomOpen(true)} />
+          <PdfViewer
+            url={file.previewUrl}
+            requestHeaders={file.requestHeaders}
+            onPageClick={() => setZoomOpen(true)}
+          />
         )}
         {type === "text" && file.previewUrl && (
           <pre className="p-4 text-xs leading-relaxed text-foreground/80 whitespace-pre-wrap break-words">
@@ -210,9 +220,9 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
             <p className="text-sm text-muted-foreground/60">
               {type === "none" ? "不支持预览此格式" : "暂无预览"}
             </p>
-            {file.previewUrl && (
+            {downloadUrl && (
               <a
-                href={file.previewUrl}
+                href={downloadUrl}
                 download={file.name}
                 className="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
               >
@@ -242,7 +252,11 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
                 </div>
               )}
               {type === "pdf" && file.previewUrl && (
-                <PdfViewer url={file.previewUrl} fit="page" />
+                <PdfViewer
+                  url={file.previewUrl}
+                  requestHeaders={file.requestHeaders}
+                  fit="page"
+                />
               )}
             </div>
           </DialogContent>

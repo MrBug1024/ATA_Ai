@@ -1,13 +1,12 @@
 """Structured annual-audit imports triggered by the original chat upload flow.
 
 Raw files remain in the platform object/evidence stores.  This module only
-projects audit-relevant rows into the isolated MySQL annual-audit schema and
+projects audit-relevant rows into the isolated PostgreSQL annual-audit schema and
 keeps a source locator on every projected row.
 """
 
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
 import json
@@ -24,7 +23,7 @@ from ai_hunter.app.services.minio_service import get_minio_service
 from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
-from .storage import mysql_connection, postgres_connection
+from .storage import postgres_connection
 from .workpaper_case import (
     CASE_WORKPAPER_SOURCE_TYPE,
     persist_case_workpaper_summary,
@@ -587,16 +586,13 @@ def is_audit_workpaper_workbook(sheets: Iterable[TabularSheet]) -> bool:
 
 def _file_bytes(file_item: dict[str, Any]) -> bytes:
     storage_ref = str(file_item.get("storage_ref") or file_item.get("content_ref") or "").strip()
-    if storage_ref.startswith("minio://"):
-        return get_minio_service().get_object_bytes(storage_ref)
-    content = str(file_item.get("content") or "")
-    if not content:
-        raise ValueError("附件没有可读取的 storage_ref 或内联内容")
-    if Path(str(file_item.get("name") or "")).suffix.lower() == ".csv":
-        return content.encode("utf-8")
-    if content.startswith("data:") and ";base64," in content:
-        content = content.split(",", 1)[1]
-    return base64.b64decode(content)
+    if not storage_ref.startswith("minio://"):
+        raise ValueError("附件必须提供 MinIO storage_ref")
+    file_bytes = get_minio_service().get_object_bytes(storage_ref)
+    expected_hash = str(file_item.get("file_hash") or "").strip().lower()
+    if expected_hash and hashlib.sha256(file_bytes).hexdigest() != expected_hash:
+        raise ValueError("MinIO 内容 SHA-256 与附件元数据不一致")
+    return file_bytes
 
 
 def _json(value: Any) -> str:
@@ -614,13 +610,15 @@ def _persist_dataset(
     created_by: str,
     settings: Settings,
 ) -> tuple[int, bool]:
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT id, row_count FROM annual_import_batch
                 WHERE engagement_id = %s AND source_type = %s
-                  AND source_sha256 = %s AND source_ref = %s AND status = 'completed'
+                  AND source_sha256 = %s
+                  AND split_part(source_ref, '#', 2) = split_part(%s, '#', 2)
+                  AND status = 'completed'
                 ORDER BY id DESC LIMIT 1
                 """,
                 (engagement_id, dataset, source_sha256, source_ref),
@@ -634,6 +632,7 @@ def _persist_dataset(
                   engagement_id, source_ref, source_type, source_sha256,
                   status, metadata_json, created_by
                 ) VALUES (%s, %s, %s, %s, 'processing', %s, %s)
+                RETURNING id
                 """,
                 (
                     engagement_id,
@@ -644,7 +643,7 @@ def _persist_dataset(
                     created_by,
                 ),
             )
-            batch_id = int(cursor.lastrowid)
+            batch_id = int(cursor.fetchone()["id"])
 
             if dataset == "account_balance":
                 sql = """
@@ -720,7 +719,7 @@ def _persist_dataset(
             cursor.execute(
                 """
                 UPDATE annual_import_batch
-                SET status = 'completed', row_count = %s, completed_at = NOW(6)
+                SET status = 'completed', row_count = %s, completed_at = CURRENT_TIMESTAMP(6)
                 WHERE id = %s
                 """,
                 (len(values), batch_id),
@@ -879,13 +878,18 @@ def _unique_rows(rows: Iterable[dict[str, Any]], *, identity_field: str) -> list
 def _page_sheet_keys(page: dict[str, Any]) -> set[str]:
     """Return all worksheet names carried by one source-page batch record."""
 
+    cached = page.get("_sheet_keys")
+    if isinstance(cached, set):
+        return cached
     values: list[Any] = [page.get("sheet_name")]
     sheet_names = page.get("sheet_names")
     if isinstance(sheet_names, list):
         values.extend(sheet_names)
     page_text = str(page.get("page_text") or "")
     values.extend(match.group(1) for match in _SHEET_HEADER_RE.finditer(page_text))
-    return {key for value in values if (key := _canonical_source_key(value))}
+    keys = {key for value in values if (key := _canonical_source_key(value))}
+    page["_sheet_keys"] = keys
+    return keys
 
 
 def _select_source_file(
@@ -936,17 +940,25 @@ def _select_source_page(
 def _chunk_row_bounds(chunk: dict[str, Any]) -> tuple[int, int]:
     """Resolve spreadsheet row bounds from explicit metadata or source text."""
 
+    cached = chunk.get("_row_bounds")
+    if isinstance(cached, tuple) and len(cached) == 2:
+        return int(cached[0]), int(cached[1])
     metadata = _loads(chunk.get("metadata")) or {}
     metadata = metadata if isinstance(metadata, dict) else {}
     row_start = _positive_int(metadata.get("row_start"))
     row_end = _positive_int(metadata.get("row_end"))
     if row_start > 0 and row_end >= row_start:
-        return row_start, row_end
+        bounds = (row_start, row_end)
+        chunk["_row_bounds"] = bounds
+        return bounds
 
     rows = [int(match.group(1)) for match in _SHEET_ROW_RE.finditer(str(chunk.get("chunk_text") or ""))]
     if not rows:
+        chunk["_row_bounds"] = (0, 0)
         return 0, 0
-    return min(rows), max(rows)
+    bounds = (min(rows), max(rows))
+    chunk["_row_bounds"] = bounds
+    return bounds
 
 
 def _chunk_contains_row(chunk: dict[str, Any], row_number: int) -> bool:
@@ -956,7 +968,11 @@ def _chunk_contains_row(chunk: dict[str, Any], row_number: int) -> bool:
 
 def _chunk_contains_quote(chunk: dict[str, Any], quote: str) -> bool:
     expected = _canonical_source_key(quote)
-    return bool(expected and expected in _canonical_source_key(chunk.get("chunk_text")))
+    chunk_text = chunk.get("_canonical_chunk_text")
+    if not isinstance(chunk_text, str):
+        chunk_text = _canonical_source_key(chunk.get("chunk_text"))
+        chunk["_canonical_chunk_text"] = chunk_text
+    return bool(expected and expected in chunk_text)
 
 
 def _select_source_chunk(
@@ -1000,7 +1016,7 @@ def bind_structured_source_refs(
     chunk_batch: dict[str, Any],
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Bind MySQL structured rows to real PostgreSQL source anchors.
+    """Bind PostgreSQL structured rows to real PostgreSQL source anchors.
 
     Structured import intentionally happens before the normal graph ingest.
     This second pass runs after ``load_chunks`` has created source files,
@@ -1081,10 +1097,10 @@ def bind_structured_source_refs(
             }
         )
 
-    with mysql_connection(resolved) as mysql_conn, postgres_connection(resolved) as pg_conn:
-        with mysql_conn.cursor() as mysql_cursor, pg_conn.cursor() as pg_cursor:
+    with postgres_connection(resolved) as connection:
+        with connection.cursor() as cursor:
             for dataset, table_name in table_map.items():
-                mysql_cursor.execute(
+                cursor.execute(
                     f"""
                     SELECT id, source_locator_json
                     FROM {table_name}
@@ -1099,7 +1115,7 @@ def bind_structured_source_refs(
                     """,
                     (engagement_id,),
                 )
-                rows = list(mysql_cursor.fetchall())
+                rows = list(cursor.fetchall())
                 for row in rows:
                     locator = _loads(row.get("source_locator_json")) or {}
                     if not isinstance(locator, dict):
@@ -1183,7 +1199,7 @@ def bind_structured_source_refs(
                     if not cell_range and row_start > 0:
                         cell_range = f"A{row_start}:XFD{row_end}"
 
-                    pg_cursor.execute(
+                    cursor.execute(
                         """
                         SELECT page_image_ref, page_width, page_height
                         FROM public.source_page
@@ -1191,7 +1207,7 @@ def bind_structured_source_refs(
                         """,
                         (page_id,),
                     )
-                    page_meta = dict(pg_cursor.fetchone() or {})
+                    page_meta = dict(cursor.fetchone() or {})
                     locator.update(
                         {
                             "domain_code": "annual_audit",
@@ -1218,7 +1234,7 @@ def bind_structured_source_refs(
                             "preview_available": bool(chunk_id),
                         }
                     )
-                    mysql_cursor.execute(
+                    cursor.execute(
                         f"""
                         UPDATE {table_name}
                         SET source_file_id = %s,
@@ -1239,8 +1255,7 @@ def bind_structured_source_refs(
                         ),
                     )
                     bound += 1
-        mysql_conn.commit()
-        pg_conn.commit()
+        connection.commit()
     return {
         "status": "completed" if unbound == 0 else "partial",
         "bound_count": bound,
@@ -1252,12 +1267,394 @@ def bind_structured_source_refs(
     }
 
 
+_STRUCTURED_SOURCE_TABLES = (
+    "annual_account_balance",
+    "annual_journal_entry_line",
+    "annual_receivable_item",
+    "annual_bank_transaction",
+)
+
+
+def structured_source_anchor_status(
+    engagement_id: int,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Return stable row-level anchor coverage for one annual engagement."""
+
+    case_id = int(engagement_id or 0)
+    if case_id <= 0:
+        return {
+            "status": "no_engagement",
+            "total_count": 0,
+            "bound_count": 0,
+            "unbound_count": 0,
+        }
+    resolved = settings or get_settings()
+    selects = [
+        (
+            f"SELECT source_file_id, source_page_id, source_chunk_id "
+            f"FROM {table_name} WHERE engagement_id = %s"
+        )
+        for table_name in _STRUCTURED_SOURCE_TABLES
+    ]
+    with postgres_connection(resolved) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                  COUNT(*) AS total_count,
+                  COUNT(*) FILTER (
+                    WHERE source_file_id IS NOT NULL
+                      AND source_page_id IS NOT NULL
+                      AND COALESCE(source_chunk_id, '') <> ''
+                  ) AS bound_count
+                FROM ({' UNION ALL '.join(selects)}) rows
+                """,
+                tuple(case_id for _ in _STRUCTURED_SOURCE_TABLES),
+            )
+            row = dict(cursor.fetchone() or {})
+    total_count = int(row.get("total_count") or 0)
+    bound_count = int(row.get("bound_count") or 0)
+    unbound_count = max(0, total_count - bound_count)
+    return {
+        "status": "ready" if unbound_count == 0 else "evidence_blocked",
+        "total_count": total_count,
+        "bound_count": bound_count,
+        "unbound_count": unbound_count,
+    }
+
+
+def _unbound_structured_locators(
+    engagement_id: int,
+    *,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    locators: list[dict[str, Any]] = []
+    with postgres_connection(settings) as connection:
+        with connection.cursor() as cursor:
+            for table_name in _STRUCTURED_SOURCE_TABLES:
+                cursor.execute(
+                    f"""
+                    SELECT source_locator_json
+                    FROM {table_name}
+                    WHERE engagement_id = %s
+                      AND (
+                        source_file_id IS NULL
+                        OR source_page_id IS NULL
+                        OR source_chunk_id IS NULL
+                        OR source_chunk_id = ''
+                      )
+                    """,
+                    (engagement_id,),
+                )
+                for row in cursor.fetchall():
+                    locator = _loads(row.get("source_locator_json")) or {}
+                    if isinstance(locator, dict):
+                        locators.append(locator)
+    return locators
+
+
+def _source_files_for_locators(
+    engagement_id: int,
+    locators: list[dict[str, Any]],
+    *,
+    settings: Settings,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Resolve referenced files by immutable hash, with filename as legacy fallback."""
+
+    with postgres_connection(settings) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, case_id, entity_id, file_name, file_type, content_type,
+                       file_sha256, file_size_bytes, storage_ref, storage_provider,
+                       storage_bucket, storage_key, storage_etag, storage_version
+                FROM public.source_file
+                WHERE case_id = %s AND status = 'active'
+                ORDER BY id
+                """,
+                (engagement_id,),
+            )
+            source_files = [dict(row) for row in cursor.fetchall()]
+
+    by_sha256: dict[str, list[dict[str, Any]]] = {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for row in source_files:
+        sha256 = _canonical_source_key(row.get("file_sha256"))
+        if sha256:
+            by_sha256.setdefault(sha256, []).append(row)
+        file_name = _canonical_source_key(row.get("file_name"))
+        if file_name:
+            by_name.setdefault(file_name, []).append(row)
+
+    selected: dict[int, dict[str, Any]] = {}
+    failures: dict[str, int] = {}
+    for locator in locators:
+        row, reason = _select_source_file(
+            locator=locator,
+            files_by_sha256=by_sha256,
+            files_by_name=by_name,
+        )
+        if row is None:
+            failures[reason] = failures.get(reason, 0) + 1
+            continue
+        selected[int(row["id"])] = row
+    return [selected[key] for key in sorted(selected)], failures
+
+
+def _source_file_item(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(row.get("file_name") or ""),
+        "type": str(row.get("file_type") or "document"),
+        "extension": Path(str(row.get("file_name") or "")).suffix.lower(),
+        "content_type": str(row.get("content_type") or ""),
+        "file_hash": str(row.get("file_sha256") or ""),
+        "file_size": int(row.get("file_size_bytes") or 0),
+        "storage_ref": str(row.get("storage_ref") or ""),
+        "storage_provider": str(row.get("storage_provider") or ""),
+        "storage_bucket": str(row.get("storage_bucket") or ""),
+        "storage_key": str(row.get("storage_key") or ""),
+        "storage_etag": str(row.get("storage_etag") or ""),
+        "storage_version": str(row.get("storage_version") or ""),
+    }
+
+
+def _load_anchor_batch(
+    file_ids: list[int],
+    *,
+    settings: Settings,
+) -> dict[str, list[dict[str, Any]]]:
+    if not file_ids:
+        return {"pages": [], "chunks": []}
+    with postgres_connection(settings) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, file_id, page_no, page_text, page_image_ref,
+                       page_width, page_height, ocr_blocks
+                FROM public.source_page
+                WHERE file_id = ANY(%s)
+                ORDER BY file_id, page_no
+                """,
+                (file_ids,),
+            )
+            pages = [dict(row) for row in cursor.fetchall()]
+            cursor.execute(
+                """
+                SELECT id, chunk_id, case_id, file_id, page_id, page_no,
+                       chunk_index, chunk_type, chunk_text, chunk_text_sha256,
+                       anchor_text, bbox_list, span_start, span_end, token_count,
+                       metadata
+                FROM public.source_chunk
+                WHERE file_id = ANY(%s)
+                ORDER BY file_id, page_no, chunk_index
+                """,
+                (file_ids,),
+            )
+            chunks = [dict(row) for row in cursor.fetchall()]
+    return {"pages": pages, "chunks": chunks}
+
+
+def _scope_safe_chunks(
+    chunks: list[Any],
+    *,
+    settings: Settings,
+) -> tuple[list[dict[str, Any]], int]:
+    """Remint only IDs that collide with a chunk owned by another scope.
+
+    Some migrated chunks retained an ID minted with their pre-migration case
+    number. Keep those historical IDs intact for old payloads, while giving a
+    newly ingested real chunk a deterministic compatibility ID.
+    """
+
+    payloads = [
+        chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)
+        for chunk in chunks
+    ]
+    chunk_ids = [str(payload.get("chunk_id") or "") for payload in payloads]
+    existing: dict[str, dict[str, Any]] = {}
+    if chunk_ids:
+        with postgres_connection(settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT chunk_id, case_id, file_id, page_id
+                    FROM public.source_chunk
+                    WHERE chunk_id = ANY(%s)
+                    """,
+                    (chunk_ids,),
+                )
+                existing = {
+                    str(row["chunk_id"]): dict(row)
+                    for row in cursor.fetchall()
+                }
+
+    reminted = 0
+    for payload in payloads:
+        chunk_id = str(payload.get("chunk_id") or "")
+        owner = existing.get(chunk_id)
+        if owner is None or (
+            int(owner.get("case_id") or 0) == int(payload.get("case_id") or 0)
+            and int(owner.get("file_id") or 0) == int(payload.get("file_id") or 0)
+            and int(owner.get("page_id") or 0) == int(payload.get("page_id") or 0)
+        ):
+            continue
+        compatibility_seed = "|".join(
+            [
+                "legacy-scope-collision-v1",
+                str(payload.get("case_id") or 0),
+                str(payload.get("file_id") or 0),
+                str(payload.get("page_id") or 0),
+                str(payload.get("page_no") or 0),
+                str(payload.get("chunk_index") or 0),
+                str(payload.get("chunk_text_sha256") or ""),
+            ]
+        )
+        payload["chunk_id"] = hashlib.sha256(
+            compatibility_seed.encode("utf-8")
+        ).hexdigest()
+        metadata = dict(payload.get("metadata") or {})
+        metadata.update(
+            {
+                "chunk_id_compatibility": "legacy_scope_collision_v1",
+                "collided_chunk_id": chunk_id,
+            }
+        )
+        payload["metadata"] = metadata
+        reminted += 1
+    return payloads, reminted
+
+
+def backfill_structured_source_anchors(
+    engagement_id: int,
+    *,
+    settings: Settings | None = None,
+    kg_service: Any | None = None,
+    layout_loader: Any | None = None,
+) -> dict[str, Any]:
+    """Create missing worksheet pages/chunks and bind structured audit rows.
+
+    Historical migration stored immutable MinIO files and structured row
+    locators, but did not run the normal layout/chunk stage. This repair reads
+    only files already referenced by those locators, resolves them by SHA-256,
+    and reuses the same page/chunk builders as the live upload graph.
+    """
+
+    case_id = int(engagement_id or 0)
+    resolved = settings or get_settings()
+    before = structured_source_anchor_status(case_id, settings=resolved)
+    if case_id <= 0 or int(before.get("unbound_count") or 0) == 0:
+        return {**before, "repair_status": "not_needed", "parsed_source_file_count": 0}
+
+    locators = _unbound_structured_locators(case_id, settings=resolved)
+    source_files, resolution_failures = _source_files_for_locators(
+        case_id,
+        locators,
+        settings=resolved,
+    )
+    service = kg_service
+    if service is None:
+        from ai_hunter.app.services.kg_service import get_kg_service
+
+        service = get_kg_service()
+    if layout_loader is None:
+        from ai_hunter.app.subgraphs.ingest_graph import _extract_spreadsheet_with_layout
+
+        layout_loader = _extract_spreadsheet_with_layout
+    from ai_hunter.app.services.chunking import (
+        build_chunks_from_pages,
+        build_page_records_from_layout,
+    )
+
+    parsed_files: list[int] = []
+    rebuilt_chunk_files: list[int] = []
+    reminted_chunk_count = 0
+    parse_errors: list[dict[str, str]] = []
+    file_ids = [int(row["id"]) for row in source_files]
+    existing = _load_anchor_batch(file_ids, settings=resolved)
+    existing_chunk_file_ids = {
+        int(row.get("file_id") or 0) for row in existing.get("chunks") or []
+    }
+    existing_pages_by_file: dict[int, list[dict[str, Any]]] = {}
+    for page in existing.get("pages") or []:
+        existing_pages_by_file.setdefault(int(page.get("file_id") or 0), []).append(page)
+    for file_row in source_files:
+        file_id = int(file_row["id"])
+        if file_id in existing_chunk_file_ids:
+            continue
+        try:
+            page_rows = existing_pages_by_file.get(file_id, [])
+            if page_rows and any(page.get("ocr_blocks") for page in page_rows):
+                page_id_map = {
+                    int(row["page_no"]): int(row["id"])
+                    for row in page_rows
+                }
+            else:
+                layout = layout_loader(_source_file_item(file_row))
+                page_rows = build_page_records_from_layout(
+                    file_id=file_id,
+                    layout_result=layout,
+                )
+                inserted_pages = service.insert_source_pages(page_rows)
+                page_id_map = {
+                    int(row["page_no"]): int(row["id"])
+                    for row in inserted_pages
+                }
+                parsed_files.append(file_id)
+            chunks = build_chunks_from_pages(
+                case_id=case_id,
+                file_id=file_id,
+                file_sha256=str(file_row.get("file_sha256") or ""),
+                page_rows=page_rows,
+                page_id_map=page_id_map,
+            )
+            safe_chunks, reminted = _scope_safe_chunks(chunks, settings=resolved)
+            service.insert_source_chunks(safe_chunks)
+            reminted_chunk_count += reminted
+            if chunks:
+                rebuilt_chunk_files.append(file_id)
+        except Exception as exc:
+            parse_errors.append(
+                {
+                    "file_name": str(file_row.get("file_name") or ""),
+                    "error": str(exc)[:500],
+                }
+            )
+
+    batch = _load_anchor_batch(file_ids, settings=resolved)
+    binding = bind_structured_source_refs(
+        engagement_id=case_id,
+        chunk_batch={"files": source_files, **batch},
+        settings=resolved,
+    )
+    after = structured_source_anchor_status(case_id, settings=resolved)
+    repair_status = (
+        "completed"
+        if int(after.get("unbound_count") or 0) == 0
+        else "partial"
+    )
+    return {
+        **after,
+        "repair_status": repair_status,
+        "newly_bound_count": int(binding.get("bound_count") or 0),
+        "parsed_source_file_count": len(parsed_files),
+        "rebuilt_chunk_file_count": len(rebuilt_chunk_files),
+        "reminted_chunk_count": reminted_chunk_count,
+        "resolution_failures": resolution_failures,
+        "parse_errors": parse_errors,
+        "binding_unbound_reasons": dict(binding.get("unbound_reasons") or {}),
+    }
+
+
 __all__ = [
     "TabularSheet",
+    "backfill_structured_source_anchors",
     "detect_sheet_schema",
     "import_uploaded_files",
     "bind_structured_source_refs",
     "is_audit_workpaper_workbook",
     "normalize_sheet_rows",
     "read_tabular_sheets",
+    "structured_source_anchor_status",
 ]

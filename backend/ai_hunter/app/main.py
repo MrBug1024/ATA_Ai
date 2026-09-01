@@ -11,6 +11,8 @@ from .api.routes_graph import router as graph_router
 from .api.routes_corrections import router as corrections_router
 from .api.routes_auth import router as auth_router
 from .api.routes_users import router as users_router
+from .api.routes_artifacts import router as artifacts_router
+from .api.routes_templates import router as templates_router
 from .graph.checkpointer import close_async_checkpointer
 from .logging_utils import configure_logging
 from .middleware import RequestLoggingMiddleware
@@ -94,6 +96,7 @@ class DocsIndexResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    settings.require_runtime_storage()
     LOGGER.info(
         "app_started env=%s host=%s port=%s log_level=%s",
         settings.app_env,
@@ -131,6 +134,13 @@ def create_app() -> FastAPI:
         allow_credentials=settings.cors_allow_credentials,
         allow_methods=settings.cors_allow_methods_list or ["*"],
         allow_headers=settings.cors_allow_headers_list or ["*"],
+        expose_headers=[
+            "Accept-Ranges",
+            "Content-Range",
+            "Content-Length",
+            "Content-Disposition",
+            "X-Request-ID",
+        ],
     )
     app.add_middleware(RequestLoggingMiddleware)
     app.include_router(chat_router)
@@ -139,6 +149,8 @@ def create_app() -> FastAPI:
     app.include_router(corrections_router)
     app.include_router(auth_router)
     app.include_router(users_router)
+    app.include_router(artifacts_router)
+    app.include_router(templates_router)
     app.include_router(annual_audit_router)
 
     @app.get(

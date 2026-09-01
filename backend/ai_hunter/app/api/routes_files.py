@@ -517,6 +517,9 @@ async def retry_upload_batch(
     if not batch:
         raise HTTPException(status_code=404, detail=f"upload_batch_id 不存在: {upload_batch_id}")
     require_case_access(int(batch.get("case_id", 0) or 0), identity)
+    retry_blocked_reason = _retry_blocked_reason(batch)
+    if retry_blocked_reason:
+        raise HTTPException(status_code=409, detail=retry_blocked_reason)
     material_event_id = str((dict(batch.get("metadata", {}) or {})).get("material_event_id", "") or _build_material_event_id(upload_batch_id))
     event = get_kg_service().fetch_material_event(material_event_id) if material_event_id else {}
 
@@ -575,6 +578,18 @@ async def retry_upload_batch(
         "upload_batch_detail_path": f"/files/upload-batches/{upload_batch_id}",
         "material_event_detail_path": f"/files/material-events/{material_event_id}",
     }
+
+
+def _retry_blocked_reason(batch: dict) -> str:
+    """Return the operator-facing reason when a batch must not be retried automatically."""
+
+    metadata = dict(batch.get("metadata", {}) or {})
+    if metadata.get("retryable") is not False and metadata.get("retry_policy") != "manual_review_required":
+        return ""
+    return str(
+        metadata.get("retry_disabled_reason")
+        or "该批次需要人工复核，不能通过自动重试重新处理。"
+    )
 
 
 def _mark_retry_progress(

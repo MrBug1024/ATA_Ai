@@ -12,7 +12,7 @@ from ai_hunter.app.graph.heavy_state import put_heavy_payload
 from ai_hunter.app.settings import Settings, get_settings
 from ai_hunter.app.services.minio_service import resolve_minio_reference_url
 
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 LOGGER = logging.getLogger(__name__)
@@ -30,6 +30,106 @@ def _loads(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+_DOMAIN_ROW_TABLES = {
+    "account_balance": "annual_account_balance",
+    "journal_entry": "annual_journal_entry_line",
+    "receivable_item": "annual_receivable_item",
+    "bank_transaction": "annual_bank_transaction",
+}
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def hydrate_deterministic_finding_evidence_refs(
+    engagement_id: int,
+    findings: list[dict[str, Any]],
+    *,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    """Overlay current canonical anchors onto immutable finding row references.
+
+    A finding records the authoritative domain row identity at analysis time.
+    Page/chunk binding may legitimately happen later (for example during a
+    historical migration repair), so readers resolve that identity back to the
+    current source locator without rewriting the original finding snapshot.
+    """
+
+    case_id = int(engagement_id or 0)
+    if case_id <= 0 or not findings:
+        return [dict(finding) for finding in findings]
+
+    ids_by_type: dict[str, set[int]] = {}
+    for finding in findings:
+        for reference in finding.get("evidence_refs") or []:
+            if not isinstance(reference, dict):
+                continue
+            row_type = str(reference.get("domain_row_type") or "")
+            row_id = _positive_int(reference.get("domain_row_id"))
+            if row_type in _DOMAIN_ROW_TABLES and row_id > 0:
+                ids_by_type.setdefault(row_type, set()).add(row_id)
+
+    anchors: dict[tuple[str, int], dict[str, Any]] = {}
+    resolved = settings or get_settings()
+    if ids_by_type:
+        with postgres_connection(resolved) as connection:
+            with connection.cursor() as cursor:
+                for row_type, row_ids in ids_by_type.items():
+                    cursor.execute(
+                        f"""
+                        SELECT id, source_locator_json, source_file_id,
+                               source_page_id, source_chunk_id, locator_kind
+                        FROM {_DOMAIN_ROW_TABLES[row_type]}
+                        WHERE engagement_id = %s AND id = ANY(%s)
+                        """,
+                        (case_id, sorted(row_ids)),
+                    )
+                    for row in cursor.fetchall():
+                        locator = _loads(row.get("source_locator_json")) or {}
+                        if not isinstance(locator, dict):
+                            locator = {}
+                        locator = dict(locator)
+                        locator.update(
+                            {
+                                "source_file_id": int(row.get("source_file_id") or 0),
+                                "source_page_id": int(row.get("source_page_id") or 0),
+                                "source_chunk_id": str(row.get("source_chunk_id") or ""),
+                                "locator_kind": str(row.get("locator_kind") or ""),
+                            }
+                        )
+                        anchors[(row_type, int(row["id"]))] = locator
+
+    hydrated: list[dict[str, Any]] = []
+    for finding in findings:
+        copied = dict(finding)
+        references: list[dict[str, Any]] = []
+        for raw_reference in finding.get("evidence_refs") or []:
+            if not isinstance(raw_reference, dict):
+                continue
+            reference = dict(raw_reference)
+            row_type = str(reference.get("domain_row_type") or "")
+            row_id = _positive_int(reference.get("domain_row_id"))
+            current_locator = anchors.get((row_type, row_id))
+            if current_locator is not None:
+                original_locator = reference.get("source_locator")
+                reference["source_locator"] = {
+                    **(
+                        dict(original_locator)
+                        if isinstance(original_locator, dict)
+                        else {}
+                    ),
+                    **current_locator,
+                }
+            references.append(reference)
+        copied["evidence_refs"] = references
+        hydrated.append(copied)
+    return hydrated
 
 
 def _evidence_item(reference: dict[str, Any], ordinal: int) -> dict[str, Any] | None:
@@ -85,7 +185,7 @@ def latest_finding_trace_items(
     settings: Settings | None = None,
 ) -> list[dict[str, Any]]:
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -108,18 +208,40 @@ def latest_finding_trace_items(
             )
             rows = list(cursor.fetchall())
 
+    finding_rows = hydrate_deterministic_finding_evidence_refs(
+        engagement_id,
+        [
+            {
+                "finding_id": int(row.get("id") or 0),
+                "analysis_run_id": int(row.get("analysis_run_id") or 0),
+                "analysis_type": str(row.get("analysis_type") or ""),
+                "finding_type": str(row.get("finding_type") or ""),
+                "risk_level": str(row.get("risk_level") or ""),
+                "title": str(row.get("title") or ""),
+                "description": str(row.get("description") or ""),
+                "evidence_refs": [
+                    dict(reference)
+                    for reference in (_loads(row.get("evidence_refs_json")) or [])
+                    if isinstance(reference, dict)
+                ],
+            }
+            for row in rows
+        ],
+        settings=resolved,
+    )
+
     # Only findings from the latest completed run of each analysis type may be
     # cited. A rule that disappeared after recomputation is superseded, not a
     # still-open conclusion. Keep the defensive per-rule deduplication as well.
     seen: set[tuple[str, str]] = set()
     trace_items: list[dict[str, Any]] = []
-    for row in rows:
+    for row in finding_rows:
         key = (str(row["analysis_type"]), str(row["finding_type"]))
         if key in seen:
             continue
         seen.add(key)
         evidences = []
-        for ordinal, reference in enumerate(_loads(row.get("evidence_refs_json")) or [], start=1):
+        for ordinal, reference in enumerate(row.get("evidence_refs") or [], start=1):
             if not isinstance(reference, dict):
                 continue
             item = _evidence_item(reference, ordinal)
@@ -130,7 +252,7 @@ def latest_finding_trace_items(
         trace_items.append(
             {
                 "citation_id": str(len(trace_items) + 1),
-                "claim_id": int(row["id"]),
+                "claim_id": int(row["finding_id"]),
                 "claim_type": str(row["finding_type"]),
                 "claim_text": f"{row['title']}：{row['description']}",
                 "confidence": 1.0,
@@ -150,7 +272,7 @@ def trace_items_from_deterministic_findings(
 ) -> list[dict[str, Any]]:
     """Make a response-local trace snapshot from the analysis just executed.
 
-    The deterministic annual findings live in the MySQL annual domain rather
+    The deterministic annual findings live in the PostgreSQL annual domain rather
     than PostgreSQL kg_claim, so their numeric IDs must not be persisted into
     report_citation_map. The returned traces are instead resolved by their
     response-local citation IDs from the immutable report payload.
@@ -357,7 +479,7 @@ def _current_analysis_run_findings(state: dict[str, Any]) -> list[dict[str, Any]
     run_ids = list(scope_by_run)
     placeholders = ", ".join(["%s"] * len(run_ids))
     try:
-        with mysql_connection(get_settings()) as connection:
+        with postgres_connection(get_settings()) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
@@ -416,7 +538,10 @@ def _current_analysis_run_findings(state: dict[str, Any]) -> list[dict[str, Any]
                 ],
             }
         )
-    return findings
+    return hydrate_deterministic_finding_evidence_refs(
+        engagement_id,
+        findings,
+    )
 
 
 def _traces_and_coverage_from_current_analysis_runs(
@@ -687,7 +812,7 @@ def _latest_finding_evidence_coverage(
 ) -> dict[str, Any]:
     """Calculate coverage over every current finding, not only rendered citations."""
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1098,6 +1223,7 @@ def resolve_report_evidence(
 
 __all__ = [
     "finalize_annual_answer",
+    "hydrate_deterministic_finding_evidence_refs",
     "latest_finding_trace_items",
     "render_knowledge_graph_trace_appendix",
     "resolve_report_evidence",

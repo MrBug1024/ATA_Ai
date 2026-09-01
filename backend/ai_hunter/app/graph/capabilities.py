@@ -173,6 +173,15 @@ _CAPABILITY_SPEC_LIST = (
         permission="report",
     ),
     _spec(
+        "delivery.generate",
+        "基于当前冻结报告和激活模板生成待复核附件",
+        "audit_analysis",
+        business_executor="attachment_delivery_graph",
+        permission="report",
+        access="write",
+        requires_case=True,
+    ),
+    _spec(
         "evidence.resolve",
         "查询当前年审项目的原始证据、引用与页锚点",
         "audit_analysis",

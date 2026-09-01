@@ -13,7 +13,7 @@ python -m compileall -q ai_hunter
 python -m ai_hunter
 ```
 
-Only `tests/` is collected by pytest. Runtime data services come from `deploy/annual-audit/.env.local`.
+Only `tests/` is collected by pytest. Runtime configuration comes from `backend/.env`; use `backend/.env.example` as the field reference.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ Only `tests/` is collected by pytest. Runtime data services come from `deploy/an
 - `ai_hunter/app/tools/registry.py`: annual drilldown tool registry.
 - `sql/annual_audit_*`: annual storage migrations.
 
-The browser and all internal operations use one FastAPI process on `8080`. PostgreSQL must point to the configured ATA platform database; MySQL must point to the new project's isolated database (currently `ata_ai`); Redis keys must use the annual namespace; MinIO must use annual buckets. Never fall back to an NPA database, bucket, collection or key prefix.
+The browser and all internal operations use one FastAPI process on `8080`. PostgreSQL stores all annual-audit business and platform data in `POSTGRESQL_DATABASE=ata_ai`. Redis keys must use the annual namespace and Redis is limited to cache and broker duties; MinIO must use the configured online annual buckets. Never fall back to a historical database, bucket, collection or key prefix.
 
 ## Engineering Rules
 
@@ -35,7 +35,7 @@ The browser and all internal operations use one FastAPI process on `8080`. Postg
 - Corrections are persisted as an authoritative ledger and trigger regeneration from source data.
 - Large report payloads stay out of chat messages and use heavy-payload storage.
 - Register new tools and capabilities centrally and add focused tests.
-- Database migrations must be idempotent and restricted to the configured annual databases.
+- Database migrations must be idempotent and restricted to the configured `POSTGRESQL_DATABASE`.
 
 ## Change Audit
 

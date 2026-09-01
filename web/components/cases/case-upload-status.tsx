@@ -18,6 +18,21 @@ export function CaseUploadStatus({ caseId }: Props) {
     const hasProcessing = events.some((e) => e.status === "processing");
     if (hasProcessing) return { label: "处理中", variant: "processing" as const };
 
+    const hasManualReview = events.some(
+      (event) =>
+        event.stage === "manual_review_required" ||
+        event.stage === "raw_preserved_pending_review" ||
+        event.event_payload?.stage === "manual_review_required" ||
+        event.event_payload?.stage === "raw_preserved_pending_review" ||
+        (event.status === "failed" &&
+          (event.event_payload?.retryable === false ||
+            event.event_payload?.retry_policy === "manual_review_required"))
+    );
+    if (hasManualReview) return { label: "待人工复核", variant: "manual_review" as const };
+
+    const hasFailed = events.some((e) => e.status === "failed");
+    if (hasFailed) return { label: "上传失败", variant: "failed" as const };
+
     const categories = caseDocCategories?.categories ?? [];
     const total = categories.length;
     const available = categories.filter((category) => category.uploaded || category.covered_by_case_workpaper).length;
@@ -29,8 +44,6 @@ export function CaseUploadStatus({ caseId }: Props) {
       return { label: `已有 ${available}/${total} 类`, variant: "partial" as const };
     }
 
-    const hasFailed = events.some((e) => e.status === "failed");
-    if (hasFailed) return { label: "上传失败", variant: "failed" as const };
     return { label: total > 0 ? `待上传 0/${total} 类` : "待上传", variant: "pending" as const };
   }, [caseDocCategories, events]);
 
@@ -38,6 +51,7 @@ export function CaseUploadStatus({ caseId }: Props) {
 
   const variantCls = {
     processing: "text-blue-600 bg-blue-50 border-blue-200",
+    manual_review: "text-amber-700 bg-amber-50 border-amber-200",
     failed: "text-red-600 bg-red-50 border-red-200",
     completed: "text-emerald-600 bg-emerald-100 border-emerald-300",
     partial: "text-amber-700 bg-amber-50 border-amber-200",
@@ -46,6 +60,7 @@ export function CaseUploadStatus({ caseId }: Props) {
 
   const icon = {
     processing: <Loader2 className="size-3 animate-spin" />,
+    manual_review: <AlertTriangle className="size-3" />,
     failed: <AlertTriangle className="size-3" />,
     completed: <CheckCircle2 className="size-3" />,
     partial: <AlertTriangle className="size-3" />,

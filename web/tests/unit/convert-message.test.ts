@@ -123,4 +123,53 @@ describe("convertDbMessage", () => {
       unresolvedClaims: [{ claim_text: "needs evidence" }],
     });
   });
+
+  it("preserves only this assistant message's validated attachment job", () => {
+    const attachmentJob = {
+      job_id: "job-1",
+      case_id: 42,
+      assistant_turn_id: "turn-1-assistant",
+      report_id: 88,
+      report_version: 3,
+      template_version_id: "template-v1",
+      template_version_label: "v1",
+      delivery_level: "review_draft",
+    };
+    const current = convertDbMessage({
+      ...baseMsg,
+      role: "assistant",
+      metadata: { attachment_job: attachmentJob },
+    });
+    const unrelated = convertDbMessage({
+      ...baseMsg,
+      id: "msg-2",
+      role: "assistant",
+      metadata: { attachment_job: { job_id: "incomplete" } },
+    });
+    expect(current.metadata?.custom?.attachmentJob).toEqual(attachmentJob);
+    expect(unrelated.metadata?.custom?.attachmentJob).toBeNull();
+  });
+
+  it("does not revive a local attachment job when persisted metadata explicitly clears it", () => {
+    const result = convertDbMessage({
+      ...baseMsg,
+      role: "assistant",
+      metadata: {
+        attachment_job: null,
+        custom: {
+          attachmentJob: {
+            job_id: "stale-job",
+            case_id: 42,
+            assistant_turn_id: "old-assistant",
+            report_id: 88,
+            report_version: 2,
+            template_version_id: "template-v0",
+            template_version_label: "v0",
+            delivery_level: "review_draft",
+          },
+        },
+      },
+    });
+    expect(result.metadata?.custom?.attachmentJob).toBeNull();
+  });
 });

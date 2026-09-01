@@ -1,5 +1,6 @@
 import type { FileItem } from "@/lib/types/chat-upload";
 import type { TraceItem } from "@/lib/types/knowledge-graph";
+import type { AttachmentJobRef } from "@/lib/backend/generated-artifacts";
 
 export interface LangGraphThread {
   thread_id: string;
@@ -127,6 +128,7 @@ export interface ThreadMessage {
   response_analysis_runs?: ResponseAnalysisRun[];
   unresolved_relations: ReplayUnresolvedRelation[];
   unresolved_claims: ReplayUnresolvedClaim[];
+  attachment_job?: AttachmentJobRef | null;
 }
 
 export interface ThreadMessagesResponse {
@@ -157,6 +159,7 @@ export interface AssistantTurnItem {
   response_analysis_runs?: ResponseAnalysisRun[];
   unresolved_relations: ReplayUnresolvedRelation[];
   unresolved_claims: ReplayUnresolvedClaim[];
+  attachment_job?: AttachmentJobRef | null;
   version: number;
   created_at: string;
 }

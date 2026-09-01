@@ -28,7 +28,7 @@ def validate_domain(value: str, *, expected: str | None = None) -> str:
 
 def _namespace(settings: Any) -> str:
     domain = validate_domain(getattr(settings, "business_domain", ""))
-    raw = str(getattr(settings, "annual_redis_namespace", "") or "").strip()
+    raw = str(getattr(settings, "redis_namespace", "") or "").strip()
     if not raw.startswith("ata:") or not raw.endswith(":"):
         raise ValueError("Redis namespace must start with ata: and end with :")
     # Existing environments may have ata:online:. Add the active domain at

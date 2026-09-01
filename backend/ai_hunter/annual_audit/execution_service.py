@@ -17,7 +17,7 @@ from ai_hunter.app.settings import Settings, get_settings
 from . import document_repository as documents
 from .engagement_repository import get_engagement
 from .program_catalog import PROGRAM_VERSION, baseline_program, procedure_codes
-from .storage import mysql_connection, postgres_connection
+from .storage import postgres_connection
 from .workpaper_case import get_case_workpaper_summary, sync_case_workpaper_programs
 
 
@@ -260,10 +260,10 @@ def validate_evidence_ownership(
     chunk_ids = _source_chunk_ids(refs)
     with postgres_connection(resolved) as connection:
         known_files = {
-            int(row["id"])
+            int(row["id"]): _nonempty_text(row.get("file_sha256")).lower()
             for row in connection.execute(
                 """
-                SELECT id
+                SELECT id, file_sha256
                 FROM public.source_file
                 WHERE case_id = %s AND status = 'active' AND id = ANY(%s)
                 """,
@@ -298,7 +298,7 @@ def validate_evidence_ownership(
             }
         else:
             chunks = {}
-    missing_files = sorted(file_ids - known_files)
+    missing_files = sorted(file_ids - set(known_files))
     missing_pages = sorted(page_ids - set(pages))
     missing_chunks = sorted(chunk_ids - set(chunks))
     errors.extend(f"证据文件 {item} 不属于当前项目或已失效" for item in missing_files)
@@ -308,8 +308,11 @@ def validate_evidence_ownership(
         if not isinstance(reference, dict):
             continue
         source_file_id = _anchor_file_id(reference)
+        source_sha256 = _nonempty_text(reference.get("source_sha256")).lower()
         source_page_id = _anchor_page_id(reference)
         source_chunk_id = _anchor_chunk_id(reference)
+        if source_sha256 and source_file_id in known_files and known_files[source_file_id] != source_sha256:
+            errors.append(f"证据文件 {source_file_id} 的 SHA-256 与当前有效文件不一致")
         if source_page_id in pages and pages[source_page_id] != source_file_id:
             errors.append(f"证据页 {source_page_id} 不属于证据文件 {source_file_id}")
         if source_chunk_id in chunks and chunks[source_chunk_id] != source_file_id:
@@ -324,24 +327,26 @@ def _ensure_execution_records(
     settings: Settings,
 ) -> None:
     get_engagement(engagement_id, settings=settings)
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT IGNORE INTO annual_engagement_profile (
+                INSERT INTO annual_engagement_profile (
                   engagement_id, profile_json, created_by, updated_by
                 ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (engagement_id) DO NOTHING
                 """,
                 (engagement_id, _dump({}), actor_user_id, actor_user_id),
             )
             for item in baseline_program():
                 cursor.execute(
                     """
-                    INSERT IGNORE INTO annual_audit_program_item (
+                    INSERT INTO annual_audit_program_item (
                       engagement_id, program_version, procedure_code, phase, cycle,
                       procedure_name, assertions_json, risk_area,
                       required_material_categories_json, requires_evidence
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (engagement_id, procedure_code) DO NOTHING
                     """,
                     (
                         engagement_id,
@@ -417,7 +422,7 @@ def _load_state(
     *,
     settings: Settings,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_engagement_profile WHERE engagement_id = %s",
@@ -429,7 +434,13 @@ def _load_state(
                 SELECT *
                 FROM annual_audit_program_item
                 WHERE engagement_id = %s
-                ORDER BY FIELD(phase, '承接与独立性', '计划', '循环执行', '完成'),
+                ORDER BY CASE phase
+                    WHEN '承接与独立性' THEN 1
+                    WHEN '计划' THEN 2
+                    WHEN '循环执行' THEN 3
+                    WHEN '完成' THEN 4
+                    ELSE 5
+                END,
                          procedure_code
                 """,
                 (engagement_id,),
@@ -738,7 +749,7 @@ def _open_finding_summary(engagement_id: int, *, settings: Settings) -> dict[str
     deduplicate_case_replay = bool(
         case_workpaper and case_workpaper.get("is_complete_case")
     )
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -749,7 +760,12 @@ def _open_finding_summary(engagement_id: int, *, settings: Settings) -> dict[str
                 WHERE f.engagement_id = %s
                   AND f.status = 'open'
                   AND COALESCE(r.resolution_status, 'open') <> 'closed'
-                ORDER BY FIELD(f.risk_level, 'high', 'medium', 'low'), f.id
+                ORDER BY CASE f.risk_level
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 3
+                    ELSE 4
+                END, f.id
                 """,
                 (engagement_id,),
             )
@@ -783,7 +799,7 @@ def _open_finding_summary(engagement_id: int, *, settings: Settings) -> dict[str
 
 
 def _confirmation_blockers(engagement_id: int, *, settings: Settings) -> list[dict[str, Any]]:
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -891,13 +907,14 @@ def evaluate_release_gate(
         "reviews": gate["reviews"],
         "policy_binding": gate["policy_binding"],
     }
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO annual_release_gate (
                   engagement_id, gate_status, blockers_json, snapshot_json, evaluated_by
                 ) VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     engagement_id,
@@ -907,7 +924,7 @@ def evaluate_release_gate(
                     _nonempty_text(actor_user_id) or "system",
                 ),
             )
-            gate_id = _as_int(cursor.lastrowid)
+            gate_id = _as_int((cursor.fetchone() or {}).get("id"))
             cursor.execute(
                 """
                 INSERT INTO ata_audit_log (
@@ -979,7 +996,7 @@ def update_engagement_profile(
     for field in ("acceptance_status", "independence_status"):
         if field in payload:
             values[field] = payload[field]
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_engagement_profile WHERE engagement_id = %s FOR UPDATE",
@@ -1067,7 +1084,7 @@ def update_program_item(
     if code not in procedure_codes():
         raise ValueError(f"未知审计程序：{code}")
     _ensure_execution_records(engagement_id, actor_user_id=actor_user_id, settings=resolved)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1167,7 +1184,7 @@ def update_program_item(
                     conclusion_text = %s,
                     not_applicable_reason = %s,
                     prepared_by = %s,
-                    prepared_at = UTC_TIMESTAMP(6),
+                    prepared_at = CURRENT_TIMESTAMP(6),
                     policy_binding_id = %s,
                     revision = revision + 1
                 WHERE engagement_id = %s AND procedure_code = %s
@@ -1246,7 +1263,7 @@ def record_review_decision(
     scope = payload.get("scope") or {}
     if not isinstance(scope, (dict, list)):
         raise ValueError("scope 必须为对象或数组")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1331,7 +1348,7 @@ def resolve_finding(
             raise WorkflowBlockedError(
                 [{"code": "finding.resolution.evidence", "message": "；".join(evidence_errors)}]
             )
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1351,18 +1368,18 @@ def resolve_finding(
                   resolution_note, evidence_refs_json, resolved_by, resolved_at,
                   reviewed_by, reviewed_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s,
-                  CASE WHEN %s = 'closed' THEN UTC_TIMESTAMP(6) ELSE NULL END,
+                  CASE WHEN %s = 'closed' THEN CURRENT_TIMESTAMP(6) ELSE NULL END,
                   CASE WHEN %s = 'closed' THEN %s ELSE NULL END,
-                  CASE WHEN %s = 'closed' THEN UTC_TIMESTAMP(6) ELSE NULL END)
-                ON DUPLICATE KEY UPDATE
-                  resolution_status = VALUES(resolution_status),
-                  resolution_type = VALUES(resolution_type),
-                  resolution_note = VALUES(resolution_note),
-                  evidence_refs_json = VALUES(evidence_refs_json),
-                  resolved_by = VALUES(resolved_by),
-                  resolved_at = VALUES(resolved_at),
-                  reviewed_by = VALUES(reviewed_by),
-                  reviewed_at = VALUES(reviewed_at)
+                  CASE WHEN %s = 'closed' THEN CURRENT_TIMESTAMP(6) ELSE NULL END)
+                ON CONFLICT (finding_id) DO UPDATE SET
+                  resolution_status = EXCLUDED.resolution_status,
+                  resolution_type = EXCLUDED.resolution_type,
+                  resolution_note = EXCLUDED.resolution_note,
+                  evidence_refs_json = EXCLUDED.evidence_refs_json,
+                  resolved_by = EXCLUDED.resolved_by,
+                  resolved_at = EXCLUDED.resolved_at,
+                  reviewed_by = EXCLUDED.reviewed_by,
+                  reviewed_at = EXCLUDED.reviewed_at
                 """,
                 (
                     engagement_id,
@@ -1468,7 +1485,7 @@ def upsert_confirmation(
             raise ValueError("关闭函证事项必须填写 conclusion_text")
         if not response_refs and not alternative_procedures:
             raise ValueError("关闭函证事项必须有回函证据或替代程序")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             if confirmation_id:
                 cursor.execute(
@@ -1517,6 +1534,7 @@ def upsert_confirmation(
                       response_evidence_refs_json, reliability_assessment, exception_description,
                       alternative_procedures_json, conclusion_text, prepared_by
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
                     """,
                     (
                         engagement_id,
@@ -1534,7 +1552,7 @@ def upsert_confirmation(
                         _nonempty_text(actor_user_id) or "system",
                     ),
                 )
-                confirmation_id = _as_int(cursor.lastrowid)
+                confirmation_id = _as_int((cursor.fetchone() or {}).get("id"))
         connection.commit()
     return {
         "case_id": engagement_id,
@@ -1561,7 +1579,7 @@ def freeze_policy_binding(
     engagement = get_engagement(engagement_id, settings=resolved)
     profile, _, _, _ = _load_state(engagement_id, settings=resolved)
     reporting_date = _parse_date(payload.get("reporting_period_date")) or engagement["period_end"]
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM annual_knowledge_release WHERE id = %s",
@@ -1642,7 +1660,8 @@ def freeze_policy_binding(
                 INSERT INTO annual_engagement_policy_binding (
                   engagement_id, knowledge_release_id, ruleset_id, binding_status,
                   reporting_period_date, bound_by, bound_at, snapshot_json
-                ) VALUES (%s, %s, %s, 'frozen', %s, %s, UTC_TIMESTAMP(6), %s)
+                ) VALUES (%s, %s, %s, 'frozen', %s, %s, CURRENT_TIMESTAMP(6), %s)
+                RETURNING id
                 """,
                 (
                     engagement_id,
@@ -1653,7 +1672,7 @@ def freeze_policy_binding(
                     _dump(snapshot),
                 ),
             )
-            binding_id = _as_int(cursor.lastrowid)
+            binding_id = _as_int((cursor.fetchone() or {}).get("id"))
             cursor.execute(
                 """
                 INSERT INTO ata_audit_log (
@@ -1725,7 +1744,7 @@ def issue_audit_report(
     if gate["gate_status"] != "ready_for_signature":
         raise WorkflowBlockedError(gate["blockers"])
     signed_at = datetime.now(timezone.utc)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT id FROM annual_audit_issuance WHERE engagement_id = %s",
@@ -1739,6 +1758,7 @@ def issue_audit_report(
                   engagement_id, gate_id, report_artifact_ref, report_artifact_sha256,
                   signing_attestation, signed_by, signed_at, opinion_type, issuance_note
                 ) VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     engagement_id,
@@ -1746,12 +1766,12 @@ def issue_audit_report(
                     report_artifact_ref,
                     report_artifact_sha256.lower(),
                     signer,
-                    signed_at.replace(tzinfo=None),
+                    signed_at,
                     opinion_type,
                     _nonempty_text(payload.get("issuance_note")) or None,
                 ),
             )
-            issuance_id = _as_int(cursor.lastrowid)
+            issuance_id = _as_int((cursor.fetchone() or {}).get("id"))
             cursor.execute(
                 "UPDATE audit_engagement SET status = 'issued' WHERE id = %s",
                 (engagement_id,),
@@ -1806,7 +1826,7 @@ def archive_audit_engagement(
     manifest_hash = _nonempty_text(payload.get("archive_manifest_sha256"))
     if not manifest_ref or not _valid_sha256(manifest_hash):
         raise ValueError("归档必须提供完整归档清单引用及其 SHA-256")
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -1841,18 +1861,19 @@ def archive_audit_engagement(
                   engagement_id, issuance_id, archive_manifest_ref, archive_manifest_sha256,
                   archive_completed_at, retention_until, archived_by
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     engagement_id,
                     _as_int(issuance.get("id")),
                     manifest_ref,
                     manifest_hash.lower(),
-                    archive_completed_at.replace(tzinfo=None),
+                    archive_completed_at,
                     retention_until,
                     _nonempty_text(actor_user_id) or "system",
                 ),
             )
-            archive_id = _as_int(cursor.lastrowid)
+            archive_id = _as_int((cursor.fetchone() or {}).get("id"))
             cursor.execute(
                 "UPDATE audit_engagement SET status = 'archived' WHERE id = %s",
                 (engagement_id,),

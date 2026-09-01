@@ -1,4 +1,4 @@
-"""MySQL repository for annual-audit engagements."""
+"""PostgreSQL repository for annual-audit engagements."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 from ai_hunter.app.settings import Settings, get_settings
 
 from .program_catalog import PROGRAM_VERSION, baseline_program
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 class EngagementNotFoundError(LookupError):
@@ -91,7 +91,7 @@ def list_engagements(
         params.extend([user_id, user_id])
 
     where_sql = " AND ".join(where)
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 f"SELECT COUNT(*) AS total FROM audit_engagement e WHERE {where_sql}",
@@ -102,7 +102,7 @@ def list_engagements(
                 f"""
                 SELECT e.*,
                        COUNT(t.id) AS task_count,
-                       SUM(t.status IN ('待执行', '进行中', '逾期')) AS pending_task_count
+                       COUNT(*) FILTER (WHERE t.status IN ('待执行', '进行中', '逾期')) AS pending_task_count
                 FROM audit_engagement e
                 LEFT JOIN annual_task t
                   ON t.engagement_id = e.id AND t.deleted_at IS NULL
@@ -144,7 +144,7 @@ def create_engagement(
     created_by = str(payload.get("created_by") or owner_user_id or "system").strip()
     entity_uscc = str(payload.get("entity_uscc") or "").strip() or None
 
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -154,11 +154,11 @@ def create_engagement(
                   AND fiscal_year = %s
                   AND entity_name = %s
                   AND company_id = %s
-                  AND (%s IS NULL OR entity_uscc = %s)
+                  AND entity_uscc IS NOT DISTINCT FROM %s
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (fiscal_year, entity_name, company_id, entity_uscc, entity_uscc),
+                (fiscal_year, entity_name, company_id, entity_uscc),
             )
             existing = cursor.fetchone()
             if existing:
@@ -176,6 +176,7 @@ def create_engagement(
                   fiscal_year, period_start, period_end, status,
                   company_id, owner_user_id, created_by
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'planning', %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     engagement_code,
@@ -191,13 +192,15 @@ def create_engagement(
                     created_by,
                 ),
             )
-            engagement_id = int(cursor.lastrowid)
+            inserted = cursor.fetchone()
+            engagement_id = int(inserted["id"])
             if owner_user_id:
                 cursor.execute(
                     """
                     INSERT INTO ata_project_member (engagement_id, user_id, role_code)
                     VALUES (%s, %s, 'engagement_owner')
-                    ON DUPLICATE KEY UPDATE role_code = VALUES(role_code)
+                    ON CONFLICT (engagement_id, user_id)
+                    DO UPDATE SET role_code = EXCLUDED.role_code
                     """,
                     (engagement_id, owner_user_id),
                 )
@@ -212,7 +215,7 @@ def create_engagement(
 
 def get_engagement(case_id: int, *, settings: Settings | None = None) -> dict[str, Any]:
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT * FROM audit_engagement WHERE id = %s AND deleted_at IS NULL",
@@ -240,7 +243,7 @@ def soft_delete_engagement(
 
     resolved = settings or get_settings()
     actor = str(deleted_by or "system").strip() or "system"
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -282,7 +285,7 @@ def get_engagement_profile(
 ) -> dict[str, Any]:
     row = get_engagement(case_id, settings=settings)
     resolved = settings or get_settings()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """

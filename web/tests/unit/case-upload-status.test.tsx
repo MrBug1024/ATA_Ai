@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  events: [] as Array<Record<string, unknown>>,
   categories: [] as Array<{
     code: string;
     name: string;
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/hooks/use-case-material-events", () => ({
-  useCaseMaterialEvents: () => ({ events: [], isLoading: false }),
+  useCaseMaterialEvents: () => ({ events: mocks.events, isLoading: false }),
 }));
 
 vi.mock("@/lib/hooks/use-case-doc-categories", () => ({
@@ -30,6 +31,7 @@ vi.mock("@/lib/hooks/use-case-doc-categories", () => ({
 
 describe("CaseUploadStatus", () => {
   beforeEach(() => {
+    mocks.events = [];
     mocks.categories = Array.from({ length: 10 }, (_, index) => ({
       code: `category-${index}`,
       name: `资料 ${index}`,
@@ -46,5 +48,29 @@ describe("CaseUploadStatus", () => {
 
     const badge = screen.getByText("已有 3/10 类");
     expect(badge.getAttribute("title")).toContain("仍缺 7 类");
+  });
+
+  it("prioritizes raw-only material that is pending manual review", async () => {
+    mocks.categories = Array.from({ length: 10 }, (_, index) => ({
+      code: `category-${index}`,
+      name: `资料 ${index}`,
+      uploaded: true,
+      file_count: 1,
+      record_count: 0,
+      last_uploaded_at: null,
+    }));
+    mocks.events = [
+      {
+        status: "completed",
+        stage: "raw_preserved_pending_review",
+        event_payload: { stage: "raw_preserved_pending_review" },
+      },
+    ];
+
+    const { CaseUploadStatus } = await import("@/components/cases/case-upload-status");
+    render(<CaseUploadStatus caseId={2} />);
+
+    expect(screen.getByText("待人工复核")).toBeTruthy();
+    expect(screen.queryByText("完整 10/10 类")).toBeNull();
   });
 });

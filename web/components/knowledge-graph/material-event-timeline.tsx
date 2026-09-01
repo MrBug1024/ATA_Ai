@@ -27,6 +27,9 @@ const STAGE_LABELS: Record<string, string> = {
   stored: "已存储",
   ocr_running: "OCR进行中",
   graph_running: "图谱提取中",
+  historical_migration_running: "历史迁移中",
+  manual_review_required: "需要人工复核",
+  raw_preserved_pending_review: "原件已保全，待复核",
   completed: "已完成",
   failed: "失败",
 };
@@ -36,6 +39,34 @@ interface MaterialEventTimelineProps {
   isLoading: boolean;
   error?: string | null;
   onRetried?: () => void | Promise<unknown>;
+}
+
+function hasDuplicateProjectionRepair(event: CaseMaterialEventItem): boolean {
+  const payload = event.event_payload;
+  if (!payload) return false;
+
+  if (payload.duplicate_projection_repaired === true) return true;
+
+  const structuredImport = payload.structured_import;
+  if (
+    typeof structuredImport !== "object" ||
+    structuredImport === null ||
+    Array.isArray(structuredImport)
+  ) {
+    return false;
+  }
+
+  return (structuredImport as Record<string, unknown>).duplicate_projection_removed === true;
+}
+
+function retryBlockedReason(event: CaseMaterialEventItem): string | null {
+  const payload = event.event_payload;
+  if (!payload || (payload.retryable !== false && payload.retry_policy !== "manual_review_required")) {
+    return null;
+  }
+  return typeof payload.retry_disabled_reason === "string" && payload.retry_disabled_reason.trim()
+    ? payload.retry_disabled_reason
+    : "该批次需要人工复核，不能自动重试。";
 }
 
 function RetryFailedBatch({
@@ -125,6 +156,8 @@ export function MaterialEventTimeline({
         const changeCount =
           (event.add_item_count ?? 0) + (event.override_item_count ?? 0);
         const isErrorExpanded = expandedError === event.material_event_id;
+        const duplicateProjectionRepaired = hasDuplicateProjectionRepair(event);
+        const blockedRetryReason = retryBlockedReason(event);
 
         return (
           <div key={event.material_event_id} className="relative flex gap-4 pb-6">
@@ -151,6 +184,8 @@ export function MaterialEventTimeline({
                   <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                     {event.status === "failed"
                       ? STAGE_LABELS.failed
+                      : duplicateProjectionRepaired
+                        ? "已去重，未重复写入"
                       : STAGE_LABELS[event.stage] ?? event.stage}
                   </span>
                   {event.has_conclusion_changes && (
@@ -163,7 +198,9 @@ export function MaterialEventTimeline({
               <CardContent className="flex flex-col gap-3 p-3 pt-0">
                 <p className="text-xs text-muted-foreground">
                   {event.file_count} 个文件
-                  {event.records_inserted !== undefined
+                  {duplicateProjectionRepaired
+                    ? " · 已去重，未重复写入结构化记录"
+                    : event.records_inserted !== undefined
                     ? ` · ${event.records_inserted} 条结构化记录`
                     : ""}
                   {event.created_at
@@ -201,11 +238,17 @@ export function MaterialEventTimeline({
                     ) : (
                       <span />
                     )}
-                    <RetryFailedBatch
-                      uploadBatchId={event.upload_batch_id}
-                      batchName={event.batch_name}
-                      onRetried={onRetried}
-                    />
+                    {blockedRetryReason ? (
+                      <p className="max-w-64 text-right text-xs text-muted-foreground">
+                        {blockedRetryReason}
+                      </p>
+                    ) : (
+                      <RetryFailedBatch
+                        uploadBatchId={event.upload_batch_id}
+                        batchName={event.batch_name}
+                        onRetried={onRetried}
+                      />
+                    )}
                   </div>
                 )}
 

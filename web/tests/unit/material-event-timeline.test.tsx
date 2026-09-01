@@ -104,6 +104,55 @@ describe("MaterialEventTimeline", () => {
     expect(screen.getByText("本地完整读取 296 个工作表")).toBeTruthy();
   });
 
+  it("labels preserved raw material as pending manual review without a retry action", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    render(
+      <MaterialEventTimeline
+        events={[
+          {
+            ...mockEvent,
+            status: "completed",
+            stage: "raw_preserved_pending_review",
+            event_payload: { structured_projection: "not_attempted" },
+          },
+        ]}
+        isLoading={false}
+      />
+    );
+
+    expect(screen.getByText("原件已保全，待复核")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /重试批次/ })).toBeNull();
+  });
+
+  it("labels repaired duplicate projections without presenting them as zero-record imports", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    render(
+      <MaterialEventTimeline
+        events={[
+          {
+            ...mockEvent,
+            material_event_id: "top-level-repair",
+            records_inserted: 0,
+            event_payload: { duplicate_projection_repaired: true },
+          },
+          {
+            ...mockEvent,
+            material_event_id: "nested-repair",
+            records_inserted: 0,
+            event_payload: {
+              structured_import: { duplicate_projection_removed: true },
+            },
+          },
+        ]}
+        isLoading={false}
+      />
+    );
+
+    expect(screen.getAllByText("已去重，未重复写入")).toHaveLength(2);
+    expect(screen.getAllByText(/已去重，未重复写入结构化记录/)).toHaveLength(2);
+    expect(screen.queryByText("0 条结构化记录")).toBeNull();
+  });
+
   it("shows loading state", async () => {
     const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
     render(<MaterialEventTimeline events={[]} isLoading={true} />);

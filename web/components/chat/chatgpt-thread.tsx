@@ -45,6 +45,7 @@ import {
 } from "@/lib/assistant-ui/evidence-context";
 import { useDebugMode } from "@/lib/hooks/use-debug-mode";
 import { isLegacyUnauditableAuditDrilldownReply } from "@/lib/assistant-ui/annual-audit-reply-safety";
+import { GeneratedArtifactList } from "./generated-artifact-list";
 
 interface ChatThreadProps {
   suggestions?: string[];
@@ -373,6 +374,12 @@ const AssistantMessage: FC = () => {
     const value = custom?.finalReportRef;
     return typeof value === "string" && value.trim().length > 0 ? value : null;
   });
+  const attachmentJob = useAuiState((s) => {
+    const custom = s.message.metadata.custom;
+    return custom && typeof custom === "object" && !Array.isArray(custom)
+      ? (custom as Record<string, unknown>).attachmentJob
+      : null;
+  });
   const thinking = messageId
     ? thinkingMap.get(messageId) ?? (isRunning ? [...thinkingMap.values()].find((t) => !t.isComplete) : undefined)
     : undefined;
@@ -399,6 +406,7 @@ const AssistantMessage: FC = () => {
         >
           <MessagePrimitive.Parts components={{ Text: MarkdownText, Reasoning: ReasoningText }} />
         </EvidenceContextProvider>
+        <GeneratedArtifactList attachmentJob={attachmentJob} />
         <MessageError />
         <AuiIf condition={(s) => s.thread.isRunning && s.message.content.length === 0}>
           <div className="flex items-center gap-2 text-muted-foreground">

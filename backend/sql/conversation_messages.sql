@@ -38,14 +38,14 @@ COMMENT ON COLUMN conversation_messages.version IS 'assistant 版本号，1=首�
 COMMENT ON COLUMN conversation_messages.created_at IS '入库时间';
 COMMENT ON COLUMN conversation_messages.deleted_at IS '软删除时间；与 checkpoints 的软删除保持一致';
 
-CREATE UNIQUE INDEX idx_conv_msg_user_unique
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_user_unique
     ON conversation_messages(thread_id, turn_id)
     WHERE role = 'user' AND deleted_at IS NULL;
 
-CREATE INDEX idx_conv_msg_thread_created
+CREATE INDEX IF NOT EXISTS idx_conv_msg_thread_created
     ON conversation_messages(thread_id, created_at)
     WHERE deleted_at IS NULL;
 
-CREATE INDEX idx_conv_msg_case_id
+CREATE INDEX IF NOT EXISTS idx_conv_msg_case_id
     ON conversation_messages(case_id)
     WHERE deleted_at IS NULL;

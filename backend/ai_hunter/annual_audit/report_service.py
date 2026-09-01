@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from ai_hunter.app.settings import Settings, get_settings
 
@@ -28,15 +28,21 @@ from .citation_manifest_service import (
     persist_report_citation_manifest,
 )
 from .evidence_service import (
+    hydrate_deterministic_finding_evidence_refs,
     render_knowledge_graph_trace_appendix,
     trace_items_from_deterministic_findings,
 )
 from .engagement_repository import get_engagement
+from .attachments.financial_statements import (
+    FinancialStatementApprovalError,
+    FinancialStatementEvidenceOwnershipError,
+    FinancialStatementPackage,
+)
 from .knowledge_graph_projection import (
     annual_finding_key,
     project_annual_findings_to_knowledge_graph,
 )
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 WORKPAPER_TEMPLATE_VERSION = "customer-workpaper-2023-v1"
@@ -70,6 +76,77 @@ _FULL_AUDIT_MATERIAL_CATEGORIES = (
     ("going_concern", "持续经营评价资料"),
     ("management_representation", "管理层声明及批准资料"),
 )
+
+
+def freeze_financial_statement_input(
+    value: FinancialStatementPackage | Mapping[str, Any] | None,
+    *,
+    actor_user_id: str | None = None,
+    observed_at: datetime | None = None,
+    engagement_period_start: date | str | None = None,
+    engagement_period_end: date | str | None = None,
+    require_engagement_period: bool = False,
+) -> dict[str, Any] | None:
+    """Validate and freeze only an explicitly supplied statement package."""
+
+    if value is None:
+        return None
+    package = (
+        value
+        if isinstance(value, FinancialStatementPackage)
+        else FinancialStatementPackage.model_validate(value)
+    )
+    actor = str(actor_user_id or "").strip()
+    if actor and package.approved_by != actor:
+        raise FinancialStatementApprovalError(
+            "FINANCIAL_STATEMENT_APPROVER_MISMATCH",
+            "财务报表 approved_by 必须与当前调用身份一致",
+        )
+    now = observed_at or datetime.now(timezone.utc)
+    if now.tzinfo is None or now.utcoffset() is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if package.approved_at > now + timedelta(minutes=5):
+        raise FinancialStatementApprovalError(
+            "FINANCIAL_STATEMENT_APPROVED_AT_FUTURE",
+            "财务报表 approved_at 不能晚于当前时间",
+            status_code=422,
+        )
+    expected_start = _date_contract_value(engagement_period_start)
+    expected_end = _date_contract_value(engagement_period_end)
+    if require_engagement_period and (expected_start is None or expected_end is None):
+        raise FinancialStatementApprovalError(
+            "ENGAGEMENT_PERIOD_MISSING",
+            "当前项目缺少完整起止期间，无法绑定财务报表",
+            status_code=422,
+        )
+    if expected_start is not None and package.period_start != expected_start:
+        raise FinancialStatementApprovalError(
+            "FINANCIAL_STATEMENT_PERIOD_MISMATCH",
+            "财务报表 period_start 与当前项目期间不一致",
+        )
+    if expected_end is not None and package.period_end != expected_end:
+        raise FinancialStatementApprovalError(
+            "FINANCIAL_STATEMENT_PERIOD_MISMATCH",
+            "财务报表 period_end 与当前项目期间不一致",
+        )
+    return package.frozen_report_value()
+
+
+def _date_contract_value(value: date | str | None) -> date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip())
+    except ValueError as exc:
+        raise FinancialStatementApprovalError(
+            "ENGAGEMENT_PERIOD_INVALID",
+            "当前项目期间不是有效日期，无法绑定财务报表",
+            status_code=422,
+        ) from exc
 
 
 def _json_default(value: Any) -> Any:
@@ -149,6 +226,16 @@ def build_annual_report_citation_plan(
             int(cash_and_bank.get("analysis_run_id") or 0),
             "cash_and_bank",
         ),
+    ]
+    groups = [
+        (
+            section_code,
+            paragraph_prefix,
+            hydrate_deterministic_finding_evidence_refs(case_id, findings),
+            analysis_run_id,
+            analysis_type,
+        )
+        for section_code, paragraph_prefix, findings, analysis_run_id, analysis_type in groups
     ]
     ordered_findings: list[tuple[str, str, int, str, dict[str, Any]]] = []
     for section_code, paragraph_prefix, findings, analysis_run_id, analysis_type in groups:
@@ -736,7 +823,7 @@ def _persist_draft_artifacts(
         ("C1-2", "货币资金与银行流水审定", snapshot.get("cash_and_bank") or {}),
     )
     persisted: list[dict[str, Any]] = []
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT id FROM audit_engagement WHERE id = %s FOR UPDATE", (engagement_id,))
             if not cursor.fetchone():
@@ -775,6 +862,7 @@ def _persist_draft_artifacts(
                       engagement_id, workpaper_code, workpaper_name, template_version,
                       workpaper_version, status, facts_json, conclusion_text, created_by
                     ) VALUES (%s, %s, %s, %s, %s, 'draft', %s, %s, %s)
+                    RETURNING id
                     """,
                     (
                         engagement_id,
@@ -788,7 +876,13 @@ def _persist_draft_artifacts(
                     ),
                 )
                 persisted.append(
-                    {"code": code, "name": name, "id": int(cursor.lastrowid), "version": version, "reused": False}
+                    {
+                        "code": code,
+                        "name": name,
+                        "id": int((cursor.fetchone() or {}).get("id") or 0),
+                        "version": version,
+                        "reused": False,
+                    }
                 )
 
             cursor.execute(
@@ -818,6 +912,7 @@ def _persist_draft_artifacts(
                       engagement_id, report_type, template_version, report_version,
                       status, fact_snapshot_json, artifact_ref, created_by
                     ) VALUES (%s, 'annual_audit_draft', %s, %s, 'draft', %s, NULL, %s)
+                    RETURNING id
                     """,
                     (
                         engagement_id,
@@ -827,7 +922,11 @@ def _persist_draft_artifacts(
                         created_by,
                     ),
                 )
-                report = {"id": int(cursor.lastrowid), "version": report_version, "reused": False}
+                report = {
+                    "id": int((cursor.fetchone() or {}).get("id") or 0),
+                    "version": report_version,
+                    "reused": False,
+                }
         connection.commit()
     return {"workpapers": persisted, "report": report}
 
@@ -847,7 +946,7 @@ def _persist_published_artifact_refs(
         if str(item.get("artifact_type") or "").startswith("annual_report_")
     ]
     report_id = int((artifacts.get("report") or {}).get("id") or 0)
-    with mysql_connection(settings) as connection:
+    with postgres_connection(settings) as connection:
         with connection.cursor() as cursor:
             if report_id and report_refs:
                 cursor.execute(
@@ -916,14 +1015,44 @@ def generate_annual_report_draft(
     recompute: bool = False,
     corrections: list[str] | None = None,
     material_sources: list[dict[str, Any]] | None = None,
+    financial_statements: FinancialStatementPackage | Mapping[str, Any] | None = None,
     created_by: str = "ai_agent",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Run deterministic cycles, version drafts, and return chat-ready text."""
 
     resolved = settings or get_settings()
+    statement_package = (
+        financial_statements
+        if isinstance(financial_statements, FinancialStatementPackage)
+        else FinancialStatementPackage.model_validate(financial_statements)
+        if financial_statements is not None
+        else None
+    )
     engagement = get_engagement(case_id, settings=resolved)
-    from .execution_service import bootstrap_execution
+    from .import_service import backfill_structured_source_anchors
+
+    source_anchor_status = backfill_structured_source_anchors(
+        case_id,
+        settings=resolved,
+    )
+    statement_snapshot = freeze_financial_statement_input(
+        statement_package,
+        actor_user_id=created_by or "ai_agent",
+        engagement_period_start=engagement.get("period_start"),
+        engagement_period_end=engagement.get("period_end"),
+        require_engagement_period=statement_package is not None,
+    )
+    from .execution_service import bootstrap_execution, validate_evidence_ownership
+
+    if statement_package is not None:
+        evidence_errors = validate_evidence_ownership(
+            case_id,
+            statement_package.evidence_references(),
+            settings=resolved,
+        )
+        if evidence_errors:
+            raise FinancialStatementEvidenceOwnershipError(evidence_errors)
 
     execution = bootstrap_execution(
         case_id,
@@ -967,6 +1096,10 @@ def generate_annual_report_draft(
         "cash_and_bank": cash,
         "execution_program_version": execution.get("program_version"),
         "release_gate": execution_gate,
+        "structured_source_anchor_status": {
+            key: source_anchor_status.get(key)
+            for key in ("status", "total_count", "bound_count", "unbound_count")
+        },
         "citation_plan_summary": {
             "cited_claims": int((citation_plan.get("citation_coverage") or {}).get("cited_claims") or 0),
             "total_claims": int((citation_plan.get("citation_coverage") or {}).get("total_claims") or 0),
@@ -990,6 +1123,8 @@ def generate_annual_report_draft(
             "C1-2": cash,
         },
     }
+    if statement_snapshot is not None:
+        snapshot["financial_statements"] = statement_snapshot
     snapshot["generation_key"] = _generation_key(snapshot)
     report_text = render_annual_report_draft(
         engagement=engagement,
@@ -1051,6 +1186,7 @@ def generate_annual_report_draft(
         "response_citation_coverage": dict(citation_plan.get("citation_coverage") or {}),
         "citation_entries": list(citation_plan.get("citation_entries") or []),
         "annual_report_manifest": citation_manifest,
+        "structured_source_anchor_status": source_anchor_status,
     }
 
 

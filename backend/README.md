@@ -9,18 +9,28 @@ python -m pip install -e ".[dev]"
 python -m ai_hunter
 ```
 
+容器构建使用 `requirements-runtime.lock` 和 `requirements-build.lock` 的固定版本与 SHA-256，不会从开发机的已安装包生成依赖。更新 `pyproject.toml` 后必须在干净的 Python 3.13 环境重新解析锁文件，并在提交前用 `pip install --require-hashes -r requirements-runtime.lock` 验证。
+
 Windows 上请始终通过上述入口启动；该入口会为 psycopg 异步连接配置兼容的 Selector 事件循环。
 
 ## 数据源
 
-运行参数优先读取仓库根目录 `deploy/annual-audit/.env.local`。默认本地数据源为：
+运行参数只读取 `backend/.env`，字段和值的示例见 `backend/.env.example`：
 
-- PostgreSQL：会话、LangGraph checkpoint、权限、证据与知识图谱
-- MySQL `ata_ai`：年度审计项目、科目余额、凭证、应收、银行流水、底稿和报告
-- Redis：大对象缓存与任务状态
-- MinIO：原始资料、解析产物和报告文件
+- PostgreSQL：全部关系型业务与平台数据，包括会话、权限、项目、账套、证据、图谱、报告和任务。项目数据库固定为 `POSTGRESQL_DATABASE=ata_ai`。
+- Redis：大对象缓存、短期状态和 Celery broker，不保存业务真相。
+- MinIO：线上原始资料、解析产物、模板、预览和报告文件。
 
-服务会拒绝连接名称为空或属于历史项目的 MySQL 业务库，避免误连其他项目。
+服务不应为历史项目数据库、缓存或对象桶提供回退连接。
+
+四个 `ANNUAL_MINIO_BUCKET_*` 桶必须由对象存储管理员预先创建；应用只检查和使用它们，不会自动创建线上桶。
+
+目标 PostgreSQL 必须预先创建 `ata_ai`，并安装 `pgcrypto` 和 `vector`（pgvector）扩展包；迁移账号需要在该数据库创建扩展。首次部署或升级后先执行：
+
+```powershell
+python -m ai_hunter.annual_audit.storage.migrate
+python -m ai_hunter.app.scripts.check_storage_readiness
+```
 
 ## 核心接口
 

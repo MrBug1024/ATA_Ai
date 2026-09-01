@@ -98,6 +98,7 @@ def normalize_input(state: AuditGraphState) -> AuditGraphState:
         "artifacts": {},
         "extracted_tasks": [],
         "task_create_result": {},
+        "attachment_job": {},
     }
 
     if case_switched:

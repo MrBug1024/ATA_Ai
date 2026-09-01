@@ -82,7 +82,7 @@ export const HELP_SECTIONS: Section[] = [
       <>
         <P>「年审项目」是所有业务的起点。每一行展示被审计单位、审计年度、任务和资料处理状态。</P>
         <H>项目数据</H>
-        <P>项目、成员和结构化账套存储在独立年审 MySQL；会话、证据、关系图谱和报告引用存储在独立 PostgreSQL。</P>
+        <P>项目、成员、结构化账套、会话、证据、关系图谱和报告引用统一存储在年度审计 PostgreSQL。</P>
         <H>常用操作</H>
         <ul className="space-y-2 text-sm">
           <Step n={1}>

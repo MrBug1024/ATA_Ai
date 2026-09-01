@@ -1,4 +1,4 @@
-"""Annual engagement task repository backed by isolated MySQL."""
+"""Annual engagement task repository backed by isolated PostgreSQL."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 from ai_hunter.app.settings import Settings, get_settings
 
 from .engagement_repository import get_engagement
-from .storage import mysql_connection
+from .storage import postgres_connection
 
 
 def _serializable(row: dict[str, Any]) -> dict[str, Any]:
@@ -29,13 +29,15 @@ def create_task_batch(
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
-            for task in tasks:
+            for index, task in enumerate(tasks):
                 action = str(task.get("action") or "").strip()
                 if not action:
                     skipped.append({"reason": "action为空", "task": task})
                     continue
+                savepoint = f"annual_task_{index}"
+                cursor.execute(f"SAVEPOINT {savepoint}")
                 try:
                     cursor.execute(
                         """
@@ -63,6 +65,7 @@ def create_task_batch(
                           engagement_id, task_no, action, detail, assigned_role,
                           deadline, deliverable, priority, source_engine, status
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '待执行')
+                        RETURNING id
                         """,
                         (
                             engagement_id,
@@ -76,15 +79,19 @@ def create_task_batch(
                             task.get("source_engine") or task.get("engine") or "annual_audit",
                         ),
                     )
+                    inserted = cursor.fetchone()
                     created.append(
                         {
-                            "task_id": int(cursor.lastrowid),
+                            "task_id": int(inserted["id"]),
                             "task_no": task.get("task_no"),
                             "action": action,
                         }
                     )
                 except Exception as exc:
+                    cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                     failed.append({"action": action, "error": str(exc)[:500]})
+                finally:
+                    cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
             connection.commit()
     return {
         "case_id": engagement_id,
@@ -106,7 +113,7 @@ def manage_tasks(
     engagement_id = int(payload.get("case_id") or 0)
     get_engagement(engagement_id, settings=resolved)
     action = str(payload.get("action") or "").strip().lower()
-    with mysql_connection(resolved) as connection:
+    with postgres_connection(resolved) as connection:
         with connection.cursor() as cursor:
             if action == "list":
                 sql = """
@@ -121,7 +128,15 @@ def manage_tasks(
                 if payload.get("filter_status"):
                     sql += " AND status=%s"
                     params.append(payload["filter_status"])
-                sql += " ORDER BY FIELD(priority,'紧急','高','中','低'), deadline, id"
+                sql += """
+                    ORDER BY CASE priority
+                        WHEN '紧急' THEN 1
+                        WHEN '高' THEN 2
+                        WHEN '中' THEN 3
+                        WHEN '低' THEN 4
+                        ELSE 5
+                    END, deadline NULLS LAST, id
+                """
                 cursor.execute(sql, tuple(params))
                 tasks = [_serializable(dict(row)) for row in cursor.fetchall()]
                 return {"case_id": engagement_id, "total": len(tasks), "tasks": tasks}
@@ -129,11 +144,11 @@ def manage_tasks(
                 cursor.execute(
                     """
                     SELECT COUNT(*) AS total,
-                      SUM(status='待执行') AS pending,
-                      SUM(status='进行中') AS in_progress,
-                      SUM(status='已完成') AS completed,
-                      SUM(status='逾期') AS overdue,
-                      SUM(priority='紧急') AS urgent,
+                      COUNT(*) FILTER (WHERE status = '待执行') AS pending,
+                      COUNT(*) FILTER (WHERE status = '进行中') AS in_progress,
+                      COUNT(*) FILTER (WHERE status = '已完成') AS completed,
+                      COUNT(*) FILTER (WHERE status = '逾期') AS overdue,
+                      COUNT(*) FILTER (WHERE priority = '紧急') AS urgent,
                       MIN(CASE WHEN status IN ('待执行','进行中') THEN deadline END) AS nearest_deadline
                     FROM annual_task
                     WHERE engagement_id=%s AND deleted_at IS NULL
@@ -156,8 +171,8 @@ def manage_tasks(
                     """
                     UPDATE annual_task
                     SET status=%s,
-                        started_at=CASE WHEN %s='进行中' THEN COALESCE(started_at,NOW(6)) ELSE started_at END,
-                        completed_at=CASE WHEN %s='已完成' THEN NOW(6) ELSE completed_at END,
+                        started_at=CASE WHEN %s='进行中' THEN COALESCE(started_at, CURRENT_TIMESTAMP(6)) ELSE started_at END,
+                        completed_at=CASE WHEN %s='已完成' THEN CURRENT_TIMESTAMP(6) ELSE completed_at END,
                         completion_note=CASE WHEN %s='已完成' THEN %s ELSE completion_note END
                     WHERE id=%s AND engagement_id=%s
                     """,

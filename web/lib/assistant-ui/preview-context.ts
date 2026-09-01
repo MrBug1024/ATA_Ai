@@ -6,6 +6,9 @@ export interface PreviewableFile {
   name: string;
   contentType?: string;
   previewUrl?: string;
+  downloadUrl?: string;
+  previewUrlIsDownload?: boolean;
+  requestHeaders?: Record<string, string>;
   file?: File;
 }
 

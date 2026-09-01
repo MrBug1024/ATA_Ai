@@ -5,7 +5,7 @@ from __future__ import annotations
 from ai_hunter.app.settings import Settings, get_settings
 from ai_hunter.platform_core import scoped_redis_key
 
-from .mysql import AnnualAuditStorageError
+from .errors import AnnualAuditStorageError
 
 
 def annual_redis_key(*parts: object, settings: Settings | None = None) -> str:

@@ -29,3 +29,5 @@ tmp/
 # Loose scratch scripts in repo root (not the tests/ suite)
 /test_*.py
 *.log
+.pytest-migration-tmp-final
+.pytest-migration-tmp

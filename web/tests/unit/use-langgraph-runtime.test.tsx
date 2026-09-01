@@ -4,6 +4,7 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 import type { DbMessage } from "@/lib/assistant-ui/types";
 import { createChatAttachmentAdapter } from "@/lib/assistant-ui/chat-attachment-adapter";
 import type { ChatUploadResponse, FileItem } from "@/lib/types/chat-upload";
+import type { AttachmentJobRef } from "@/lib/backend/generated-artifacts";
 
 // Capture the external-store config so we can drive onNew/onReload/onCancel directly.
 let capturedConfig: {
@@ -36,6 +37,7 @@ interface StreamCallbacks {
       responseAnalysisRuns?: Record<string, unknown>[];
       unresolvedRelations?: Record<string, unknown>[];
       unresolvedClaims?: Record<string, unknown>[];
+      attachmentJob?: AttachmentJobRef | null;
     }
   ) => void;
 }
@@ -167,6 +169,16 @@ describe("useLanggraphRuntime", () => {
           ],
           unresolvedRelations: [{ relation_key: "r-1" }],
           unresolvedClaims: [{ claim_text: "needs follow-up" }],
+          attachmentJob: {
+            job_id: "job-1",
+            case_id: 42,
+            assistant_turn_id: "persisted-turn-1_assistant",
+            report_id: 88,
+            report_version: 3,
+            template_version_id: "template-v1",
+            template_version_label: "v1",
+            delivery_level: "review_draft",
+          },
         });
       }
     );
@@ -191,6 +203,16 @@ describe("useLanggraphRuntime", () => {
         ],
         unresolved_relations: [{ relation_key: "r-1" }],
         unresolved_claims: [{ claim_text: "needs follow-up" }],
+        attachment_job: {
+          job_id: "job-1",
+          case_id: 42,
+          assistant_turn_id: "persisted-turn-1_assistant",
+          report_id: 88,
+          report_version: 3,
+          template_version_id: "template-v1",
+          template_version_label: "v1",
+          delivery_level: "review_draft",
+        },
         custom: {
           finalReportRef: "report-for-turn-1",
           assistantMessageId: "persisted-turn-1_assistant",
@@ -201,6 +223,16 @@ describe("useLanggraphRuntime", () => {
           ],
           unresolvedRelations: [{ relation_key: "r-1" }],
           unresolvedClaims: [{ claim_text: "needs follow-up" }],
+          attachmentJob: {
+            job_id: "job-1",
+            case_id: 42,
+            assistant_turn_id: "persisted-turn-1_assistant",
+            report_id: 88,
+            report_version: 3,
+            template_version_id: "template-v1",
+            template_version_label: "v1",
+            delivery_level: "review_draft",
+          },
         },
       },
     });
