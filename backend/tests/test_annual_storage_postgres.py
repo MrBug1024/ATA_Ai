@@ -83,8 +83,19 @@ def test_postgres_migrations_follow_the_external_storage_order() -> None:
         "annual_audit_postgres_v3.sql",
         "annual_audit_postgres_v4.sql",
         "case_corrections.sql",
+        "remove_legacy_auth_seed.sql",
     ]
     assert all(path.is_file() for path in migrate.POSTGRES_MIGRATIONS)
+
+
+def test_clean_deployment_migration_only_removes_the_unreferenced_legacy_seed() -> None:
+    cleanup_sql = (migrate.SQL_DIR / "remove_legacy_auth_seed.sql").read_text(encoding="utf-8")
+
+    assert "DELETE FROM public.app_company" in cleanup_sql
+    assert "co_f1824b82e2116701" in cleanup_sql
+    assert "information_schema.columns" in cleanup_sql
+    assert "column_name = 'company_id'" in cleanup_sql
+    assert "EXIT WHEN has_reference" in cleanup_sql
 
 
 def test_annual_engagement_schema_carries_the_repository_tenancy_contract() -> None:

@@ -32,6 +32,7 @@ MIGRATIONS: tuple[tuple[str, Path, str], ...] = (
     ("065", SQL_DIR / "annual_audit_postgres_v3.sql", "annual audit PostgreSQL baseline"),
     ("066", SQL_DIR / "annual_audit_postgres_v4.sql", "annual engagement tenancy contract"),
     ("070", SQL_DIR / "case_corrections.sql", "case correction ledger"),
+    ("071", SQL_DIR / "remove_legacy_auth_seed.sql", "remove unreferenced legacy auth seed"),
 )
 POSTGRES_MIGRATIONS = tuple(path for _version, path, _description in MIGRATIONS)
 REQUIRED_POSTGRES_EXTENSIONS = ("pgcrypto", "vector")

@@ -218,6 +218,98 @@ class UserService:
             )
             conn.commit()
 
+    def bootstrap_production_superadmin(
+        self,
+        *,
+        user_id: str,
+        username: str,
+        login_identifier: str,
+        password_hash: str,
+        role_code: str = ADMIN_ROLE,
+    ) -> dict[str, Any]:
+        """Atomically create the minimum private-mode production administrator."""
+
+        if not user_id:
+            raise ValueError("user_id 不能为空")
+        role_code = validate_role_code(role_code)
+        login_identifier_norm = normalize_login_identifier(login_identifier)
+        if not login_identifier_norm:
+            raise ValueError("login_identifier 不能为空")
+        if not password_hash:
+            raise ValueError("password_hash 不能为空")
+
+        import json as _json
+
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO public.app_role_permission "
+                "(role_code, role_name, tier, modules, description) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s) "
+                "ON CONFLICT (role_code) DO UPDATE SET role_name=EXCLUDED.role_name, "
+                "tier=EXCLUDED.tier, modules=EXCLUDED.modules, description=EXCLUDED.description, "
+                "updated_at=now()",
+                (
+                    role_code,
+                    "全局超级管理员",
+                    "management",
+                    _json.dumps(["*"]),
+                    "生产环境初始超级管理员",
+                ),
+            )
+            cur.execute(
+                "INSERT INTO public.app_user "
+                "(user_id, username, company_id, company, auth_source, status, is_super_admin, note) "
+                "VALUES (%s,%s,'','',%s,%s,TRUE,%s) "
+                "ON CONFLICT (user_id) DO UPDATE SET username=EXCLUDED.username, "
+                "company_id='', company='', auth_source=EXCLUDED.auth_source, status=EXCLUDED.status, "
+                "is_super_admin=TRUE, note=EXCLUDED.note, updated_at=now() RETURNING user_id",
+                (user_id, username, "local", "active", "生产环境初始超级管理员。"),
+            )
+            user = dict(cur.fetchone())
+            cur.execute(
+                "INSERT INTO public.local_user_credential "
+                "(user_id, login_identifier, login_identifier_norm, password_hash, password_algo, "
+                "password_updated_at, failed_login_count, locked_until) "
+                "VALUES (%s,%s,%s,%s,'argon2id',now(),0,NULL) "
+                "ON CONFLICT (user_id) DO UPDATE SET login_identifier=EXCLUDED.login_identifier, "
+                "login_identifier_norm=EXCLUDED.login_identifier_norm, password_hash=EXCLUDED.password_hash, "
+                "password_algo=EXCLUDED.password_algo, password_updated_at=now(), "
+                "failed_login_count=0, locked_until=NULL, updated_at=now()",
+                (user_id, login_identifier, login_identifier_norm, password_hash),
+            )
+            cur.execute(
+                "DELETE FROM public.app_user_role WHERE user_id=%s AND company_id=''",
+                (user_id,),
+            )
+            cur.execute(
+                "INSERT INTO public.app_user_role (user_id, company_id, role_code, assigned_by) "
+                "VALUES (%s,'',%s,%s)",
+                (user_id, role_code, "system:bootstrap_superadmin"),
+            )
+            cur.execute(
+                "INSERT INTO public.auth_audit_log "
+                "(event_type, actor_id, target_type, target_id, action, decision, detail) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                (
+                    "auth_production_superadmin_initialized",
+                    "system:bootstrap_superadmin",
+                    "user",
+                    user_id,
+                    "init_or_update_production_superadmin",
+                    "success",
+                    _json.dumps(
+                        {
+                            "login_identifier": login_identifier,
+                            "roles": [role_code],
+                            "is_super_admin": True,
+                            "password_set": True,
+                        }
+                    ),
+                ),
+            )
+            conn.commit()
+        return user
+
     def get_local_login_record(self, login_identifier: str) -> dict[str, Any] | None:
         login_norm = normalize_login_identifier(login_identifier)
         if not login_norm:

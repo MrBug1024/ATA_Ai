@@ -1,8 +1,12 @@
-"""Initialize or rotate private-mode auth seed data.
+"""Initialize private-mode auth data.
 
 The editable seed file defines companies, roles, permissions, tag catalog, and
 bootstrap users. Passwords are never stored in the seed file; provide them via
 the per-user password_env value or enter them interactively.
+
+Production deployments that must remain free of demo configuration should use
+``--superadmin-only``. It creates only the super-admin role, the local
+``superadmin`` credential, and the required audit record.
 """
 
 from __future__ import annotations
@@ -15,11 +19,16 @@ from typing import Any
 
 from ai_hunter.app.auth.local_auth import hash_password
 from ai_hunter.app.auth.roles import (
+    ADMIN_ROLE,
     DEFAULT_AUTH_SEED_FILE,
     load_auth_seed,
     normalize_roles,
 )
 from ai_hunter.app.services.user_service import get_user_service
+
+
+SUPERADMIN_USER_ID = "local_super_admin"
+SUPERADMIN_LOGIN_IDENTIFIER = "superadmin"
 
 
 def _password_from_env_or_prompt(env_name: str, prompt_label: str) -> str:
@@ -41,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed-file", default=str(DEFAULT_AUTH_SEED_FILE), help="auth seed JSON file")
     parser.add_argument("--skip-passwords", action="store_true", help="do not create/update local credentials")
+    parser.add_argument(
+        "--superadmin-only",
+        action="store_true",
+        help="create only the production superadmin role and local credential",
+    )
     return parser
 
 
@@ -171,8 +185,37 @@ def _seed_users(svc, seed: dict[str, Any], companies: dict[str, dict[str, Any]],
     return user_ids
 
 
+def _seed_production_superadmin(svc) -> str:
+    """Create the minimum auth records needed for a clean production login."""
+
+    password = _password_from_env_or_prompt(
+        "INIT_SUPER_ADMIN_PASSWORD",
+        SUPERADMIN_LOGIN_IDENTIFIER,
+    )
+    password_hash = hash_password(password, username=SUPERADMIN_LOGIN_IDENTIFIER)
+    row = svc.bootstrap_production_superadmin(
+        user_id=SUPERADMIN_USER_ID,
+        username="系统超级管理员",
+        login_identifier=SUPERADMIN_LOGIN_IDENTIFIER,
+        password_hash=password_hash,
+        role_code=ADMIN_ROLE,
+    )
+    print(
+        "production superadmin ready: "
+        f"user_id={row['user_id']} login={SUPERADMIN_LOGIN_IDENTIFIER} role={ADMIN_ROLE}"
+    )
+    return str(row["user_id"])
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.superadmin_only:
+        if args.skip_passwords:
+            raise ValueError("--superadmin-only cannot be combined with --skip-passwords")
+        user_id = _seed_production_superadmin(get_user_service())
+        print(f"production auth initialized: bootstrap_users=1 user_id={user_id}")
+        return 0
+
     seed = load_auth_seed(args.seed_file)
     svc = get_user_service()
     companies = _seed_companies(svc, seed)

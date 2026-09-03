@@ -57,3 +57,4 @@ new_docs/
 .tmp_pycache
 .pytest-migration-tmp-final
 .pytest-migration-tmp
+.pytest-tmp
