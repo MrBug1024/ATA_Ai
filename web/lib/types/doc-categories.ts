@@ -19,9 +19,23 @@ export interface CaseDocCategoryItem {
   uploaded: boolean;
   raw_uploaded?: boolean;
   covered_by_case_workpaper?: boolean;
-  coverage_basis?: "uploaded" | "case_workpaper" | "missing" | string;
+  coverage_basis?:
+    | "structured_records"
+    | "parsed_material"
+    | "case_workpaper"
+    | "failed"
+    | "pending"
+    | "raw_only"
+    | "missing"
+    | string;
+  coverage_status?: "ready" | "failed" | "pending" | "raw_only" | "missing" | string;
   file_count: number;
+  usable_file_count?: number;
+  raw_only_file_count?: number;
+  chunk_count?: number;
   record_count: number;
+  failed_event_count?: number;
+  pending_event_count?: number;
   last_uploaded_at: string | null;
 }
 
@@ -153,6 +167,7 @@ export interface UploadBatchPersistenceChecks {
   source_file_doc_category_count: number;
   all_files_have_chunks: boolean;
   all_files_have_doc_category: boolean;
+  retryable_missing_evidence?: boolean;
 }
 
 export interface UploadBatchDetail {

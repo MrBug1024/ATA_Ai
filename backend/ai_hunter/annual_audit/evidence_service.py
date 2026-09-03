@@ -917,10 +917,9 @@ def render_knowledge_graph_trace_appendix(trace_items: list[dict[str, Any]]) -> 
                 continue
             quote_text = str(evidence.get("quote_text") or "").replace("\n", " ").strip()[:160]
             lines.append(
-                "  - 证据锚点: "
-                f"file_id={int(evidence.get('file_id') or 0)} "
-                f"page={int(evidence.get('page_no') or 0)} "
-                f"chunk={str(evidence.get('chunk_id') or '')} | {quote_text}"
+                f"  - 证据摘录：{quote_text}"
+                if quote_text
+                else "  - 证据摘录：已关联可回溯证据。"
             )
     return "\n".join(lines)
 

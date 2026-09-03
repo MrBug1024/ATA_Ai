@@ -10,6 +10,16 @@ import Link from "next/link";
 import { AddMaterialDialog } from "@/components/cases/add-material-dialog";
 import { CreateCaseDialog } from "@/components/cases/create-case-dialog";
 import { CaseUploadStatus } from "@/components/cases/case-upload-status";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 
 function relativeTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -50,18 +60,19 @@ export default function CasesPage() {
   const [inputValue, setInputValue] = useState("");
   const [materialCase, setMaterialCase] = useState<Case | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [casePendingRemoval, setCasePendingRemoval] = useState<Case | null>(null);
   const [removingCaseId, setRemovingCaseId] = useState<number | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
-  const handleRemove = async (caseItem: Case) => {
-    const confirmed = window.confirm(
-      `确认移除年审项目“${caseItem.case_name}”吗？\n\n项目会从当前项目列表隐藏，原始材料、审计底稿和审计留痕会保留。`
-    );
-    if (!confirmed) return;
-    setRemovingCaseId(caseItem.case_id);
+  const handleRemove = async () => {
+    if (!casePendingRemoval) return;
+    setRemovingCaseId(casePendingRemoval.case_id);
+    setRemoveError(null);
     try {
-      await remove(caseItem.case_id);
+      await remove(casePendingRemoval.case_id);
+      setCasePendingRemoval(null);
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : "移除年审项目失败");
+      setRemoveError(err instanceof Error ? err.message : "移除年审项目失败");
     } finally {
       setRemovingCaseId(null);
     }
@@ -217,7 +228,10 @@ export default function CasesPage() {
                           </Link>
                           <button
                             type="button"
-                            onClick={() => void handleRemove(c)}
+                            onClick={() => {
+                              setRemoveError(null);
+                              setCasePendingRemoval(c);
+                            }}
                             disabled={removingCaseId === c.case_id}
                             className="text-xs text-destructive/70 hover:text-destructive transition-colors whitespace-nowrap disabled:opacity-50"
                           >
@@ -268,6 +282,56 @@ export default function CasesPage() {
         onOpenChange={setCreateOpen}
         onCreated={refresh}
       />
+
+      {casePendingRemoval && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && removingCaseId === null) {
+              setCasePendingRemoval(null);
+              setRemoveError(null);
+            }
+          }}
+        >
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>移除年审项目</DialogTitle>
+              <DialogDescription>
+                确认从当前项目列表移除“{casePendingRemoval.case_name}”吗？
+              </DialogDescription>
+            </DialogHeader>
+            <p className="text-sm leading-6 text-muted-foreground">
+              原始材料、审计底稿和审计留痕会保留，不会被删除。
+            </p>
+            {removeError && (
+              <Alert variant="destructive">
+                <AlertDescription>{removeError}</AlertDescription>
+              </Alert>
+            )}
+            <DialogFooter className="gap-2 sm:gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setCasePendingRemoval(null);
+                  setRemoveError(null);
+                }}
+                disabled={removingCaseId !== null}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => void handleRemove()}
+                disabled={removingCaseId !== null}
+              >
+                {removingCaseId !== null ? "移除中…" : "确认移除"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

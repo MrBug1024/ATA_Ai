@@ -271,7 +271,7 @@ def clone_template_version(
 @router.delete(
     "/template-versions/{version_id}",
     response_model=TemplateDeleteResponse,
-    summary="Delete an unused draft template version",
+    summary="Delete an inactive draft or retired template version",
 )
 def delete_template_version(
     version_id: UUID,
@@ -402,7 +402,7 @@ def compile_template_file(
 @router.get(
     "/template-files/{file_id}/preview",
     response_class=Response,
-    summary="Read the activation preview PDF",
+    summary="Read an optional template preview PDF",
 )
 def preview_template_file(
     file_id: UUID,
@@ -428,7 +428,7 @@ def preview_template_file(
 @router.post(
     "/template-versions/{version_id}/validate",
     response_model=TemplateVersionResponse,
-    summary="Run all activation gates",
+    summary="Validate template content, mappings, and compiled files",
 )
 def validate_template_version(
     version_id: UUID,
@@ -459,9 +459,6 @@ def activate_template_version(
             revision=payload.revision,
             active=payload.active,
             actor=identity.user_id,
-            preview_confirmations=[
-                item.model_dump(mode="json") for item in payload.preview_confirmations
-            ],
         )
     except Exception as exc:
         _raise_template_http_error(exc)

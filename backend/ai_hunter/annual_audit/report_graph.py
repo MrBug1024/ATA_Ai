@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ai_hunter.app.graph.state import AuditGraphState
 from ai_hunter.app.graph.turn_identity import derive_assistant_message_id
+from ai_hunter.app.user_facing import attachment_failure_message
 
 from .report_service import generate_annual_report_draft
 
@@ -72,7 +73,7 @@ def generate_annual_report_node(state: AuditGraphState) -> AuditGraphState:
                 raise RuntimeError("attachment service returned no durable job reference")
         except AttachmentJobError as exc:
             attachment_acceptance_note = (
-                f"\n\n**附件生成未受理**：{exc}（错误码：`{exc.code}`）。"
+                f"\n\n**附件暂未生成**：{attachment_failure_message(exc.code)}"
                 "报告草稿已保存；请按上述提示处理后，在当前项目重新生成附件。"
             )
             LOGGER.info(
@@ -83,7 +84,7 @@ def generate_annual_report_node(state: AuditGraphState) -> AuditGraphState:
             )
         except Exception:
             attachment_acceptance_note = (
-                "\n\n**附件生成未受理**：附件任务服务当前不可用。"
+                "\n\n**附件暂未生成**：附件任务服务当前不可用。"
                 "报告草稿已保存；请稍后在当前项目重新生成附件；若持续失败，"
                 "请联系平台管理员检查附件 worker 和 outbox。"
             )
@@ -105,7 +106,7 @@ def generate_annual_report_node(state: AuditGraphState) -> AuditGraphState:
                 )
     else:
         attachment_acceptance_note = (
-            "\n\n**附件生成未受理**：报告草稿未返回可冻结的报告版本。"
+            "\n\n**附件暂未生成**：报告草稿未返回可冻结的报告版本。"
             "请先确认报告已成功保存，再在当前项目重新生成附件。"
         )
     artifact_note = (

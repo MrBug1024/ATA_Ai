@@ -50,6 +50,42 @@ describe("CaseUploadStatus", () => {
     expect(badge.getAttribute("title")).toContain("仍缺 7 类");
   });
 
+  it("does not let a historical failed event override current usable category coverage", async () => {
+    mocks.categories = mocks.categories.map((category) => ({
+      ...category,
+      uploaded: false,
+      coverage_status: "ready",
+    }));
+    mocks.events = [
+      {
+        status: "failed",
+        doc_category: "category-0",
+        stage: "parse_document",
+      },
+    ];
+
+    const { CaseUploadStatus } = await import("@/components/cases/case-upload-status");
+    render(<CaseUploadStatus caseId={2} />);
+
+    expect(screen.getByText("完整 10/10 类")).toBeTruthy();
+    expect(screen.queryByText("上传失败")).toBeNull();
+  });
+
+  it("keeps a failed event visible when its category has no usable evidence", async () => {
+    mocks.events = [
+      {
+        status: "failed",
+        doc_category: "category-9",
+        stage: "parse_document",
+      },
+    ];
+
+    const { CaseUploadStatus } = await import("@/components/cases/case-upload-status");
+    render(<CaseUploadStatus caseId={2} />);
+
+    expect(screen.getByText("上传失败")).toBeTruthy();
+  });
+
   it("prioritizes raw-only material that is pending manual review", async () => {
     mocks.categories = Array.from({ length: 10 }, (_, index) => ({
       code: `category-${index}`,

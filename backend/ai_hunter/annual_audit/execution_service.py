@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from ai_hunter.app.settings import Settings, get_settings
+from ai_hunter.app.user_facing import profile_field_label
 
 from . import document_repository as documents
 from .engagement_repository import get_engagement
@@ -129,7 +130,7 @@ def profile_blockers(profile: dict[str, Any] | None) -> list[dict[str, Any]]:
     blockers = [
         {
             "code": f"profile.{field}",
-            "message": f"项目画像缺少{field}",
+            "message": f"项目画像缺少{profile_field_label(field)}",
         }
         for field in PROFILE_REQUIRED_FIELDS
         if not _nonempty_text(current.get(field))

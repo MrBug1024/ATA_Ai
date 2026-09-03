@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useUploadQueue } from "@/lib/stores/upload-queue";
 import { useMaterialEvent } from "@/lib/hooks/use-material-event";
@@ -9,6 +9,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertTriangle,
+  ChevronDown,
   X,
   FileText,
 } from "lucide-react";
@@ -73,6 +74,8 @@ export function GlobalUploadFloat() {
   const tasks = useUploadQueue((s) => s.tasks);
   const removeTask = useUploadQueue((s) => s.removeTask);
   const clearCompleted = useUploadQueue((s) => s.clearCompleted);
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
 
   const activeCount = tasks.filter(
     (t) => t.status === "uploading" || t.status === "processing"
@@ -83,10 +86,22 @@ export function GlobalUploadFloat() {
     [tasks]
   );
 
+  useEffect(() => {
+    if (tasks.length === 0) setOpen(false);
+  }, [tasks.length]);
+
   if (tasks.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 group">
+    <div
+      className="fixed bottom-4 right-4 z-40 w-[min(20rem,calc(100vw-2rem))]"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocusCapture={() => setOpen(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+    >
       {/* Hidden pollers for active tasks */}
       {sortedTasks
         .filter((t) => t.status === "processing" && t.materialEventId)
@@ -95,10 +110,14 @@ export function GlobalUploadFloat() {
         ))}
 
       {/* Collapsed indicator */}
-      <div
+      <button
+        type="button"
+        aria-controls={panelId}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
         className={cn(
-          "flex items-center gap-2 rounded-full border border-border/60 bg-popover px-3 py-2 shadow-lg shadow-black/10 transition-all",
-          "group-hover:opacity-0 group-hover:pointer-events-none group-hover:scale-95"
+          "flex min-h-11 w-full items-center gap-2 rounded-lg border border-border/60 bg-popover px-3 py-2 text-left shadow-lg shadow-black/10 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          open && "pointer-events-none scale-95 opacity-0"
         )}
       >
         {activeCount > 0 ? (
@@ -111,14 +130,17 @@ export function GlobalUploadFloat() {
             ? `${activeCount} 个任务进行中`
             : `${tasks.length} 个任务`}
         </span>
-      </div>
+      </button>
 
-      {/* Expanded panel on hover */}
+      {/* Expanded task panel */}
       <div
+        id={panelId}
+        aria-hidden={!open}
         className={cn(
-          "absolute bottom-0 right-0 w-80 overflow-hidden rounded-xl border border-border/60 bg-popover shadow-xl shadow-black/15 transition-all",
-          "opacity-0 pointer-events-none scale-95 origin-bottom-right",
-          "group-hover:opacity-100 group-hover:pointer-events-auto group-hover:scale-100"
+          "absolute bottom-0 right-0 w-full overflow-hidden rounded-lg border border-border/60 bg-popover shadow-xl shadow-black/15 transition-all origin-bottom-right",
+          open
+            ? "pointer-events-auto scale-100 opacity-100"
+            : "pointer-events-none scale-95 opacity-0"
         )}
       >
         {/* Header */}
@@ -134,15 +156,26 @@ export function GlobalUploadFloat() {
               </span>
             )}
           </div>
-          {tasks.some((t) => t.status === "completed" || t.status === "failed") && (
+          <div className="flex items-center gap-1">
+            {tasks.some((t) => t.status === "completed" || t.status === "failed") && (
+              <button
+                type="button"
+                onClick={clearCompleted}
+                className="text-[10px] text-muted-foreground/60 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                清除已完成
+              </button>
+            )}
             <button
               type="button"
-              onClick={clearCompleted}
-              className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+              aria-label="收起上传任务面板"
+              title="收起上传任务面板"
+              onClick={() => setOpen(false)}
+              className="rounded-sm p-1 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              清除已完成
+              <ChevronDown className="size-3.5" />
             </button>
-          )}
+          </div>
         </div>
 
         {/* Task list */}
@@ -163,7 +196,9 @@ export function GlobalUploadFloat() {
                   <button
                     type="button"
                     onClick={() => removeTask(task.id)}
-                    className="shrink-0 text-muted-foreground/30 hover:text-muted-foreground/70 transition-colors"
+                    aria-label={`移除 ${task.caseName} 的上传任务`}
+                    title="移除上传任务"
+                    className="shrink-0 rounded-sm text-muted-foreground/40 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <X className="size-3" />
                   </button>

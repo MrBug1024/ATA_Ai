@@ -15,6 +15,7 @@ from ..graph.context_loader import resolve_aggregated_text, resolve_ingest_paylo
 from ..graph.heavy_state import put_heavy_payload
 from ..graph.state import AuditGraphState
 from ..services.ocr_service import get_ocr_service
+from ..services.ingest_file_metadata import has_known_ingest_extension, normalize_ingest_file_item
 from ..settings import get_settings
 from ...annual_audit.document_repository import (
     get_case_doc_categories,
@@ -84,12 +85,30 @@ def import_annual_structured_files(state: AuditGraphState) -> AuditGraphState:
 
     from ai_hunter.annual_audit.import_service import import_uploaded_files
 
+    normalized_files = [
+        _normalize_uploaded_file_item(file_item)[0]
+        for file_item in state.get("uploaded_files") or []
+        if isinstance(file_item, dict)
+    ]
     summary = import_uploaded_files(
         engagement_id=int(state.get("current_case_id") or 0),
-        files=state.get("uploaded_files") or [],
+        files=normalized_files,
         actor=str(state.get("operator_id") or state.get("user_id") or "ai_agent"),
     )
-    return {"annual_import_summary": summary}
+    return {
+        "annual_import_summary": summary,
+        "uploaded_files": normalized_files,
+    }
+
+
+def _normalize_uploaded_file_item(file_item: dict) -> tuple[dict, bytes | None]:
+    """Recover metadata once before an import, direct read, or OCR request."""
+
+    normalized_file_item = normalize_ingest_file_item(file_item)
+    if has_known_ingest_extension(normalized_file_item.get("extension")):
+        return normalized_file_item, None
+    resolved_bytes = _resolve_file_bytes(file_item)
+    return normalize_ingest_file_item(file_item, file_bytes=resolved_bytes), resolved_bytes
 
 
 def filter_files(state: AuditGraphState) -> AuditGraphState:
@@ -104,19 +123,24 @@ def filter_files(state: AuditGraphState) -> AuditGraphState:
     ocr_candidates: list[tuple[int, str, dict]] = []
 
     for index, file_item in enumerate(files):
-        extension = (file_item.get("extension") or "").lower()
-        file_type = (file_item.get("type") or "").lower()
-        content_type = (file_item.get("content_type") or "").lower()
+        normalized_file_item, resolved_bytes = _normalize_uploaded_file_item(file_item)
+
+        extension = str(normalized_file_item.get("extension") or "").lower()
+        file_type = str(normalized_file_item.get("type") or "").lower()
+        content_type = str(normalized_file_item.get("content_type") or "").lower()
 
         if extension in TEXT_EXTENSIONS:
-            txt_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
+            content_bytes = resolved_bytes if resolved_bytes is not None else _resolve_file_bytes(file_item)
+            txt_contents.append(content_bytes.decode("utf-8", errors="replace"))
         elif extension in CSV_EXTENSIONS:
-            csv_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
+            content_bytes = resolved_bytes if resolved_bytes is not None else _resolve_file_bytes(file_item)
+            csv_contents.append(content_bytes.decode("utf-8", errors="replace"))
         elif extension in MARKDOWN_EXTENSIONS:
-            md_contents.append(_resolve_file_bytes(file_item).decode("utf-8", errors="replace"))
+            content_bytes = resolved_bytes if resolved_bytes is not None else _resolve_file_bytes(file_item)
+            md_contents.append(content_bytes.decode("utf-8", errors="replace"))
         else:
             target = _classify_ocr_target(file_type, extension, content_type)
-            ocr_candidates.append((index, target, file_item))
+            ocr_candidates.append((index, target, normalized_file_item))
 
     if ocr_candidates:
         ocr_results = _run_ocr_batch(ocr_candidates)

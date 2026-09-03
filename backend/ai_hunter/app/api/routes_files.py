@@ -16,10 +16,12 @@ from ..auth.permissions import require_any_module
 from ..auth.tenancy import require_case_access
 from ..graph.context_loader import resolve_aggregated_text
 from ..graph.heavy_state import get_heavy_payload, put_heavy_payload
+from ..graph.nodes.load_chunks import EvidenceChunkCompletenessError
 from ..graph.schemas import CaseDocCategoryStatusModel, ValidateDocCategoryResultModel
 from ..graph.state import FileItem
 from ..logging_utils import build_request_logger, preview_text
 from ..services.kg_service import get_kg_service
+from ..services.ingest_file_metadata import normalize_ingest_file_item
 from ..services.material_event_progress import build_material_event_id, mark_upload_ingest_progress
 from ..services.minio_service import get_minio_service, resolve_minio_reference_url
 from ..services.upload_ingest_jobs import enqueue_upload_ingest_job
@@ -119,6 +121,7 @@ class UploadBatchPersistenceChecksResponse(BaseModel):
     source_file_doc_category_count: int = 0
     all_files_have_chunks: bool = False
     all_files_have_doc_category: bool = False
+    retryable_missing_evidence: bool = False
 
 
 class UploadBatchResponse(BaseModel):
@@ -512,7 +515,7 @@ async def retry_upload_batch(
     stage: str = Query("auto", description="重试阶段：auto、parse、graph。"),
     identity: Identity = Depends(get_current_identity),
 ) -> dict:
-    """Retry a failed upload batch from the parse stage or graph stage."""
+    """Retry a failed batch or a completed batch proven to have no usable evidence."""
     batch = get_kg_service().fetch_source_upload_batch(upload_batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail=f"upload_batch_id 不存在: {upload_batch_id}")
@@ -1468,9 +1471,15 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
     try:
         result = knowledge_graph_graph.invoke(parse_result)
     except Exception as exc:
+        evidence_gap = isinstance(exc, EvidenceChunkCompletenessError)
+        failure_stage = "evidence_chunks_missing" if evidence_gap else current_stage
         error_payload = _build_upload_error(
-            stage=current_stage,
-            error_code="INGEST_GRAPH_FAILED",
+            stage=failure_stage,
+            error_code=(
+                "INGEST_EVIDENCE_CHUNKS_MISSING"
+                if evidence_gap
+                else "INGEST_GRAPH_FAILED"
+            ),
             message=str(exc),
             upload_batch_id=upload_batch_id,
         )
@@ -1483,7 +1492,7 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
             operator_name=operator_name,
             upload_batch_id=upload_batch_id,
             status="failed",
-            stage=current_stage,
+            stage=failure_stage,
             file_count=len(uploaded_files),
             new_file_count=len(new_files),
             duplicate_file_count=len(duplicate_files),
@@ -1502,7 +1511,7 @@ def _run_graph_enrichment_job(job_payload: dict) -> None:
             error_payload=error_payload,
             error_message=str(exc),
         )
-        LOGGER.exception("files_upload_failed stage=%s upload_batch_id=%s", current_stage, upload_batch_id)
+        LOGGER.exception("files_upload_failed stage=%s upload_batch_id=%s", failure_stage, upload_batch_id)
         return
 
     aggregated_text = resolve_aggregated_text(result)
@@ -1608,14 +1617,15 @@ def _build_reconciliation_change_stats(items: list[dict]) -> dict:
 
 
 def _resolve_retry_stage(*, batch: dict, event: dict, requested_stage: str) -> str:
-    """Resolve which retry stage should be enqueued for one failed upload batch."""
+    """Resolve the retry stage for a failed or verifiably unusable batch."""
     normalized_stage = str(requested_stage or "auto").strip().lower() or "auto"
     if normalized_stage not in {"auto", "parse", "graph"}:
         raise HTTPException(status_code=400, detail="stage 只支持 auto、parse、graph。")
 
     batch_status = str(batch.get("status", "") or "").strip().lower()
     event_status = str(event.get("status", "") or "").strip().lower()
-    if (event_status or batch_status) != "failed":
+    retryable_missing_evidence = _is_completed_batch_missing_all_evidence(batch)
+    if (event_status or batch_status) != "failed" and not retryable_missing_evidence:
         raise ValueError("仅支持对失败批次执行重试。")
 
     metadata = dict(batch.get("metadata", {}) or {})
@@ -1626,6 +1636,35 @@ def _resolve_retry_stage(*, batch: dict, event: dict, requested_stage: str) -> s
     if last_stage in {"parse_completed", "graph_running"}:
         return "graph"
     return "parse"
+
+
+def _is_completed_batch_missing_all_evidence(batch: dict) -> bool:
+    """Identify a historical false-success without permitting normal completed replays.
+
+    A completed batch is eligible only when its durable membership is complete,
+    at least one linked source file has bytes, no linked file has a source
+    chunk, and the batch has no structured rows.  This is deliberately more
+    restrictive than a generic ``all_files_have_chunks == false`` check.
+    """
+
+    if str(batch.get("status", "") or "").strip().lower() != "completed":
+        return False
+    files = [dict(item) for item in batch.get("files", []) or [] if isinstance(item, dict)]
+    expected_file_count = _safe_nonnegative_int(batch.get("file_count"))
+    if expected_file_count <= 0 or len(files) != expected_file_count:
+        return False
+    if _safe_nonnegative_int(batch.get("records_inserted")) > 0:
+        return False
+    if any(_safe_nonnegative_int(item.get("chunk_count")) > 0 for item in files):
+        return False
+    return any(_safe_nonnegative_int(item.get("file_size_bytes")) > 0 for item in files)
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _build_retry_parse_job_payload(*, batch: dict, event: dict) -> dict:
@@ -1746,26 +1785,28 @@ def _build_retry_uploaded_files(batch: dict) -> list[FileItem]:
             if isinstance(payload, dict):
                 content = str(payload.get("content", "") or "")
         uploaded_files.append(
-            {
-                "name": file_name,
-                "url": resolve_minio_reference_url(storage_ref),
-                "type": str(item.get("file_type", "document") or "document"),
-                "extension": extension,
-                "content_type": str(item.get("content_type", "") or ""),
-                "content": content,
-                "doc_category": str(batch.get("doc_category", "") or ""),
-                "upload_batch_id": str(batch.get("upload_batch_id", "") or ""),
-                "file_hash": file_hash,
-                "file_size": int(item.get("file_size_bytes", 0) or 0),
-                "content_ref": content_ref,
-                "duplicate_of": str(item.get("duplicate_of", "") or ""),
-                "storage_ref": storage_ref,
-                "storage_provider": str(item.get("storage_provider", "") or ""),
-                "storage_bucket": str(item.get("storage_bucket", "") or ""),
-                "storage_key": str(item.get("storage_key", "") or ""),
-                "storage_etag": "",
-                "storage_version": "",
-            }
+            normalize_ingest_file_item(
+                {
+                    "name": file_name,
+                    "url": resolve_minio_reference_url(storage_ref),
+                    "type": str(item.get("file_type", "document") or "document"),
+                    "extension": extension,
+                    "content_type": str(item.get("content_type", "") or ""),
+                    "content": content,
+                    "doc_category": str(batch.get("doc_category", "") or ""),
+                    "upload_batch_id": str(batch.get("upload_batch_id", "") or ""),
+                    "file_hash": file_hash,
+                    "file_size": int(item.get("file_size_bytes", 0) or 0),
+                    "content_ref": content_ref,
+                    "duplicate_of": str(item.get("duplicate_of", "") or ""),
+                    "storage_ref": storage_ref,
+                    "storage_provider": str(item.get("storage_provider", "") or ""),
+                    "storage_bucket": str(item.get("storage_bucket", "") or ""),
+                    "storage_key": str(item.get("storage_key", "") or ""),
+                    "storage_etag": "",
+                    "storage_version": "",
+                }
+            )
         )
     if not uploaded_files:
         raise ValueError("当前批次没有可用于重试的文件记录。")
@@ -1795,12 +1836,13 @@ def _build_text_file_content_refs(uploaded_files: list[FileItem]) -> dict[str, s
 
 
 def _validate_retry_uploaded_files_have_content(uploaded_files: list[FileItem], *, retry_stage: str) -> None:
-    """Ensure text-like uploads can be reconstructed before retrying."""
+    """Require inline text only when an immutable raw object is unavailable."""
     missing_files = [
         str(item.get("name", "uploaded-file") or "uploaded-file")
         for item in uploaded_files
         if str(item.get("extension", "") or "").lower() in (TEXT_EXTENSIONS | CSV_EXTENSIONS | MARKDOWN_EXTENSIONS)
         and not str(item.get("content", "") or "").strip()
+        and not str(item.get("storage_ref", "") or "").strip().startswith("minio://")
     ]
     if missing_files:
         raise ValueError(
@@ -1810,6 +1852,8 @@ def _validate_retry_uploaded_files_have_content(uploaded_files: list[FileItem], 
 
 def _decorate_upload_batch_response(batch: dict) -> dict:
     metadata = dict(batch.get("metadata", {}) or {}) if isinstance(batch, dict) else {}
+    persistence_checks = dict(batch.get("persistence_checks", {}) or {}) if isinstance(batch, dict) else {}
+    persistence_checks["retryable_missing_evidence"] = _is_completed_batch_missing_all_evidence(batch)
     
     # Convert datetime objects to ISO format strings
     def _datetime_to_str(dt):
@@ -1840,6 +1884,7 @@ def _decorate_upload_batch_response(batch: dict) -> dict:
         "created_at": _datetime_to_str(batch.get("created_at")),
         "updated_at": _datetime_to_str(batch.get("updated_at")),
         "files": processed_files,
+        "persistence_checks": persistence_checks,
     }
 
 

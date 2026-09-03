@@ -208,7 +208,6 @@ export function useSetAttachmentTemplateVersionActivation(versionId: string) {
   const mutation = useBackendMutation(async (request: {
     active: boolean;
     revision: number;
-    preview_confirmations?: Array<{ file_id: string; preview_sha256: string }>;
   }) => {
     const result = await setAttachmentTemplateVersionActivation(versionId, request);
     invalidate();

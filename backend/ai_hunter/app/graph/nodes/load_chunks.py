@@ -9,6 +9,10 @@ from typing import Any
 
 from ...services.chunking import build_chunks_from_pages, build_page_records_from_layout
 from ...services.kg_service import get_kg_service
+from ...services.ingest_file_metadata import (
+    has_known_ingest_extension,
+    normalize_ingest_file_item,
+)
 from ...services.minio_service import get_minio_service
 from ...services.ocr_service import get_ocr_service
 from ..context_loader import resolve_ingest_payload
@@ -18,6 +22,10 @@ from ..state import AuditGraphState
 
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+
+class EvidenceChunkCompletenessError(ValueError):
+    """Raised when a parseable material leaves no durable evidence output."""
 
 
 def load_chunks(state: AuditGraphState) -> AuditGraphState:
@@ -36,9 +44,10 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
     layout_payloads: list[dict[str, Any]] = []
 
     for file_item in uploaded_files:
-        file_name = file_item.get("name", "") or "uploaded-file"
-        extension = (file_item.get("extension") or Path(file_name).suffix.lower()).lower()
         file_bytes = _resolve_file_bytes(file_item)
+        normalized_file_item = normalize_ingest_file_item(file_item, file_bytes=file_bytes)
+        file_name = str(normalized_file_item.get("name") or "uploaded-file")
+        extension = str(normalized_file_item.get("extension") or Path(file_name).suffix.lower()).lower()
         file_sha256 = str(file_item.get("file_hash", "") or "").strip()
         if not file_sha256:
             file_sha256 = hashlib.sha256(file_bytes).hexdigest()
@@ -50,8 +59,8 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
                 "case_id": case_id,
                 "entity_id": entity_id,
                 "file_name": file_name,
-                "file_type": file_item.get("type", "document"),
-                "content_type": file_item.get("content_type", ""),
+                "file_type": normalized_file_item.get("type", "document"),
+                "content_type": normalized_file_item.get("content_type", ""),
                 "file_sha256": file_sha256,
                 "file_size_bytes": file_size_bytes,
                 "storage_ref": file_item.get("storage_ref", ""),
@@ -68,8 +77,13 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
             }
         )
         if extension not in TEXT_EXTENSIONS:
-            cache_key = _build_file_cache_key(file_item, extension)
-            layout_result = layout_cache.get(cache_key) or _load_layout_result(ocr_service, file_item, extension)
+            cache_key = _build_file_cache_key(normalized_file_item, extension)
+            layout_result = layout_cache.get(cache_key) or _load_layout_result(
+                ocr_service,
+                normalized_file_item,
+                extension,
+                file_bytes=file_bytes,
+            )
         else:
             layout_result = {
                 "text": file_bytes.decode("utf-8", errors="replace"),
@@ -92,20 +106,14 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
             {
                 "file_sha256": file_sha256,
                 "file_name": file_name,
+                "file_size_bytes": len(file_bytes),
+                "extension": extension,
                 "layout_result": layout_result,
             }
         )
 
     inserted_files = kg_service.insert_source_files(source_file_rows)
     file_id_map = {row["file_sha256"]: int(row["id"]) for row in inserted_files}
-    batch_row = _persist_upload_batch_context(
-        kg_service=kg_service,
-        state=state,
-        case_id=case_id,
-        entity_id=entity_id,
-        inserted_files=inserted_files,
-        uploaded_files=uploaded_files,
-    )
     category_rows = _persist_doc_category_relations(
         kg_service=kg_service,
         state=state,
@@ -140,6 +148,19 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
             )
         )
     inserted_chunks = kg_service.insert_source_chunks(all_chunks)
+    _require_evidence_output_for_nonempty_parseable_materials(
+        layout_payloads=layout_payloads,
+        inserted_chunks=inserted_chunks,
+        structured_record_count=int(state.get("records_inserted", 0) or 0),
+    )
+    batch_row = _persist_upload_batch_context(
+        kg_service=kg_service,
+        state=state,
+        case_id=case_id,
+        entity_id=entity_id,
+        inserted_files=inserted_files,
+        uploaded_files=uploaded_files,
+    )
 
     chunk_batch_payload = {
         "files": inserted_files,
@@ -166,6 +187,35 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         "upload_batch_summary": _merge_batch_summary(state.get("upload_batch_summary", {}), batch_row),
         "source_chunks": [],
     }
+
+
+def _require_evidence_output_for_nonempty_parseable_materials(
+    *,
+    layout_payloads: list[dict[str, Any]],
+    inserted_chunks: list[dict[str, Any]],
+    structured_record_count: int,
+) -> None:
+    """Reject a batch only when every nonempty parseable input lost all output.
+
+    Zero structured rows is valid for a letter, scan, or other unstructured
+    audit material, but it must still produce at least one source chunk for
+    traceability.  Unknown formats and genuinely empty files remain outside
+    this gate because they cannot be classified safely as parser failures.
+    """
+
+    nonempty_parseable_names = [
+        str(payload.get("file_name") or "uploaded-file")
+        for payload in layout_payloads
+        if int(payload.get("file_size_bytes", 0) or 0) > 0
+        and has_known_ingest_extension(payload.get("extension"))
+    ]
+    if not nonempty_parseable_names or inserted_chunks or structured_record_count > 0:
+        return
+    raise EvidenceChunkCompletenessError(
+        "非空可解析资料未生成可追溯证据分块或结构化记录："
+        + ", ".join(nonempty_parseable_names[:5])
+        + "；请检查源文件、文件类型或 OCR 后重试。"
+    )
 
 
 def bind_annual_evidence_anchors(state: AuditGraphState) -> AuditGraphState:
@@ -395,9 +445,15 @@ def _resolve_persisted_ingest_payload(state: AuditGraphState) -> dict[str, Any]:
     return resolve_ingest_payload({"ingest_payload_ref": ingest_payload_ref})
 
 
-def _load_layout_result(ocr_service, file_item: dict[str, Any], extension: str) -> dict[str, Any]:
+def _load_layout_result(
+    ocr_service,
+    file_item: dict[str, Any],
+    extension: str,
+    *,
+    file_bytes: bytes | None = None,
+) -> dict[str, Any]:
     """Route one uploaded file through the layout-preserving OCR call."""
-    raw_bytes = _resolve_file_bytes(file_item)
+    raw_bytes = file_bytes if file_bytes is not None else _resolve_file_bytes(file_item)
     common_kwargs = {
         "file_url": "",
         "file_name": file_item.get("name", ""),

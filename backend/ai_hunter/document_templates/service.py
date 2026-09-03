@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import html
-import hmac
 import re
 from datetime import datetime, timezone
 from io import BytesIO
@@ -109,56 +108,6 @@ def _business_type(code: str) -> dict[str, Any]:
 def _check_revision(record: dict[str, Any], expected: int) -> None:
     if int(record.get("revision") or 0) != int(expected):
         raise TemplateRevisionConflictError("template revision has changed; refresh and retry")
-
-
-def _build_preview_confirmation(
-    version: dict[str, Any],
-    confirmations: list[dict[str, Any]] | tuple[dict[str, Any], ...],
-    *,
-    actor: str,
-) -> dict[str, Any]:
-    files = list(version.get("files") or [])
-    if not files:
-        raise TemplateValidationStateError("template files are required for visual confirmation")
-
-    expected: dict[str, str] = {}
-    for item in files:
-        file_id = str(item.get("id") or "")
-        preview_ref = str(item.get("preview_object_ref") or "")
-        preview_sha256 = str(item.get("preview_sha256") or "").strip().lower()
-        if not file_id or not preview_ref or len(preview_sha256) != 64:
-            raise TemplateValidationStateError(
-                "every template file must have a frozen preview before activation"
-            )
-        expected[file_id] = preview_sha256
-
-    provided: dict[str, str] = {}
-    for item in confirmations:
-        file_id = str(item.get("file_id") or "")
-        preview_sha256 = str(item.get("preview_sha256") or "").strip().lower()
-        if not file_id or file_id in provided:
-            raise TemplateValidationStateError(
-                "visual confirmation must identify each template file exactly once"
-            )
-        provided[file_id] = preview_sha256
-
-    if set(provided) != set(expected) or any(
-        not hmac.compare_digest(provided[file_id], expected[file_id])
-        for file_id in expected
-    ):
-        raise TemplateValidationStateError(
-            "visual confirmation does not match the current frozen template previews"
-        )
-
-    return {
-        "confirmation_version": "template-preview-confirmation-v1",
-        "confirmed_by": _actor(actor),
-        "confirmed_at": datetime.now(timezone.utc).isoformat(),
-        "files": [
-            {"file_id": file_id, "preview_sha256": expected[file_id]}
-            for file_id in sorted(expected)
-        ],
-    }
 
 
 class DocumentTemplateService:
@@ -391,15 +340,16 @@ class DocumentTemplateService:
                             )
                         chunks.append(chunk)
                     preview = b"".join(chunks)
-        except TemplateServiceValidationError:
-            raise
-        except Exception as exc:
-            if bool(getattr(self.settings, "attachment_preview_required", False)):
-                raise TemplateServiceValidationError("template preview conversion failed") from exc
+        except Exception:
+            # A preview is an optional convenience in template administration.
+            # Source/compiled template validation happens independently below.
             return None
         if not preview.startswith(b"%PDF-"):
-            raise TemplateServiceValidationError("template preview converter returned a non-PDF response")
-        self._validate_preview_pdf(preview)
+            return None
+        try:
+            self._validate_preview_pdf(preview)
+        except TemplateServiceValidationError:
+            return None
         return preview
 
     @staticmethod
@@ -590,10 +540,7 @@ class DocumentTemplateService:
                 block("DUPLICATE_DISPLAY_NAME", "file display names must be unique")
             display_names.add(display_key)
             if not item.get("preview_object_ref"):
-                if bool(getattr(self.settings, "attachment_preview_required", False)):
-                    block("PREVIEW_MISSING", "stored PDF preview is missing")
-                else:
-                    warn("PREVIEW_MISSING", "stored PDF preview is missing")
+                warn("PREVIEW_MISSING", "stored PDF preview is unavailable")
 
             current_preview_sha256 = ""
             try:
@@ -639,13 +586,10 @@ class DocumentTemplateService:
                                 or current_compilation.content,
                             )
                         except TemplateServiceValidationError as exc:
-                            block("PREVIEW_VALIDATION_FAILED", str(exc))
+                            warn("PREVIEW_VALIDATION_FAILED", str(exc))
                         else:
                             if current_preview is None:
-                                if bool(getattr(self.settings, "attachment_preview_required", False)):
-                                    block("PREVIEW_RENDERER_REQUIRED", "current preview renderer is unavailable")
-                                else:
-                                    warn("PREVIEW_RENDERER_UNAVAILABLE", "current preview renderer is unavailable")
+                                warn("PREVIEW_RENDERER_UNAVAILABLE", "current preview renderer is unavailable")
                             else:
                                 current_preview_sha256 = sha256_bytes(current_preview)
 
@@ -655,10 +599,10 @@ class DocumentTemplateService:
                     stored_preview = self.storage.get_object_bytes(preview_ref)
                     self._validate_preview_pdf(stored_preview)
                 except Exception:
-                    block("STORED_PREVIEW_INVALID", "stored PDF preview cannot be read or reopened")
+                    warn("STORED_PREVIEW_INVALID", "stored PDF preview cannot be read or reopened")
                 else:
                     if sha256_bytes(stored_preview) != item.get("preview_sha256"):
-                        block("PREVIEW_SHA_MISMATCH", "stored preview SHA does not match metadata")
+                        warn("PREVIEW_SHA_MISMATCH", "stored preview SHA does not match metadata")
 
             file_results.append(
                 {
@@ -706,40 +650,24 @@ class DocumentTemplateService:
         revision: int,
         active: bool,
         actor: str,
-        preview_confirmations: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
     ) -> dict[str, Any]:
-        visual_confirmation: dict[str, Any] = {}
         if active:
             version = self.repository.get_version(version_id)
             _check_revision(version, revision)
-            visual_confirmation = _build_preview_confirmation(
-                version,
-                preview_confirmations,
-                actor=actor,
-            )
             if version.get("status") != "active":
                 report = version.get("validation_report") or {}
-                expected_renderer = str(
-                    getattr(self.settings, "attachment_renderer_image_digest", "") or ""
-                )
-                expected_fonts = str(
-                    getattr(self.settings, "attachment_font_manifest_version", "") or ""
-                )
                 if (
                     not report.get("passed")
                     or report.get("content_sha256") != version.get("content_sha256")
-                    or report.get("renderer_image_digest") != expected_renderer
-                    or report.get("font_manifest_version") != expected_fonts
                 ):
                     raise TemplateValidationStateError(
-                        "template must pass validation in the current renderer and font environment"
+                        "template must pass current content validation before activation"
                     )
         return self.repository.set_activation(
             version_id,
             revision=revision,
             active=active,
             actor=_actor(actor),
-            visual_confirmation=visual_confirmation,
         )
 
     def get_preview(self, file_id: UUID | str) -> tuple[bytes, str]:

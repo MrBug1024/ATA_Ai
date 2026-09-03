@@ -83,6 +83,7 @@ import {
   useAttachmentTemplateVersion,
   useCloneAttachmentTemplateVersion,
   useCompileAttachmentTemplateFile,
+  useDeleteAttachmentTemplateVersion,
   useDeleteAttachmentTemplateFile,
   useInspectAttachmentTemplateFile,
   useSetAttachmentTemplateVersionActivation,
@@ -106,11 +107,24 @@ const FILE_STATUS_LABELS: Record<string, string> = {
 const VERSION_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   validating: "校验中",
-  ready: "可激活",
+  ready: "待激活",
   active: "已激活",
   retired: "已停用",
   archived: "已归档",
 };
+
+const PREVIEW_VALIDATION_CODES = new Set([
+  "PREVIEW_MISSING",
+  "PREVIEW_VALIDATION_FAILED",
+  "PREVIEW_RENDERER_REQUIRED",
+  "PREVIEW_RENDERER_UNAVAILABLE",
+  "STORED_PREVIEW_INVALID",
+  "PREVIEW_SHA_MISMATCH",
+]);
+
+function isPreviewValidationIssue(issue: { code?: string }): boolean {
+  return PREVIEW_VALIDATION_CODES.has(String(issue.code ?? "").toUpperCase());
+}
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -1356,6 +1370,7 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
   const validateMutation = useValidateAttachmentTemplateVersion(versionId);
   const activationMutation = useSetAttachmentTemplateVersionActivation(versionId);
   const cloneMutation = useCloneAttachmentTemplateVersion(versionId);
+  const deleteMutation = useDeleteAttachmentTemplateVersion(versionId);
   const [editOpen, setEditOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [documentCode, setDocumentCode] = useState("");
@@ -1363,7 +1378,7 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
   const [preview, setPreview] = useState<{ url: string; name: string } | null>(null);
   const [previewBusyId, setPreviewBusyId] = useState("");
   const [activationOpen, setActivationOpen] = useState(false);
-  const [confirmedPreviewIds, setConfirmedPreviewIds] = useState<Set<string>>(new Set());
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const version = query.version;
   const canEdit = version?.status === "draft";
@@ -1377,7 +1392,7 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
     selectedFormat && supportedFormats.includes(selectedFormat)
   );
   const canValidate = Boolean(
-    version && ["draft", "retired"].includes(version.status) && version.file_count > 0
+    version && ["draft", "ready", "retired"].includes(version.status) && version.file_count > 0
   );
   const retiredValidationIsCurrent = Boolean(
     version?.status === "retired" &&
@@ -1387,18 +1402,12 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
     version.validation_report.content_sha256 === version.content_sha256
   );
   const canActivate = version?.status === "ready" || retiredValidationIsCurrent;
-  const activationFiles = [...(version?.files ?? [])].sort(
-    (left, right) => left.sort_order - right.sort_order
-  );
-  const previewsReadyForConfirmation = Boolean(
-    activationFiles.length > 0 &&
-      activationFiles.every((file) => file.preview_available && file.preview_sha256)
-  );
-  const allPreviewsConfirmed = Boolean(
-    previewsReadyForConfirmation &&
-      activationFiles.every((file) => confirmedPreviewIds.has(file.id))
-  );
-  const busy = validateMutation.isMutating || activationMutation.isMutating || cloneMutation.isMutating;
+  const canDeleteVersion = Boolean(version && ["draft", "retired"].includes(version.status));
+  const busy =
+    validateMutation.isMutating ||
+    activationMutation.isMutating ||
+    cloneMutation.isMutating ||
+    deleteMutation.isMutating;
 
   useEffect(() => () => {
     if (preview?.url) URL.revokeObjectURL(preview.url);
@@ -1449,26 +1458,28 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
 
   async function setActive(active: boolean) {
     if (!version) return;
-    const previewConfirmations = active
-      ? activationFiles.map((file) => ({
-          file_id: file.id,
-          preview_sha256: file.preview_sha256 ?? "",
-        }))
-      : undefined;
-    if (active && !allPreviewsConfirmed) return;
     try {
       await activationMutation.setActivation({
         active,
         revision: version.revision,
-        ...(previewConfirmations ? { preview_confirmations: previewConfirmations } : {}),
       });
       toast.success(active ? "模板版本已激活" : "模板版本已停用");
       if (active) {
         setActivationOpen(false);
-        setConfirmedPreviewIds(new Set());
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新激活状态失败");
+    }
+  }
+
+  async function removeVersion() {
+    if (!version) return;
+    try {
+      await deleteMutation.deleteVersion(version.revision);
+      toast.success("模板版本已删除");
+      router.push("/admin/templates");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除模板版本失败");
     }
   }
 
@@ -1515,11 +1526,31 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
   const validationWarnings = validationReport?.warnings ?? legacyIssues.filter(
     (issue) => issue.severity === "warning"
   );
+  const contentBlockers = validationBlockers.filter(
+    (issue) => !isPreviewValidationIssue(issue)
+  );
+  const previewDiagnostics = [
+    ...validationBlockers.filter(isPreviewValidationIssue),
+    ...validationWarnings.filter(isPreviewValidationIssue),
+  ];
+  const contentWarnings = validationWarnings.filter(
+    (issue) => !isPreviewValidationIssue(issue)
+  );
   const validatedAt = validationReport?.validated_at ?? validationReport?.checked_at;
   const hasValidationReport =
     typeof validationReport?.passed === "boolean" ||
     validationBlockers.length > 0 ||
     validationWarnings.length > 0;
+  const validationGatePassed = Boolean(validationReport?.passed);
+  const needsValidationRefresh = Boolean(
+    !validationGatePassed &&
+      contentBlockers.length === 0 &&
+      previewDiagnostics.length > 0
+  );
+  const previewUnavailable = Boolean(
+    previewDiagnostics.length > 0 ||
+      version.files.some((file) => !file.preview_available || !file.preview_sha256)
+  );
 
   return (
     <section className="flex flex-col gap-6" aria-labelledby="attachment-template-detail-title">
@@ -1538,9 +1569,10 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
           <div className="flex flex-wrap gap-2">
             {canEdit && <Button type="button" variant="outline" onClick={() => setEditOpen(true)}><Pencil data-icon="inline-start" />编辑信息</Button>}
             {version.status !== "draft" && <Button type="button" variant="outline" onClick={() => void clone()} disabled={busy}><Copy data-icon="inline-start" />复制新版本</Button>}
-            {canValidate && <Button type="button" variant="outline" onClick={() => void validate()} disabled={busy}><ShieldCheck data-icon="inline-start" />{version.status === "retired" ? "重新校验" : "执行校验"}</Button>}
-            {canActivate && <Button type="button" onClick={() => setActivationOpen(true)} disabled={busy || !previewsReadyForConfirmation} title={!previewsReadyForConfirmation ? "全部文件生成预览后才能激活" : undefined}><Zap data-icon="inline-start" />{version.status === "retired" ? "重新激活" : "激活版本"}</Button>}
+            {canValidate && <Button type="button" variant="outline" onClick={() => void validate()} disabled={busy}><ShieldCheck data-icon="inline-start" />{version.status === "draft" ? "执行校验" : "重新校验"}</Button>}
+            {canActivate && <Button type="button" onClick={() => setActivationOpen(true)} disabled={busy}><Zap data-icon="inline-start" />{version.status === "retired" ? "重新激活" : "激活版本"}</Button>}
             {version.status === "active" && <Button type="button" variant="outline" onClick={() => void setActive(false)} disabled={busy}>停用版本</Button>}
+            {canDeleteVersion && <Button type="button" variant="destructive" onClick={() => setDeleteOpen(true)} disabled={busy}><Trash2 data-icon="inline-start" />删除版本</Button>}
           </div>
         </div>
       </div>
@@ -1548,20 +1580,25 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
       {query.error && <Alert variant="destructive"><RefreshCw aria-hidden="true" /><div><AlertTitle>版本刷新失败</AlertTitle><AlertDescription>{query.error}</AlertDescription></div></Alert>}
 
       {hasValidationReport && validationReport && (
-        <Alert variant={validationReport.passed ? "default" : "destructive"}>
-          {validationReport.passed ? <CheckCircle2 aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
+        <Alert variant={validationGatePassed ? "default" : "destructive"}>
+          {validationGatePassed ? <CheckCircle2 aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
           <div>
-            <AlertTitle>{validationReport.passed ? "激活门禁已通过" : "激活门禁未通过"}</AlertTitle>
+            <AlertTitle>{validationGatePassed ? "模板内容校验已通过" : "模板内容校验未通过"}</AlertTitle>
             <AlertDescription>
               <p>
-                {validationReport.passed
-                  ? "全部文件、槽位与预览检查已完成。"
-                  : validationBlockers.length
-                    ? validationBlockers.map((issue) => issue.message).join("；")
-                    : "校验未通过，但服务端没有返回具体阻断原因，请重新执行校验或查看服务日志。"}
+                {validationGatePassed
+                  ? "模板文件、槽位映射与编译结果已通过校验。"
+                  : contentBlockers.length
+                    ? contentBlockers.map((issue) => issue.message).join("；")
+                    : needsValidationRefresh
+                      ? "该版本使用了旧的预览校验结果。重新校验后即可按模板内容校验结果启用。"
+                      : "校验未通过，但服务端没有返回具体阻断原因，请重新执行校验。"}
               </p>
-              {validationWarnings.length > 0 && (
-                <p className="mt-1">警告：{validationWarnings.map((issue) => issue.message).join("；")}</p>
+              {previewUnavailable && (
+                <p className="mt-1">PDF 预览暂不可用，只影响在线查看，不影响模板激活或交付。</p>
+              )}
+              {contentWarnings.length > 0 && (
+                <p className="mt-1">提示：{contentWarnings.map((issue) => issue.message).join("；")}</p>
               )}
               {validatedAt && (
                 <p className="mt-1 text-xs opacity-80">校验时间：{formatDate(validatedAt)}</p>
@@ -1654,53 +1691,38 @@ export function AttachmentTemplateFiles({ versionId }: { versionId: string }) {
         onOpenChange={(open) => {
           if (busy) return;
           setActivationOpen(open);
-          if (!open) setConfirmedPreviewIds(new Set());
         }}
       >
-        <DialogContent className="sm:max-w-xl">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{version.status === "retired" ? "重新激活模板版本" : "激活模板版本"}</DialogTitle>
             <DialogDescription>
-              确认当前冻结预览的版式、字体、分页和内容槽位符合交付要求。
+              启用后，该版本将成为当前可用于生成交付物的模板版本；同一业务类型的当前版本会自动停用。
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-[52svh] space-y-2 overflow-y-auto">
-            {activationFiles.map((file) => {
-              const checkboxId = `confirm-preview-${file.id}`;
-              return (
-                <div key={file.id} className="flex items-center gap-3 border-b py-3 last:border-b-0">
-                  <Checkbox
-                    id={checkboxId}
-                    checked={confirmedPreviewIds.has(file.id)}
-                    onCheckedChange={(checked) => {
-                      setConfirmedPreviewIds((current) => {
-                        const next = new Set(current);
-                        if (checked === true) next.add(file.id);
-                        else next.delete(file.id);
-                        return next;
-                      });
-                    }}
-                    disabled={busy}
-                  />
-                  <label htmlFor={checkboxId} className="min-w-0 flex-1 text-sm">
-                    <span className="block font-medium">{file.display_name}</span>
-                    <code className="block truncate text-xs text-muted-foreground" title={file.preview_sha256}>
-                      预览 SHA {file.preview_sha256?.slice(0, 12)}…
-                    </code>
-                  </label>
-                  <Button type="button" size="icon-sm" variant="ghost" title={`预览 ${file.display_name}`} onClick={() => void openPreview(file)} disabled={busy || previewBusyId === file.id}>
-                    {previewBusyId === file.id ? <Loader2 className="animate-spin" /> : <Eye />}
-                    <span className="sr-only">预览 {file.display_name}</span>
-                  </Button>
-                </div>
-              );
-            })}
-          </div>
           <DialogFooter className="gap-2 sm:gap-2">
             <Button type="button" variant="outline" onClick={() => setActivationOpen(false)} disabled={busy}>取消</Button>
-            <Button type="button" onClick={() => void setActive(true)} disabled={busy || !allPreviewsConfirmed}>
+            <Button type="button" onClick={() => void setActive(true)} disabled={busy}>
               {activationMutation.isMutating && <Loader2 className="animate-spin" data-icon="inline-start" />}
               确认并激活
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteOpen} onOpenChange={(open) => !busy && setDeleteOpen(open)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{version.status === "retired" ? "删除已停用模板版本" : "删除模板草稿"}</DialogTitle>
+            <DialogDescription>
+              将永久删除“{version.name}”及其模板文件。已激活版本或已有生成交付记录的版本不可删除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button type="button" variant="outline" onClick={() => setDeleteOpen(false)} disabled={busy}>取消</Button>
+            <Button type="button" variant="destructive" onClick={() => void removeVersion()} disabled={busy}>
+              {deleteMutation.isMutating && <Loader2 className="animate-spin" data-icon="inline-start" />}
+              确认删除
             </Button>
           </DialogFooter>
         </DialogContent>

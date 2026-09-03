@@ -142,15 +142,6 @@ def test_activation_locks_family_retires_old_and_invalidates_old_gate() -> None:
         revision=5,
         active=True,
         actor="superadmin",
-        visual_confirmation={
-            "confirmation_version": "template-preview-confirmation-v1",
-            "confirmed_by": "superadmin",
-            "confirmed_at": "2026-09-01T00:00:00+00:00",
-            "files": [
-                {"file_id": str(uuid4()), "preview_sha256": "b" * 64},
-                {"file_id": str(uuid4()), "preview_sha256": "c" * 64},
-            ],
-        },
     )
     sql = "\n".join(statement for statement, _ in cursor.executed)
     assert "document_template_family WHERE id = %s FOR UPDATE" in sql
@@ -188,6 +179,73 @@ def test_reinspection_invalidates_compiled_file_and_parent_version() -> None:
     assert "preview_object_ref = NULL" in sql
     assert "UPDATE public.document_template_version" in sql
     assert "validation_report_json = '{}'::jsonb" in sql
+
+
+def test_retired_version_can_be_deleted() -> None:
+    family_id = uuid4()
+    version_id = uuid4()
+    repository, cursor = _repository_with_rows(
+        [
+            {"family_id": family_id},
+            {"id": family_id, "active_version_id": None},
+            {
+                "id": version_id,
+                "family_id": family_id,
+                "status": "retired",
+                "revision": 3,
+                "version_no": 2,
+                "name": "Retired annual audit template",
+            },
+            {"has_attachment_history": False},
+        ]
+    )
+
+    deleted = repository.delete_version(version_id, revision=3, actor="superadmin")
+
+    sql = "\n".join(statement for statement, _ in cursor.executed)
+    assert deleted == {"deleted": True, "id": version_id}
+    assert "DELETE FROM public.document_template_version" in sql
+
+
+def test_active_version_cannot_be_deleted() -> None:
+    family_id = uuid4()
+    version_id = uuid4()
+    repository, _ = _repository_with_rows(
+        [
+            {"family_id": family_id},
+            {"id": family_id, "active_version_id": version_id},
+            {
+                "id": version_id,
+                "family_id": family_id,
+                "status": "active",
+                "revision": 3,
+            },
+        ]
+    )
+
+    with pytest.raises(TemplateImmutableError):
+        repository.delete_version(version_id, revision=3, actor="superadmin")
+
+
+def test_version_with_generated_attachment_history_cannot_be_deleted() -> None:
+    family_id = uuid4()
+    version_id = uuid4()
+    repository, _ = _repository_with_rows(
+        [
+            {"family_id": family_id},
+            {"id": family_id, "active_version_id": None},
+            {
+                "id": version_id,
+                "family_id": family_id,
+                "status": "retired",
+                "revision": 3,
+            },
+            {"has_attachment_history": True},
+        ]
+    )
+
+    with pytest.raises(TemplateImmutableError, match="保留审计追溯无法删除"):
+        repository.delete_version(version_id, revision=3, actor="superadmin")
 
 
 def _version_response() -> dict:
@@ -278,13 +336,29 @@ def test_create_request_rejects_server_owned_fields() -> None:
     assert response.status_code == 422
 
 
-def test_activation_request_requires_explicit_preview_confirmations() -> None:
+def test_activation_request_does_not_require_preview_confirmation(monkeypatch) -> None:
+    version = _version_response()
+    calls: dict[str, object] = {}
+
+    def set_activation(version_id, **kwargs):
+        calls["version_id"] = version_id
+        calls.update(kwargs)
+        return version
+
+    monkeypatch.setattr(
+        routes_templates,
+        "get_document_template_service",
+        lambda: SimpleNamespace(set_activation=set_activation),
+    )
     client = TestClient(_test_app(Identity.admin()))
     response = client.put(
         f"/api/admin/template-versions/{uuid4()}/activation",
         json={"active": True, "revision": 1},
     )
-    assert response.status_code == 422
+    assert response.status_code == 200, response.text
+    assert calls["active"] is True
+    assert calls["revision"] == 1
+    assert "preview_confirmations" not in calls
 
 
 def test_template_http_response_never_exposes_object_references(monkeypatch) -> None:

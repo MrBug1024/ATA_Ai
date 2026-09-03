@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useCaseMaterialEvents } from "@/lib/hooks/use-case-material-events";
 import { useCaseDocCategories } from "@/lib/hooks/use-case-doc-categories";
+import type { CaseDocCategoryItem } from "@/lib/types/doc-categories";
 import { Loader2, CheckCircle2, AlertTriangle, CircleDashed } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -10,11 +11,26 @@ interface Props {
   caseId: number;
 }
 
+function hasUsableCoverage(category: CaseDocCategoryItem | undefined): boolean {
+  if (!category) return false;
+
+  // Newer APIs expose the stricter evidence status; retain the legacy fields for
+  // servers that have not yet added it.
+  if (category.coverage_status !== undefined) {
+    return category.coverage_status === "ready";
+  }
+
+  return category.uploaded || Boolean(category.covered_by_case_workpaper);
+}
+
 export function CaseUploadStatus({ caseId }: Props) {
   const { events, isLoading } = useCaseMaterialEvents(caseId);
   const { caseDocCategories, isLoading: isCoverageLoading } = useCaseDocCategories(caseId);
 
   const status = useMemo(() => {
+    const categories = caseDocCategories?.categories ?? [];
+    const categoriesByCode = new Map(categories.map((category) => [category.code, category]));
+
     const hasProcessing = events.some((e) => e.status === "processing");
     if (hasProcessing) return { label: "处理中", variant: "processing" as const };
 
@@ -30,12 +46,17 @@ export function CaseUploadStatus({ caseId }: Props) {
     );
     if (hasManualReview) return { label: "待人工复核", variant: "manual_review" as const };
 
-    const hasFailed = events.some((e) => e.status === "failed");
+    // A failed event is historical once its category has current usable evidence.
+    // Failures without a ready category remain visible for recovery.
+    const hasFailed = events.some(
+      (event) =>
+        event.status === "failed" &&
+        !hasUsableCoverage(categoriesByCode.get(event.doc_category))
+    );
     if (hasFailed) return { label: "上传失败", variant: "failed" as const };
 
-    const categories = caseDocCategories?.categories ?? [];
     const total = categories.length;
-    const available = categories.filter((category) => category.uploaded || category.covered_by_case_workpaper).length;
+    const available = categories.filter(hasUsableCoverage).length;
     const missing = Math.max(total - available, 0);
     if (total > 0 && missing === 0) {
       return { label: `完整 ${available}/${total} 类`, variant: "completed" as const };
@@ -68,7 +89,7 @@ export function CaseUploadStatus({ caseId }: Props) {
   }[status.variant];
 
   const totalCategories = caseDocCategories?.categories.length ?? 0;
-  const availableCategories = caseDocCategories?.categories.filter((category) => category.uploaded || category.covered_by_case_workpaper).length ?? 0;
+  const availableCategories = caseDocCategories?.categories.filter(hasUsableCoverage).length ?? 0;
   const missingCategories = Math.max(totalCategories - availableCategories, 0);
   const title = totalCategories > 0
     ? `已识别 ${availableCategories} 类，仍缺 ${missingCategories} 类；${events.length} 个材料事件`

@@ -21,6 +21,7 @@ from fastapi import HTTPException, UploadFile
 
 from ..auth.identity import Identity
 from ..graph.state import FileItem
+from ..services.ingest_file_metadata import normalize_ingest_file_item
 from ..services.minio_service import get_minio_service, resolve_minio_reference_url
 from ..settings import Settings
 from ...annual_audit.engagement_repository import get_engagement_profile
@@ -127,9 +128,17 @@ async def to_file_item(
       LangGraph state lean).
     """
     file_bytes = await upload.read()
-    file_name = upload.filename or "uploaded-file"
-    extension = Path(file_name).suffix.lower()
-    content_type = upload.content_type or ""
+    file_metadata = normalize_ingest_file_item(
+        {
+            "name": upload.filename or "uploaded-file",
+            "extension": Path(upload.filename or "uploaded-file").suffix.lower(),
+            "content_type": upload.content_type or "",
+        },
+        file_bytes=file_bytes,
+    )
+    file_name = str(file_metadata["name"])
+    extension = str(file_metadata["extension"])
+    content_type = str(file_metadata.get("content_type") or "")
     file_size_mb = len(file_bytes) / (1024 * 1024)
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
@@ -138,7 +147,7 @@ async def to_file_item(
             status_code=400,
             detail=f"文件 {file_name} 超过 {settings.max_upload_file_mb}MB 限制。",
         )
-    file_type = _classify_upload_type(extension, content_type)
+    file_type = str(file_metadata.get("type") or _classify_upload_type(extension, content_type))
     if file_type == "image" and file_size_mb > settings.max_image_file_mb:
         raise HTTPException(
             status_code=400,

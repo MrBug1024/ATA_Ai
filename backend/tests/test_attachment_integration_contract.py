@@ -245,7 +245,15 @@ def test_report_graph_keeps_internal_derived_conversation_binding(monkeypatch) -
                 "年度审计当前没有已激活模板",
                 status_code=409,
             ),
-            "年度审计当前没有已激活模板",
+            "当前没有可用于生成附件的已激活模板",
+        ),
+        (
+            job_service.AttachmentJobError(
+                "FINANCIAL_STATEMENTS_BLOCKED",
+                "internal message must not be displayed",
+                status_code=409,
+            ),
+            "用于生成附件的财务报表及附注尚未满足条件",
         ),
         (RuntimeError("database password must not leak"), "附件任务服务当前不可用"),
     ],
@@ -274,9 +282,12 @@ def test_report_graph_explains_automatic_attachment_acceptance_failure(
     )
 
     assert result["attachment_job"] == {}
-    assert "附件生成未受理" in result["agent_output"]
+    assert "附件暂未生成" in result["agent_output"]
     assert expected_reason in result["agent_output"]
     assert "重新生成附件" in result["agent_output"]
+    if isinstance(failure, job_service.AttachmentJobError):
+        assert failure.code not in result["agent_output"]
+        assert str(failure) not in result["agent_output"]
     assert "database password must not leak" not in result["agent_output"]
 
 
@@ -298,5 +309,5 @@ def test_report_graph_never_presents_a_missing_job_reference_as_accepted(
     )
 
     assert result["attachment_job"] == {}
-    assert "附件生成未受理" in result["agent_output"]
+    assert "附件生成未受理" not in result["agent_output"]
     assert "附件任务服务当前不可用" in result["agent_output"]

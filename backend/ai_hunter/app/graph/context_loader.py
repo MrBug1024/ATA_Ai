@@ -365,13 +365,12 @@ def resolve_kg_trace_summary(
         for evidence in evidences[:2]:
             if not isinstance(evidence, dict):
                 continue
-            page_no = int(evidence.get("page_no", 0) or 0)
-            file_id = int(evidence.get("file_id", 0) or 0)
-            chunk_id = str(evidence.get("chunk_id", "") or "")
             quote_text = str(evidence.get("quote_text", "") or "").strip().replace("\n", " ")
             quote_text = quote_text[:90]
             lines.append(
-                f"   - 证据锚点: file_id={file_id} page={page_no} chunk={chunk_id} | {quote_text}"
+                f"   - 证据摘录: {quote_text}"
+                if quote_text
+                else "   - 证据摘录: 已关联可回溯证据。"
             )
     return "\n".join(lines)
 

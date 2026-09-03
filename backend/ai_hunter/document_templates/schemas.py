@@ -165,33 +165,8 @@ class RevisionRequest(StrictRequest):
     revision: int = Field(gt=0)
 
 
-class TemplatePreviewConfirmation(StrictRequest):
-    file_id: UUID
-    preview_sha256: str
-
-    @field_validator("preview_sha256")
-    @classmethod
-    def validate_preview_sha256(cls, value: str) -> str:
-        normalized = str(value or "").strip().lower()
-        if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
-            raise ValueError("preview_sha256 must contain 64 lowercase hex characters")
-        return normalized
-
-
 class TemplateActivationRequest(RevisionRequest):
     active: bool
-    preview_confirmations: list[TemplatePreviewConfirmation] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_preview_confirmations(self):
-        if self.active and not self.preview_confirmations:
-            raise ValueError("preview_confirmations are required when activating a template")
-        if not self.active and self.preview_confirmations:
-            raise ValueError("preview_confirmations are only accepted when activating a template")
-        file_ids = [item.file_id for item in self.preview_confirmations]
-        if len(file_ids) != len(set(file_ids)):
-            raise ValueError("preview_confirmations must contain unique file_id values")
-        return self
 
 
 class TemplateFileUpdateRequest(StrictRequest):
@@ -324,7 +299,6 @@ __all__ = [
     "TemplateDeleteResponse",
     "TemplateFileResponse",
     "TemplateFileUpdateRequest",
-    "TemplatePreviewConfirmation",
     "TemplateVersionCloneRequest",
     "TemplateVersionCreateRequest",
     "TemplateVersionListResponse",

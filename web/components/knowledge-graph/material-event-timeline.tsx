@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { CaseMaterialEventItem } from "@/lib/types/doc-categories";
 import { useRetryUploadBatch } from "@/lib/hooks/use-retry-upload-batch";
+import { useUploadBatch } from "@/lib/hooks/use-upload-batch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -117,6 +118,91 @@ function RetryFailedBatch({
   );
 }
 
+function RetryMissingEvidenceBatch({
+  uploadBatchId,
+  batchName,
+  onRetried,
+}: {
+  uploadBatchId: string;
+  batchName: string;
+  onRetried?: () => void | Promise<unknown>;
+}) {
+  const [checking, setChecking] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const { batch, isLoading, error: batchError } = useUploadBatch(
+    checking ? uploadBatchId : null
+  );
+  const { retry, isMutating, error: retryError } = useRetryUploadBatch(uploadBatchId);
+  const retryable = Boolean(batch?.persistence_checks.retryable_missing_evidence);
+
+  const handleRetry = async () => {
+    try {
+      const result = await retry("auto");
+      if (result.accepted === false) {
+        throw new Error("后端未接受本次重新解析");
+      }
+      setSubmitted(true);
+      void Promise.resolve(onRetried?.()).catch(() => undefined);
+      toast.success("原件已重新提交解析");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "原件重新解析失败");
+    }
+  };
+
+  if (!checking) {
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        onClick={() => setChecking(true)}
+        aria-label={`检查解析完整性 ${batchName}`}
+      >
+        检查解析完整性
+      </Button>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        <LoaderCircle className="size-3 animate-spin" />核查中
+      </span>
+    );
+  }
+
+  if (retryable) {
+    return (
+      <div className="flex flex-col items-end gap-1">
+        <p className="max-w-64 text-right text-xs text-amber-700">
+          已完成，但未留下可用证据块。
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={isMutating || submitted}
+          onClick={() => void handleRetry()}
+          aria-label={`重新解析原件 ${batchName}`}
+        >
+          {isMutating ? (
+            <LoaderCircle data-icon="inline-start" className="animate-spin" />
+          ) : (
+            <RefreshCw data-icon="inline-start" />
+          )}
+          {isMutating ? "提交中" : submitted ? "已提交" : "重新解析原件"}
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <p className="max-w-64 text-right text-xs text-muted-foreground">
+      {batchError || retryError || "原件证据完整，无需重新解析。"}
+    </p>
+  );
+}
+
 export function MaterialEventTimeline({
   events,
   isLoading,
@@ -158,6 +244,12 @@ export function MaterialEventTimeline({
         const isErrorExpanded = expandedError === event.material_event_id;
         const duplicateProjectionRepaired = hasDuplicateProjectionRepair(event);
         const blockedRetryReason = retryBlockedReason(event);
+        const canCheckEvidence =
+          event.status === "completed" &&
+          event.file_count > 0 &&
+          event.records_inserted === 0 &&
+          !duplicateProjectionRepaired &&
+          event.stage !== "raw_preserved_pending_review";
 
         return (
           <div key={event.material_event_id} className="relative flex gap-4 pb-6">
@@ -262,6 +354,16 @@ export function MaterialEventTimeline({
                       <AlertDescription>{event.error_message}</AlertDescription>
                     </div>
                   </Alert>
+                )}
+
+                {canCheckEvidence && (
+                  <div className="flex justify-end">
+                    <RetryMissingEvidenceBatch
+                      uploadBatchId={event.upload_batch_id}
+                      batchName={event.batch_name}
+                      onRetried={onRetried}
+                    />
+                  </div>
                 )}
               </CardContent>
             </Card>

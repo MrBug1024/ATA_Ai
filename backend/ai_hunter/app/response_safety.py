@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .user_facing import humanize_audit_text
+
 
 _MACHINE_SUMMARY_RE = re.compile(
     r"^\s*intent\s*=\s*[^|\n]+"
@@ -63,7 +65,7 @@ def sanitize_user_response(value: Any, *, fallback: str) -> str:
     text = value.strip() if isinstance(value, str) else ""
     if not text or is_internal_debug_response(text):
         return fallback
-    return text
+    return humanize_audit_text(text) or fallback
 
 
 def filter_stream_debug_text(value: Any, state: dict[str, Any]) -> str:

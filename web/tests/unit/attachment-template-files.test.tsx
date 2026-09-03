@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   businessTypesQuery: vi.fn(),
   validateVersion: vi.fn(),
   setActivation: vi.fn(),
+  deleteVersion: vi.fn(),
   uploadFile: vi.fn(),
 }));
 
@@ -29,6 +30,7 @@ vi.mock("@/lib/hooks/use-attachment-templates", () => ({
   useCreateAttachmentTemplateVersion: () => ({ createVersion: vi.fn(), isMutating: false, error: null, reset: vi.fn() }),
   useUpdateAttachmentTemplateVersion: () => ({ updateVersion: vi.fn(), isMutating: false, error: null, reset: vi.fn() }),
   useCloneAttachmentTemplateVersion: () => ({ cloneVersion: vi.fn(), isMutating: false, error: null, reset: vi.fn() }),
+  useDeleteAttachmentTemplateVersion: () => ({ deleteVersion: mocks.deleteVersion, isMutating: false, error: null, reset: vi.fn() }),
   useCompileAttachmentTemplateFile: () => ({ compileFile: mocks.compileFile, isMutating: false, error: null, reset: mocks.reset }),
   useDeleteAttachmentTemplateFile: () => ({ deleteFile: vi.fn(), isMutating: false, error: null, reset: vi.fn() }),
   useInspectAttachmentTemplateFile: () => ({ inspectFile: vi.fn(), isMutating: false, error: null, reset: vi.fn() }),
@@ -100,6 +102,7 @@ describe("Attachment template binding options", () => {
     mocks.compileFile.mockResolvedValue({});
     mocks.validateVersion.mockResolvedValue({});
     mocks.setActivation.mockResolvedValue({});
+    mocks.deleteVersion.mockResolvedValue(undefined);
     mocks.businessTypesQuery.mockReturnValue({
       businessTypes: [],
       isLoading: false,
@@ -522,11 +525,54 @@ describe("Attachment template binding options", () => {
     });
 
     render(<AttachmentTemplateFiles versionId="version-1" />);
-    expect(screen.getByText("激活门禁未通过")).toBeTruthy();
+    expect(screen.getByText("模板内容校验未通过")).toBeTruthy();
     expect(screen.getByText("缺少公司名称槽位")).toBeTruthy();
-    expect(screen.getByText("警告：字体将回退")).toBeTruthy();
+    expect(screen.getByText("提示：字体将回退")).toBeTruthy();
     expect(screen.getByText(/校验时间：/)).toBeTruthy();
-    expect(screen.queryByText("全部文件、槽位与预览检查已完成。")).toBeNull();
+    expect(screen.queryByText("模板文件、槽位映射与编译结果已通过校验。")).toBeNull();
+  });
+
+  it("allows a ready version to activate when optional previews are absent", async () => {
+    const { AttachmentTemplateFiles } = await import("@/components/admin/attachment-template-files");
+    const file = {
+      ...templateFile(".docx", {}),
+      status: "ready" as const,
+      preview_available: false,
+      preview_sha256: undefined,
+    };
+    mocks.versionQuery.mockReturnValue({
+      version: templateVersion({
+        status: "ready",
+        file_count: 1,
+        ready_file_count: 1,
+        files: [file],
+        validation_report: {
+          passed: true,
+          validated_at: "2026-08-31T10:00:00Z",
+          blockers: [],
+          warnings: [],
+        },
+      }),
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mocks.businessTypesQuery.mockReturnValue({
+      businessTypes: [BUSINESS_TYPE],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    render(<AttachmentTemplateFiles versionId="version-1" />);
+
+    expect(screen.getByText("模板内容校验已通过")).toBeTruthy();
+    expect(screen.getByText("PDF 预览暂不可用，只影响在线查看，不影响模板激活或交付。")).toBeTruthy();
+    expect(screen.queryByText(/尚未生成冻结预览/)).toBeNull();
+    expect((screen.getByRole("button", { name: "激活版本" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "激活版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并激活" }));
+    await waitFor(() => expect(mocks.setActivation).toHaveBeenCalledWith({ active: true, revision: 9 }));
   });
 
   it("allows a retired version to be revalidated and reactivated after a current passing validation", async () => {
@@ -565,15 +611,11 @@ describe("Attachment template binding options", () => {
     render(<AttachmentTemplateFiles versionId="version-1" />);
     fireEvent.click(screen.getByRole("button", { name: "重新校验" }));
     fireEvent.click(screen.getByRole("button", { name: "重新激活" }));
-    fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "确认并激活" }));
     await waitFor(() => expect(mocks.validateVersion).toHaveBeenCalledWith(9));
     expect(mocks.setActivation).toHaveBeenCalledWith({
       active: true,
       revision: 9,
-      preview_confirmations: [
-        { file_id: file.id, preview_sha256: "b".repeat(64) },
-      ],
     });
   });
 

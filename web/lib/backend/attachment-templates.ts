@@ -262,11 +262,6 @@ export interface AttachmentTemplateVersionDetail
   manifest?: Record<string, unknown> | null;
 }
 
-export interface AttachmentTemplatePreviewConfirmation {
-  file_id: string;
-  preview_sha256: string;
-}
-
 export interface AttachmentTemplateVersionListResponse {
   items: AttachmentTemplateVersionSummary[];
   total: number;
@@ -520,7 +515,6 @@ export function setAttachmentTemplateVersionActivation(
   request: {
     active: boolean;
     revision: number;
-    preview_confirmations?: AttachmentTemplatePreviewConfirmation[];
   }
 ): Promise<AttachmentTemplateVersionDetail> {
   return putJson<AttachmentTemplateVersionDetail>(

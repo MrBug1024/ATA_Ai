@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from ai_hunter.app.settings import Settings, get_settings
+from ai_hunter.app.user_facing import audit_dataset_label, display_file_name
 
 from .analysis_service import (
     ANALYSIS_RULES_VERSION,
@@ -495,12 +496,12 @@ def _available_lines(readiness: dict[str, Any]) -> list[str]:
         return ["- 当前尚无可用于确定性年审分析的结构化数据。"]
     lines: list[str] = []
     for item in available:
-        source_files = [str(name) for name in item.get("source_files") or [] if str(name)]
+        source_files = [display_file_name(name) for name in item.get("source_files") or [] if str(name)]
         sources = f"；来源：{'、'.join(source_files[:5])}" if source_files else ""
         limitation = str(item.get("limitation") or "").strip()
         limitation_text = f"；限制：{limitation}" if limitation else ""
         lines.append(
-            f"- {item.get('name') or item.get('code')}：{int(item.get('row_count') or 0)} 行；"
+            f"- {audit_dataset_label(item.get('name') or item.get('code'), fallback='已导入资料')}：{int(item.get('row_count') or 0)} 行；"
             f"{item.get('quality_label') or '来源待核实'}{sources}{limitation_text}"
         )
     return lines
@@ -511,9 +512,9 @@ def _material_source_lines(material_sources: list[dict[str, Any]]) -> list[str]:
         return ["- 当前项目尚无已落库的证据文件。"]
     lines: list[str] = []
     for source in material_sources[:20]:
-        file_name = str(source.get("file_name") or "未命名文件")
+        file_name = display_file_name(source.get("file_name"))
         file_type = str(source.get("file_type") or "").lower().lstrip(".")
-        file_suffix = str(source.get("file_name") or "").lower().rsplit(".", 1)[-1]
+        file_suffix = file_name.lower().rsplit(".", 1)[-1]
         page_count = int(source.get("page_count") or 0)
         chunk_count = int(source.get("chunk_count") or 0)
         records_inserted = int(source.get("records_inserted") or 0)

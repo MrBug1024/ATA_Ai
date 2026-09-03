@@ -593,8 +593,39 @@ class DocumentTemplateRepository:
                 if not row:
                     raise TemplateNotFoundError("template version was not found")
                 self._check_revision(row, revision)
-                if row["status"] != "draft" or family.get("active_version_id") == row["id"]:
-                    raise TemplateImmutableError("only an unused draft template version can be deleted")
+                if (
+                    row["status"] not in {"draft", "retired"}
+                    or family.get("active_version_id") == row["id"]
+                ):
+                    raise TemplateImmutableError(
+                        "only inactive draft or retired template versions can be deleted"
+                    )
+                cursor.execute(
+                    """
+                    SELECT
+                      EXISTS (
+                        SELECT 1
+                        FROM public.annual_attachment_generation_job
+                        WHERE template_version_id = %s
+                      )
+                      OR EXISTS (
+                        SELECT 1
+                        FROM public.annual_generated_artifact
+                        WHERE template_version_id = %s
+                           OR template_file_id IN (
+                             SELECT id::text
+                             FROM public.document_template_file
+                             WHERE template_version_id = %s
+                           )
+                      ) AS has_attachment_history
+                    """,
+                    (str(row["id"]), str(row["id"]), str(row["id"])),
+                )
+                history = dict(cursor.fetchone() or {})
+                if bool(history.get("has_attachment_history")):
+                    raise TemplateImmutableError(
+                        "该模板版本已用于生成附件，为保留审计追溯无法删除"
+                    )
                 cursor.execute(
                     """
                     SELECT id, source_object_ref, source_sha256,
@@ -1162,9 +1193,7 @@ class DocumentTemplateRepository:
         revision: int,
         active: bool,
         actor: str,
-        visual_confirmation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        confirmation = dict(visual_confirmation or {})
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -1186,16 +1215,6 @@ class DocumentTemplateRepository:
                 self._check_revision(target, revision)
                 current_active_id = family.get("active_version_id")
                 if active:
-                    confirmed_files = list(confirmation.get("files") or [])
-                    if (
-                        confirmation.get("confirmation_version")
-                        != "template-preview-confirmation-v1"
-                        or confirmation.get("confirmed_by") != actor
-                        or len(confirmed_files) != int(target.get("file_count") or 0)
-                    ):
-                        raise TemplateValidationStateError(
-                            "current template previews require explicit administrator confirmation"
-                        )
                     if current_active_id == target["id"] and target["status"] == "active":
                         return self.get_version(version_id)
                     report = _loads(target.get("validation_report_json"), {})
@@ -1290,7 +1309,6 @@ class DocumentTemplateRepository:
                     before={"active_version_id": str(current_active_id or "")},
                     after={
                         "active_version_id": str(target["id"]) if active else "",
-                        **({"visual_confirmation": confirmation} if active else {}),
                     },
                 )
         return self.get_version(version_id)

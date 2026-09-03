@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   refreshBusinessTypes: vi.fn(),
   refreshVersions: vi.fn(),
   setActivation: vi.fn(),
+  deleteVersion: vi.fn(),
   routerPush: vi.fn(),
 }));
 
@@ -30,7 +31,7 @@ vi.mock("@/lib/hooks/use-attachment-templates", () => ({
     cloneVersion: vi.fn(), isMutating: false, error: null, reset: vi.fn(),
   }),
   useDeleteAttachmentTemplateVersion: () => ({
-    deleteVersion: vi.fn(), isMutating: false, error: null, reset: vi.fn(),
+    deleteVersion: mocks.deleteVersion, isMutating: false, error: null, reset: vi.fn(),
   }),
   useSetAttachmentTemplateVersionActivation: () => ({
     setActivation: mocks.setActivation, isMutating: false, error: null, reset: vi.fn(),
@@ -103,6 +104,7 @@ describe("AttachmentTemplateVersionList", () => {
     mocks.businessTypesQuery.mockReturnValue(businessQuery());
     mocks.versionsQuery.mockReturnValue(versionsQuery());
     mocks.setActivation.mockResolvedValue({});
+    mocks.deleteVersion.mockResolvedValue(undefined);
     mocks.refreshBusinessTypes.mockResolvedValue(undefined);
     mocks.refreshVersions.mockResolvedValue(undefined);
   });
@@ -139,6 +141,30 @@ describe("AttachmentTemplateVersionList", () => {
     expect(screen.queryByRole("button", { name: /重新激活/ })).toBeNull();
     expect(screen.getByRole("link", { name: /查看 年度审计模板/ })).toBeTruthy();
     expect(mocks.setActivation).not.toHaveBeenCalled();
+  });
+
+  it("confirms and deletes an unused retired version", async () => {
+    mocks.versionsQuery.mockReturnValue(versionsQuery({
+      versions: [version({ status: "retired" })],
+      total: 1,
+    }));
+
+    render(<AttachmentTemplateVersionList />);
+    fireEvent.click(screen.getByRole("button", { name: "删除 年度审计模板" }));
+    expect(screen.getByText("删除已停用模板版本")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(mocks.deleteVersion).toHaveBeenCalledWith(7));
+  });
+
+  it("does not offer deletion for an active version", () => {
+    mocks.versionsQuery.mockReturnValue(versionsQuery({
+      versions: [version({ status: "active", active: true })],
+      total: 1,
+    }));
+
+    render(<AttachmentTemplateVersionList />);
+    expect(screen.queryByRole("button", { name: "删除 年度审计模板" })).toBeNull();
   });
 
   it("clamps the current page when the filtered total shrinks", async () => {

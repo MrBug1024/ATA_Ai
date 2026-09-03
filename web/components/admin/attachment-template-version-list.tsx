@@ -73,7 +73,7 @@ const PAGE_SIZE = 25;
 const STATUS_LABELS: Record<AttachmentTemplateVersionStatus, string> = {
   draft: "草稿",
   validating: "校验中",
-  ready: "可激活",
+  ready: "待激活",
   active: "已激活",
   retired: "已停用",
   archived: "已归档",
@@ -109,6 +109,7 @@ function VersionActions({
     cloneMutation.isMutating ||
     deleteMutation.isMutating ||
     activationMutation.isMutating;
+  const canDelete = version.status === "draft" || version.status === "retired";
 
   async function clone() {
     try {
@@ -123,10 +124,10 @@ function VersionActions({
   async function remove() {
     try {
       await deleteMutation.deleteVersion(version.revision);
-      toast.success("模板草稿已删除");
+      toast.success("模板版本已删除");
       setDeleteOpen(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "删除模板草稿失败");
+      toast.error(error instanceof Error ? error.message : "删除模板版本失败");
     }
   }
 
@@ -165,8 +166,8 @@ function VersionActions({
           <span className="sr-only">停用 {version.name}</span>
         </Button>
       )}
-      {version.status === "draft" && (
-        <Button type="button" size="icon-sm" variant="ghost" title="删除草稿" onClick={() => setDeleteOpen(true)} disabled={busy}>
+      {canDelete && (
+        <Button type="button" size="icon-sm" variant="ghost" title="删除版本" onClick={() => setDeleteOpen(true)} disabled={busy}>
           <Trash2 />
           <span className="sr-only">删除 {version.name}</span>
         </Button>
@@ -175,16 +176,16 @@ function VersionActions({
       <Dialog open={deleteOpen} onOpenChange={(open) => !busy && setDeleteOpen(open)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>删除模板草稿</DialogTitle>
+            <DialogTitle>{version.status === "retired" ? "删除已停用模板版本" : "删除模板草稿"}</DialogTitle>
             <DialogDescription>
-              将删除“{version.name}”及其未发布文件。已激活、已停用或被任务使用的版本无法物理删除。
+              将永久删除“{version.name}”及其模板文件。已激活版本或已有生成交付记录的版本不可删除。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-2">
             <Button type="button" variant="outline" onClick={() => setDeleteOpen(false)} disabled={busy}>取消</Button>
             <Button type="button" variant="destructive" onClick={() => void remove()} disabled={busy}>
               {deleteMutation.isMutating && <Loader2 className="animate-spin" data-icon="inline-start" />}
-              删除草稿
+              确认删除
             </Button>
           </DialogFooter>
         </DialogContent>

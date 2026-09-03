@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   retry: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  batch: null as { persistence_checks: { retryable_missing_evidence?: boolean } } | null,
 }));
 
 vi.mock("@/lib/hooks/use-retry-upload-batch", () => ({
@@ -16,6 +17,15 @@ vi.mock("@/lib/hooks/use-retry-upload-batch", () => ({
     error: null,
     retry: mocks.retry,
     reset: vi.fn(),
+  }),
+}));
+
+vi.mock("@/lib/hooks/use-upload-batch", () => ({
+  useUploadBatch: () => ({
+    batch: mocks.batch,
+    isLoading: false,
+    error: null,
+    refresh: vi.fn(),
   }),
 }));
 
@@ -57,6 +67,7 @@ const mockEvent: CaseMaterialEventItem = {
 describe("MaterialEventTimeline", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.batch = null;
     mocks.retry.mockResolvedValue({ accepted: true });
   });
 
@@ -207,5 +218,31 @@ describe("MaterialEventTimeline", () => {
         .disabled
     ).toBe(true);
     expect(screen.getByText("已提交")).toBeTruthy();
+  });
+
+  it("offers evidence remediation only after the backend identifies a false successful batch", async () => {
+    const { MaterialEventTimeline } = await import("@/components/knowledge-graph/material-event-timeline");
+    mocks.batch = { persistence_checks: { retryable_missing_evidence: true } };
+    const onRetried = vi.fn();
+    const zeroRecordEvent: CaseMaterialEventItem = {
+      ...mockEvent,
+      records_inserted: 0,
+      has_conclusion_changes: false,
+      reconciliation_item_count: 0,
+      add_item_count: 0,
+      override_item_count: 0,
+    };
+
+    render(<MaterialEventTimeline events={[zeroRecordEvent]} isLoading={false} onRetried={onRetried} />);
+
+    expect(screen.getByRole("button", { name: "检查解析完整性 第一批材料" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重新解析原件 第一批材料" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "检查解析完整性 第一批材料" }));
+
+    expect(await screen.findByText("已完成，但未留下可用证据块。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新解析原件 第一批材料" }));
+    await waitFor(() => expect(mocks.retry).toHaveBeenCalledWith("auto"));
+    expect(onRetried).toHaveBeenCalledOnce();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith("原件已重新提交解析");
   });
 });

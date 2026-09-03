@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pypdf import PdfWriter
 
 from ai_hunter.document_templates.compiler.models import sha256_bytes
 from ai_hunter.document_templates.repository import (
@@ -184,6 +186,14 @@ def _upload_markdown(service, repository) -> dict:
     )
 
 
+def _valid_pdf() -> bytes:
+    output = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(output)
+    return output.getvalue()
+
+
 def test_upload_compensates_storage_when_repository_rejects(settings) -> None:
     service, repository, storage = _service(settings)
     repository.fail_add = True
@@ -208,7 +218,7 @@ def test_compile_compensates_new_objects_on_revision_conflict(settings) -> None:
     assert "minio://templates/source/1" in storage.objects
 
 
-def test_validation_replays_current_compiler_and_records_ref_free_report(settings) -> None:
+def test_validation_allows_activation_when_optional_previews_are_unavailable(settings) -> None:
     service, repository, storage = _service(settings)
     uploaded = _upload_markdown(service, repository)
     compiled = service.compile_file(
@@ -223,22 +233,49 @@ def test_validation_replays_current_compiler_and_records_ref_free_report(setting
         actor="superadmin",
     )
     report = repository.validation_call["validation_report"]
+    assert compiled["preview_object_ref"] == ""
     assert report["passed"] is True
     assert report["files"][0]["passed"] is True
+    assert {item["code"] for item in report["warnings"]} >= {
+        "PREVIEW_MISSING",
+        "PREVIEW_RENDERER_UNAVAILABLE",
+    }
     assert report["renderer_image_digest"] == "renderer@sha256:test"
     assert "object_ref" not in str(report)
     assert validated["status"] == "ready"
     assert compiled["binding_manifest"]["binding_sha256"]
 
 
-def test_activation_rejects_validation_from_other_renderer_environment(settings) -> None:
+def test_validation_passes_with_frozen_and_current_previews(settings, monkeypatch) -> None:
     service, repository, _ = _service(settings)
-    file_id = uuid4()
-    repository.files[file_id] = {
-        "id": file_id,
-        "preview_object_ref": "minio://templates/preview/1",
-        "preview_sha256": "b" * 64,
-    }
+    preview = _valid_pdf()
+    monkeypatch.setattr(service, "_preview_bytes", lambda _record, _compiled: preview)
+    uploaded = _upload_markdown(service, repository)
+    compiled = service.compile_file(
+        uploaded["id"],
+        revision=uploaded["revision"],
+        binding_manifest=_manifest(),
+        actor="superadmin",
+    )
+
+    validated = service.validate_version(
+        repository.version_id,
+        revision=repository.version["revision"],
+        actor="superadmin",
+    )
+
+    report = repository.validation_call["validation_report"]
+    assert compiled["preview_object_ref"]
+    assert report["passed"] is True
+    assert report["files"][0]["passed"] is True
+    assert not {
+        item["code"] for item in report["blockers"]
+    } & {"PREVIEW_MISSING", "PREVIEW_RENDERER_REQUIRED"}
+    assert validated["status"] == "ready"
+
+
+def test_activation_does_not_require_preview_or_renderer_confirmation(settings) -> None:
+    service, repository, _ = _service(settings)
     repository.version.update(
         {
             "status": "ready",
@@ -252,68 +289,41 @@ def test_activation_rejects_validation_from_other_renderer_environment(settings)
             },
         }
     )
-    with pytest.raises(TemplateValidationStateError):
-        service.set_activation(
-            repository.version_id,
-            revision=3,
-            active=True,
-            actor="superadmin",
-            preview_confirmations=[
-                {"file_id": str(file_id), "preview_sha256": "b" * 64}
-            ],
-        )
-    assert repository.activation_call is None
-
-
-def test_activation_binds_exact_frozen_preview_confirmation(settings) -> None:
-    service, repository, _ = _service(settings)
-    file_id = uuid4()
-    repository.files[file_id] = {
-        "id": file_id,
-        "preview_object_ref": "minio://templates/preview/1",
-        "preview_sha256": "b" * 64,
+    service.set_activation(
+        repository.version_id,
+        revision=3,
+        active=True,
+        actor="superadmin",
+    )
+    assert repository.activation_call == {
+        "revision": 3,
+        "active": True,
+        "actor": "superadmin",
     }
+
+
+def test_activation_keeps_content_validation_as_the_gate(settings) -> None:
+    service, repository, _ = _service(settings)
     repository.version.update(
         {
             "status": "ready",
             "revision": 3,
             "content_sha256": "a" * 64,
             "validation_report": {
-                "passed": True,
+                "passed": False,
                 "content_sha256": "a" * 64,
-                "renderer_image_digest": "renderer@sha256:test",
-                "font_manifest_version": "fonts-v1",
             },
         }
     )
 
-    service.set_activation(
-        repository.version_id,
-        revision=3,
-        active=True,
-        actor="superadmin",
-        preview_confirmations=[
-            {"file_id": str(file_id), "preview_sha256": "b" * 64}
-        ],
-    )
-
-    confirmation = repository.activation_call["visual_confirmation"]
-    assert confirmation["confirmation_version"] == "template-preview-confirmation-v1"
-    assert confirmation["confirmed_by"] == "superadmin"
-    assert confirmation["files"] == [
-        {"file_id": str(file_id), "preview_sha256": "b" * 64}
-    ]
-
-    with pytest.raises(TemplateValidationStateError):
+    with pytest.raises(TemplateValidationStateError, match="content validation"):
         service.set_activation(
             repository.version_id,
             revision=3,
             active=True,
             actor="superadmin",
-            preview_confirmations=[
-                {"file_id": str(file_id), "preview_sha256": "c" * 64}
-            ],
         )
+    assert repository.activation_call is None
 
 
 def test_internal_active_snapshot_has_stable_ids_and_internal_refs(settings) -> None:
