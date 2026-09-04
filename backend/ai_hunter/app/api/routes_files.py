@@ -658,7 +658,8 @@ def _mark_retry_progress(
         " OCR、结构化解析与图谱摄入由后台异步执行，前端可使用"
         " `material_event_id` 和 `upload_batch_id` 轮询状态接口。"
         " 上传前必须先创建并绑定年审项目，不允许 current_case_id=0；"
-        "被审计单位由年审项目主数据确定。"
+        "被审计单位由年审项目主数据确定。资料类别可省略或传 auto，"
+        "系统会逐文件、逐工作表识别，无法识别的资料保留为待归类。"
     ),
     response_description=(
         "返回受理成功后的批次 ID、材料事件 ID 与状态查询路径。"
@@ -686,7 +687,7 @@ async def upload_and_ingest(
     ),
     doc_category: str = Form(
         "",
-        description="本批审计资料类别编码。同一批次只允许上传一种类别。",
+        description="可选手工分类覆盖；省略或传 auto 时逐文件、逐工作表自动识别。",
     ),
     batch_name: str = Form(
         "",
@@ -718,11 +719,7 @@ async def upload_and_ingest(
     if current_case_id <= 0:
         raise HTTPException(status_code=400, detail="上传前必须先创建并绑定有效年审项目")
     require_case_access(current_case_id, identity)
-    if not doc_category.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="缺少 doc_category；当前约定同一批次只允许上传一种审计资料类别。",
-        )
+    doc_category = str(doc_category or "").strip()
 
     operator_id = operator_id or identity.user_id
     operator_name = operator_name or identity.username
@@ -1919,13 +1916,6 @@ def _resolve_doc_category_validation(*, current_case_id: int, doc_category: str,
     from ai_hunter.annual_audit.document_repository import validate_doc_category
 
     settings = get_settings()
-    if not doc_category:
-        return {
-            "ok": False,
-            "suspected_mismatch": True,
-            "suspected_duplicate": False,
-            "message": "缺少 doc_category；当前约定同一批次只允许上传一种审计资料类别。",
-        }
     payload = {
         "case_id": current_case_id,
         "doc_category": doc_category,
@@ -2125,4 +2115,8 @@ def _is_unsupported_doc_category(validation_payload: dict) -> bool:
     if validation_payload.get("ok") is not False:
         return False
     message = str(validation_payload.get("message", "") or "")
-    return "未知卷宗类别" in message or "不支持的文档类型" in message
+    return (
+        "未知年审资料类别" in message
+        or "未知卷宗类别" in message
+        or "不支持的文档类型" in message
+    )

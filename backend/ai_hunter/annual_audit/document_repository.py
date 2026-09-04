@@ -22,13 +22,37 @@ _STRUCTURED_TABLES = {
 _FILE_HINTS = {
     "financial_statements": ("财务报表", "资产负债表", "利润表", "现金流量表", "附注"),
     "trial_balance": ("科目余额", "余额表", "trialbalance"),
-    "journal_entries": ("序时账", "总账", "明细账", "凭证", "journal"),
+    "journal_entries": ("序时账", "凭证分录", "记账凭证", "journal"),
+    "general_ledger": ("总账", "明细账", "辅助核算", "账套导出"),
     "receivables": ("应收", "往来", "receivable"),
     "bank_statements": ("银行流水", "对账单", "bankstatement"),
     "revenue_support": ("销售合同", "发票", "出库", "签收", "验收"),
     "confirmations": ("函证", "询证函", "回函"),
     "tax_materials": ("纳税", "增值税", "所得税", "税务"),
     "audit_workpapers": ("底稿", "审计程序", "复核"),
+    "engagement_acceptance": ("业务约定书", "承接评价", "业务承接", "续约", "独立性"),
+    "governance_minutes": ("股东会", "董事会", "监事会", "会议纪要", "重大决议"),
+    "accounts_payable": ("应付账款", "应付明细", "供应商往来", "采购往来"),
+    "purchase_support": ("采购合同", "采购订单", "采购发票", "入库单", "付款申请"),
+    "inventory_records": ("收发存", "存货台账", "存货明细", "库龄", "跌价准备"),
+    "inventory_count": ("盘点表", "盘点计划", "监盘", "抽盘", "盘点差异"),
+    "payroll_hr": ("员工花名册", "工资表", "薪酬", "社保", "公积金"),
+    "fixed_assets": ("固定资产", "在建工程", "无形资产", "折旧", "摊销"),
+    "asset_rights": ("产权证", "房产证", "土地证", "权属", "抵押", "质押"),
+    "related_parties": ("关联方", "关联交易"),
+    "legal_contingencies": ("诉讼", "仲裁", "律师函", "或有事项", "行政处罚"),
+    "subsequent_events": ("期后事项", "资产负债表日后"),
+    "going_concern": ("持续经营", "现金流预测", "债务契约", "融资安排"),
+    "adjustments": ("审计调整", "调整分录", "错报汇总", "未更正错报"),
+    "management_representation": ("管理层声明", "报表批准", "授权签署"),
+}
+
+_STRUCTURED_DATASET_CATEGORIES = {
+    "account_balance": "trial_balance",
+    "journal_entry": "journal_entries",
+    "receivable_item": "receivables",
+    "bank_transaction": "bank_statements",
+    "audit_workpaper_pack": "audit_workpapers",
 }
 
 
@@ -80,6 +104,7 @@ def get_case_doc_categories(
             WITH linked_files AS (
                 SELECT
                     link.category_code,
+                    link.match_source,
                     sf.id AS file_id,
                     sf.updated_at,
                     COALESCE(chunk_counts.chunk_count, 0) AS chunk_count
@@ -99,6 +124,7 @@ def get_case_doc_categories(
                     category_code,
                     COUNT(*) AS file_count,
                     COUNT(*) FILTER (WHERE chunk_count > 0) AS usable_file_count,
+                    COUNT(*) FILTER (WHERE match_source = 'auto_fallback') AS needs_review_file_count,
                     COALESCE(SUM(chunk_count), 0) AS chunk_count,
                     MAX(updated_at) AS last_uploaded_at
                 FROM linked_files
@@ -117,6 +143,7 @@ def get_case_doc_categories(
                    c.code, c.name,
                    COALESCE(files.file_count, 0) AS file_count,
                    COALESCE(files.usable_file_count, 0) AS usable_file_count,
+                   COALESCE(files.needs_review_file_count, 0) AS needs_review_file_count,
                    COALESCE(files.chunk_count, 0) AS chunk_count,
                    COALESCE(events.failed_event_count, 0) AS failed_event_count,
                    COALESCE(events.pending_event_count, 0) AS pending_event_count,
@@ -136,6 +163,7 @@ def get_case_doc_categories(
         file_count = int(row["file_count"] or 0)
         record_count = int(record_counts.get(code, 0))
         usable_file_count = int(row["usable_file_count"] or 0)
+        needs_review_file_count = int(row.get("needs_review_file_count", 0) or 0)
         chunk_count = int(row["chunk_count"] or 0)
         failed_event_count = int(row["failed_event_count"] or 0)
         pending_event_count = int(row["pending_event_count"] or 0)
@@ -144,8 +172,20 @@ def get_case_doc_categories(
         # File/category links are persisted before parsing so failed uploads stay retryable.
         has_structured_records = record_count > 0
         has_parsed_material = usable_file_count > 0
-        uploaded = has_structured_records or has_parsed_material or covered_by_case_workpaper
-        if has_structured_records:
+        only_unclassified = (
+            code == "other"
+            and file_count > 0
+            and needs_review_file_count >= file_count
+            and not has_structured_records
+            and not covered_by_case_workpaper
+        )
+        uploaded = (
+            has_structured_records or has_parsed_material or covered_by_case_workpaper
+        ) and not only_unclassified
+        if only_unclassified:
+            coverage_basis = "unclassified"
+            coverage_status = "needs_review"
+        elif has_structured_records:
             coverage_basis = "structured_records"
             coverage_status = "ready"
         elif has_parsed_material:
@@ -180,6 +220,7 @@ def get_case_doc_categories(
                 "file_count": file_count,
                 "usable_file_count": usable_file_count,
                 "raw_only_file_count": max(file_count - usable_file_count, 0),
+                "needs_review_file_count": needs_review_file_count,
                 "chunk_count": chunk_count,
                 "record_count": record_count,
                 "failed_event_count": failed_event_count,
@@ -200,10 +241,76 @@ def get_case_doc_categories(
 
 def _hinted_category(file_name: str) -> str | None:
     normalized = Path(file_name).name.lower().replace(" ", "")
+    matches: list[tuple[int, str]] = []
     for code, hints in _FILE_HINTS.items():
-        if any(hint.lower().replace(" ", "") in normalized for hint in hints):
-            return code
-    return None
+        for hint in hints:
+            normalized_hint = hint.lower().replace(" ", "")
+            if normalized_hint in normalized:
+                matches.append((len(normalized_hint), code))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def classify_uploaded_file_categories(
+    *,
+    file_names: list[str],
+    annual_import_summary: dict[str, Any] | None = None,
+    manual_category: str = "",
+) -> list[dict[str, Any]]:
+    """Resolve one or more durable category links for every uploaded file.
+
+    A manual category is an explicit override for the whole batch.  In auto
+    mode, supported worksheets win over filename hints; an unrecognized file
+    is retained under ``other`` with a low-confidence review marker.
+    """
+
+    normalized_manual = str(manual_category or "").strip()
+    if normalized_manual.lower() == "auto":
+        normalized_manual = ""
+
+    imported_by_file: dict[str, set[str]] = {}
+    for item in (annual_import_summary or {}).get("imported") or []:
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file_name") or "").strip()
+        category = _STRUCTURED_DATASET_CATEGORIES.get(str(item.get("dataset") or ""))
+        if file_name and category:
+            imported_by_file.setdefault(_file_name_key(file_name), set()).add(category)
+
+    classifications: list[dict[str, Any]] = []
+    for file_name in file_names:
+        normalized_name = str(file_name or "").strip()
+        if not normalized_name:
+            continue
+        if normalized_manual:
+            choices = [(normalized_manual, "manual", 1.0, False)]
+        else:
+            detected = sorted(imported_by_file.get(_file_name_key(normalized_name), set()))
+            if detected:
+                choices = [
+                    (category, "structured_schema", 0.99, False)
+                    for category in detected
+                ]
+            elif hinted := _hinted_category(normalized_name):
+                choices = [(hinted, "filename_hint", 0.75, False)]
+            else:
+                choices = [("other", "auto_fallback", 0.1, True)]
+        classifications.extend(
+            {
+                "file_name": normalized_name,
+                "category_code": category,
+                "match_source": match_source,
+                "confidence": confidence,
+                "needs_review": needs_review,
+            }
+            for category, match_source, confidence, needs_review in choices
+        )
+    return classifications
+
+
+def _file_name_key(file_name: str) -> str:
+    return Path(str(file_name or "")).name.strip().casefold()
 
 
 def validate_doc_category(
@@ -216,21 +323,24 @@ def validate_doc_category(
     if engagement_id > 0:
         get_engagement(engagement_id, settings=resolved)
     category = str(payload.get("doc_category") or "").strip()
+    auto_mode = not category or category.lower() == "auto"
     file_names = [str(item).strip() for item in payload.get("file_names") or [] if str(item).strip()]
     with postgres_connection(resolved) as connection:
-        category_row = connection.execute(
-            "SELECT code, name FROM public.doc_category_catalog WHERE code = %s AND enabled = TRUE",
-            (category,),
-        ).fetchone()
-        if not category_row:
-            return {
-                "ok": False,
-                "suspected_mismatch": True,
-                "suspected_duplicate": False,
-                "duplicate_files": [],
-                "suspected_mismatch_files": file_names,
-                "message": f"未知年审资料类别：{category}",
-            }
+        category_row = None
+        if not auto_mode:
+            category_row = connection.execute(
+                "SELECT code, name FROM public.doc_category_catalog WHERE code = %s AND enabled = TRUE",
+                (category,),
+            ).fetchone()
+            if not category_row:
+                return {
+                    "ok": False,
+                    "suspected_mismatch": True,
+                    "suspected_duplicate": False,
+                    "duplicate_files": [],
+                    "suspected_mismatch_files": file_names,
+                    "message": f"未知年审资料类别：{category}",
+                }
         duplicate_files: list[str] = []
         if engagement_id > 0 and file_names:
             duplicate_rows = connection.execute(
@@ -242,10 +352,10 @@ def validate_doc_category(
                 (engagement_id, file_names),
             ).fetchall()
             duplicate_files = [str(row["file_name"]) for row in duplicate_rows]
-    mismatch_files = [
+    mismatch_files = [] if auto_mode else [
         name
         for name in file_names
-        if (hinted := _hinted_category(name)) is not None and hinted != category
+            if (hinted := _hinted_category(name)) is not None and hinted != category
     ]
     mismatch = bool(mismatch_files)
     return {
@@ -258,9 +368,18 @@ def validate_doc_category(
         "message": (
             f"部分文件名更像其他年审资料类别：{', '.join(mismatch_files)}"
             if mismatch
-            else f"已按“{category_row['name']}”完成独立年审资料预校验。"
+            else (
+                "将按文件和工作表自动识别资料类别；无法识别的资料会保留为待归类，不会被拒绝。"
+                if auto_mode
+                else f"已按“{category_row['name']}”完成独立年审资料预校验。"
+            )
         ),
     }
 
 
-__all__ = ["get_case_doc_categories", "list_doc_categories", "validate_doc_category"]
+__all__ = [
+    "classify_uploaded_file_categories",
+    "get_case_doc_categories",
+    "list_doc_categories",
+    "validate_doc_category",
+]

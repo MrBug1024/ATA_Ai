@@ -155,6 +155,8 @@ class AuditGraphState(TypedDict, total=False):
     parse_summary: str
     categories_found: list[str]
     recognized_categories: list[str]
+    file_classifications: list[dict[str, Any]]
+    unclassified_files: list[str]
     records_inserted: int
     parse_document_result_ref: str
     parse_document_result: dict[str, Any] | ParseDocumentResultModel

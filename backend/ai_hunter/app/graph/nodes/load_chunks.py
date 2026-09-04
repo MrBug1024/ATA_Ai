@@ -114,11 +114,31 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
 
     inserted_files = kg_service.insert_source_files(source_file_rows)
     file_id_map = {row["file_sha256"]: int(row["id"]) for row in inserted_files}
-    category_rows = _persist_doc_category_relations(
+    category_rows, file_classifications = _persist_doc_category_relations(
         kg_service=kg_service,
         state=state,
         case_id=case_id,
         inserted_files=inserted_files,
+    )
+    assigned_categories = _unique_strings(
+        [str(item.get("category_code") or "") for item in file_classifications]
+    )
+    recognized_categories = _unique_strings(
+        [
+            *list(state.get("recognized_categories") or []),
+            *[
+                str(item.get("category_code") or "")
+                for item in file_classifications
+                if not item.get("needs_review")
+            ],
+        ]
+    )
+    unclassified_files = _unique_strings(
+        [
+            str(item.get("file_name") or "")
+            for item in file_classifications
+            if item.get("needs_review")
+        ]
     )
 
     all_pages: list[dict[str, Any]] = []
@@ -182,6 +202,16 @@ def load_chunks(state: AuditGraphState) -> AuditGraphState:
         "chunk_batch_ref": chunk_batch_ref,
         "chunk_batch_summary": (
             f"files={len(inserted_files)}, pages={len(inserted_pages)}, chunks={len(inserted_chunks)}"
+        ),
+        "categories_found": assigned_categories,
+        "recognized_categories": recognized_categories,
+        "file_classifications": file_classifications,
+        "unclassified_files": unclassified_files,
+        "parse_summary": _classification_parse_summary(
+            str(state.get("parse_summary") or ""),
+            assigned_categories=assigned_categories,
+            unclassified_files=unclassified_files,
+            manual_category=str(state.get("doc_category") or ""),
         ),
         "chunk_ids": chunk_ids,
         "upload_batch_summary": _merge_batch_summary(state.get("upload_batch_summary", {}), batch_row),
@@ -345,22 +375,81 @@ def _persist_doc_category_relations(
     state: AuditGraphState,
     case_id: int,
     inserted_files: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Persist source_file -> doc_category relationships for operator-selected category."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Persist manual or per-file automatic document-category relations."""
+    from ....annual_audit.document_repository import classify_uploaded_file_categories
+
     doc_category = str(state.get("doc_category", "") or "").strip()
-    if not doc_category:
-        return []
+    classifications = classify_uploaded_file_categories(
+        file_names=[str(item.get("file_name") or "") for item in inserted_files],
+        annual_import_summary=dict(state.get("annual_import_summary") or {}),
+        manual_category=doc_category,
+    )
+    files_by_name: dict[str, list[dict[str, Any]]] = {}
+    for file_row in inserted_files:
+        key = Path(str(file_row.get("file_name") or "")).name.casefold()
+        files_by_name.setdefault(key, []).append(file_row)
+
+    persisted_classifications: list[dict[str, Any]] = []
+    grouped_files: dict[tuple[str, str, float, bool], list[dict[str, Any]]] = {}
+    for item in classifications:
+        key = Path(str(item.get("file_name") or "")).name.casefold()
+        for file_row in files_by_name.get(key, []):
+            enriched = {**item, "file_id": int(file_row.get("id") or 0)}
+            persisted_classifications.append(enriched)
+            group_key = (
+                str(item.get("category_code") or ""),
+                str(item.get("match_source") or ""),
+                float(item.get("confidence") or 0),
+                bool(item.get("needs_review")),
+            )
+            grouped_files.setdefault(group_key, []).append(file_row)
+
     upsert_links = getattr(kg_service, "upsert_source_file_doc_categories", None)
     if not callable(upsert_links):
-        return []
-    return upsert_links(
-        case_id=case_id,
-        category_code=doc_category,
-        files=inserted_files,
-        match_source="manual",
-        confidence=1.0,
-        notes="operator selected category during upload",
-    )
+        return [], persisted_classifications
+
+    notes_by_source = {
+        "manual": "operator selected category during upload",
+        "structured_schema": "detected from one or more worksheet schemas",
+        "filename_hint": "inferred from the uploaded filename; accountant may correct it",
+        "auto_fallback": "automatic classification inconclusive; accountant review required",
+    }
+    category_rows: list[dict[str, Any]] = []
+    for (category, match_source, confidence, _needs_review), files in grouped_files.items():
+        category_rows.extend(
+            upsert_links(
+                case_id=case_id,
+                category_code=category,
+                files=files,
+                match_source=match_source,
+                confidence=confidence,
+                notes=notes_by_source.get(match_source, ""),
+            )
+        )
+    return category_rows, persisted_classifications
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if str(value).strip()))
+
+
+def _classification_parse_summary(
+    base_summary: str,
+    *,
+    assigned_categories: list[str],
+    unclassified_files: list[str],
+    manual_category: str,
+) -> str:
+    parts = [str(base_summary or "").strip().rstrip("。")]
+    manual_override = str(manual_category or "").strip().lower() not in {"", "auto"}
+    if manual_override:
+        parts.append(f"已按手工指定类别归档：{', '.join(assigned_categories)}")
+    elif assigned_categories:
+        parts.append(f"逐文件识别并归档类别：{', '.join(assigned_categories)}")
+    if unclassified_files:
+        parts.append(f"{len(unclassified_files)} 个文件暂无法可靠分类，已保留为待归类")
+    return "；".join(part for part in parts if part) + "。"
 
 
 def _build_duplicate_by_sha256(uploaded_files: list[dict[str, Any]]) -> dict[str, str]:

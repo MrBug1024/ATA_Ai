@@ -327,7 +327,11 @@ class KnowledgeGraphService:
             "case_id": case_id,
             "entity_id": int(summary.get("entity_id", 0) or 0),
             "batch_name": str(summary.get("batch_name", "") or ""),
-            "doc_category": str(summary.get("doc_category", "") or "") or None,
+            "doc_category": (
+                None
+                if str(summary.get("doc_category", "") or "").strip().lower() in {"", "auto"}
+                else str(summary.get("doc_category", "") or "").strip()
+            ),
             "operator_id": str(summary.get("operator_id", "") or ""),
             "operator_name": str(summary.get("operator_name", "") or ""),
             "status": str(summary.get("status", "") or "received"),

@@ -59,6 +59,7 @@ export interface AnnualAuditEvidenceLocator {
   page_no?: number;
   row_number?: number;
   row_start?: number;
+  [key: string]: unknown;
 }
 
 export interface AnnualAuditEvidenceReference {
@@ -67,6 +68,52 @@ export interface AnnualAuditEvidenceReference {
   source_chunk_id?: string;
   source_locator?: AnnualAuditEvidenceLocator;
   [key: string]: unknown;
+}
+
+export interface AnnualAuditEvidenceCategoryMatch {
+  code: string;
+  name: string;
+  match_source: string;
+  confidence?: number | null;
+}
+
+export interface AnnualAuditEvidenceSourceQuality {
+  code:
+    | "template"
+    | "derived"
+    | "auditor_generated"
+    | "external_candidate"
+    | "unverified_source"
+    | string;
+  label: string;
+  reason: string;
+}
+
+export interface AnnualAuditEvidenceLocatorOption extends AnnualAuditEvidenceReference {
+  label: string;
+}
+
+export interface AnnualAuditEvidenceCandidate {
+  source_file_id: number;
+  file_name: string;
+  content_type: string;
+  file_size_bytes: number;
+  created_at?: string | null;
+  page_count: number;
+  chunk_count: number;
+  categories: AnnualAuditEvidenceCategoryMatch[];
+  source_quality: AnnualAuditEvidenceSourceQuality;
+  locator_options: AnnualAuditEvidenceLocatorOption[];
+  default_reference: AnnualAuditEvidenceReference | null;
+  needs_manual_locator: boolean;
+}
+
+export interface AnnualAuditEvidenceCandidateResponse {
+  case_id: number;
+  query: string;
+  total: number;
+  limit: number;
+  items: AnnualAuditEvidenceCandidate[];
 }
 
 export interface AnnualAuditProgramItem {
@@ -265,10 +312,31 @@ export function annualAuditPolicyCatalogKey(): string {
   return casesUrl("/api/annual-audit/knowledge/policy-catalog");
 }
 
+export function annualAuditEvidenceCandidatesKey(
+  caseId: number,
+  query = "",
+  limit = 100
+): string {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (query.trim()) params.set("query", query.trim());
+  return casesUrl(`/api/annual-audit/${caseId}/evidence-candidates?${params}`);
+}
+
 export function getAnnualAuditExecution(caseId: number): Promise<AnnualAuditExecutionSnapshot> {
   return getJson<AnnualAuditExecutionSnapshot>(
     annualAuditExecutionKey(caseId),
     "获取年审执行工作台失败"
+  );
+}
+
+export function getAnnualAuditEvidenceCandidates(
+  caseId: number,
+  query = "",
+  limit = 100
+): Promise<AnnualAuditEvidenceCandidateResponse> {
+  return getJson<AnnualAuditEvidenceCandidateResponse>(
+    annualAuditEvidenceCandidatesKey(caseId, query, limit),
+    "获取项目证据候选失败"
   );
 }
 

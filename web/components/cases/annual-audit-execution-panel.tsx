@@ -11,16 +11,17 @@ import {
   FileWarning,
   LoaderCircle,
   Pencil,
+  Plus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { MeResponse } from "@/lib/backend/auth";
 import {
   type AnnualAuditDocumentCategory,
-  type AnnualAuditEvidenceReference,
   type AnnualAuditPolicyBinding,
   type AnnualAuditProgramItem,
   type AnnualAuditProgramItemUpdate,
@@ -34,6 +35,26 @@ import {
   type AnnualEngagementProfileUpdate,
   getAnnualAuditPolicyCatalog,
 } from "@/lib/backend/annual-audit";
+import {
+  type AlternativeProceduresDraft,
+  type AlternativeProcedureRowDraft,
+  type EvidenceAnchorDraft,
+  type ReviewScopeType,
+  type SamplingPlanDraft,
+  alternativeDraftToProcedures,
+  alternativeProceduresToDraft,
+  createAlternativeProcedureRow,
+  createEvidenceAnchorDraft,
+  evidenceAnchorValidationError,
+  evidenceDraftsToRefs,
+  evidenceRefsToDrafts,
+  reviewDraftToScope,
+  reviewScopeOptions,
+  reviewScopeToDraft,
+  samplingDraftToPlan,
+  samplingPlanToDraft,
+  samplingPlanValidationError,
+} from "@/lib/annual-audit-execution-form";
 import { canAccessModule, isSystemAdminPreview } from "@/lib/auth/authorization";
 import { useAuth } from "@/lib/hooks/use-auth";
 import { useAnnualAuditExecution } from "@/lib/hooks/use-annual-audit-execution";
@@ -41,6 +62,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Dialog,
@@ -99,6 +121,29 @@ const INDEPENDENCE_OPTIONS = [
   ["blocked", "存在障碍"],
   ["not_applicable", "不适用"],
 ] as const;
+
+const EVIDENCE_LOCATOR_OPTIONS = [
+  ["worksheet", "工作表/单元格"],
+  ["page", "文件页码"],
+  ["row", "数据行"],
+  ["chunk", "解析段落"],
+] as const;
+
+const SAMPLING_METHOD_OPTIONS = [
+  ["random", "随机抽样"],
+  ["systematic", "系统抽样"],
+  ["monetary_unit", "货币单元抽样"],
+  ["judgmental", "判断抽样"],
+  ["full_population", "全量检查"],
+  ["other", "其他"],
+] as const;
+
+const REVIEW_SCOPE_OPTIONS: ReadonlyArray<readonly [ReviewScopeType, string]> = [
+  ["engagement", "整个项目"],
+  ["phase", "指定阶段"],
+  ["cycle", "指定循环"],
+  ["procedure", "指定程序"],
+];
 
 function formatDate(value?: string | null): string {
   if (!value) return "-";
@@ -163,37 +208,6 @@ function canRecordReview(user: MeResponse | null, level: AnnualAuditReviewLevel)
   }
   if (level === "department_manager") return hasRole(user, ["reviewer", "engagement_partner"]);
   return hasRole(user, ["engagement_partner"]);
-}
-
-function parseStructured(value: string, label: string): Record<string, unknown> | unknown[] {
-  const text = value.trim();
-  if (!text) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(`${label}必须是有效 JSON`);
-  }
-  if (Array.isArray(parsed)) return parsed;
-  if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
-  throw new Error(`${label}必须是对象或数组`);
-}
-
-function parseEvidence(value: string): AnnualAuditEvidenceReference[] {
-  const parsed = parseStructured(value, "证据锚点");
-  if (!Array.isArray(parsed)) throw new Error("证据锚点必须是数组");
-  if (parsed.some((reference) => typeof reference !== "object" || reference === null)) {
-    throw new Error("证据锚点数组中的每项必须是对象");
-  }
-  return parsed as AnnualAuditEvidenceReference[];
-}
-
-function stringifyStructured(value: unknown, fallback: Record<string, never> | unknown[]): string {
-  try {
-    return JSON.stringify(value ?? fallback, null, 2);
-  } catch {
-    return JSON.stringify(fallback, null, 2);
-  }
 }
 
 function categoryLabel(category: AnnualAuditDocumentCategory | undefined, code: string): string {

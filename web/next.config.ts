@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   experimental: {
     optimizePackageImports: ["lucide-react", "@assistant-ui/react"],
   },
+  allowedDevOrigins:["127.0.0.1",'192.168.11.118','localhost'],
 };
 
 export default nextConfig;

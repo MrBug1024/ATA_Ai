@@ -39,6 +39,8 @@ def mark_upload_ingest_progress(
     text_file_content_refs: dict[str, str] | None = None,
     categories_found: list[str] | None = None,
     recognized_categories: list[str] | None = None,
+    file_classifications: list[dict[str, Any]] | None = None,
+    unclassified_files: list[str] | None = None,
     parse_summary: str = "",
     has_conclusion_changes: bool = False,
     reconciliation_item_count: int = 0,
@@ -69,6 +71,10 @@ def mark_upload_ingest_progress(
     }
     categories_found = list(categories_found or [])
     recognized_categories = list(recognized_categories or categories_found)
+    file_classifications = [
+        dict(item) for item in (file_classifications or []) if isinstance(item, dict)
+    ]
+    unclassified_files = list(unclassified_files or [])
     material_event_id = build_material_event_id(upload_batch_id)
 
     event_payload: dict[str, Any] = {
@@ -81,6 +87,10 @@ def mark_upload_ingest_progress(
         event_payload["categories_found"] = categories_found
     if recognized_categories:
         event_payload["recognized_categories"] = recognized_categories
+    if file_classifications:
+        event_payload["file_classifications"] = file_classifications
+    if unclassified_files:
+        event_payload["unclassified_files"] = unclassified_files
     if text_file_content_refs:
         event_payload["text_file_content_refs"] = text_file_content_refs
     if parse_summary:
@@ -124,6 +134,10 @@ def mark_upload_ingest_progress(
         batch_metadata["categories_found"] = categories_found
     if recognized_categories:
         batch_metadata["recognized_categories"] = recognized_categories
+    if file_classifications:
+        batch_metadata["file_classifications"] = file_classifications
+    if unclassified_files:
+        batch_metadata["unclassified_files"] = unclassified_files
     if text_file_content_refs:
         batch_metadata["text_file_content_refs"] = text_file_content_refs
     if parse_summary:
